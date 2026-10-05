@@ -149,7 +149,7 @@ export function startFakeLlm(opts: { port: number; script?: Step[]; logPath?: st
         : openAiStream(step, n, body.model, inputTokens)
     },
   })
-  return { port: server.port, requests, stop: () => server.stop(true) }
+  return { port: server.port ?? 0, requests, stop: () => server.stop(true) }
 }
 
 if (import.meta.main) {

@@ -1,0 +1,203 @@
+// 假 ACP 服务（代替 dsh）：按消息里的指令行事，能调用网关的 MCP 工具、报错、卡住、崩溃。
+// 状态落盘（会话历史、收到的每个 prompt），这样网关被强杀重启后还能核对"模型有没有两次看到同一条消息"。
+//
+// 指令写在用户消息里（只看本轮最后一个内容块）：
+//   !err:N:tag        这个会话接下来 N 次请求都返回 turn failed（上游 500），补救提示也算
+//   !errauth          返回鉴权失败
+//   !hang:N:tag       前 N 次卡住，直到收到 session/cancel
+//   !hangforever:N:tag 前 N 次卡住，收到 cancel 也不理
+//   !crash:N:tag      前 N 次在记下 prompt 后直接退出进程
+//   !noreply:N:tag    前 N 次什么工具都不调就结束
+//   !silent           调用 stay_silent
+//   !parts:K          回复 K 段
+//   !replyto:ID       回复时引用消息 ID
+//   !file:PATH        回复时附带文件
+//   !slow:MS          回复前等 MS 毫秒
+//   !react:ID         给消息 ID 加 ❤️
+// 没有指令时回复"收到：<对方最后一句>"；补救提示（⟦系统…）回复"接着刚才的说"。
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { join } from 'path'
+
+const argv = process.argv.slice(2)
+const get = (n: string) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : undefined }
+const stateDir = get('state')!
+const patchPath = get('patch')
+mkdirSync(stateDir, { recursive: true })
+
+const P = (f: string) => join(stateDir, f)
+const readJson = <T>(f: string, d: T): T => { try { return JSON.parse(readFileSync(P(f), 'utf8')) as T } catch { return d } }
+const writeJson = (f: string, v: unknown) => writeFileSync(P(f), JSON.stringify(v, null, 1))
+const log = (f: string, v: unknown) => appendFileSync(P(f), JSON.stringify({ pid: process.pid, at: Date.now(), ...v as object }) + '\n')
+
+writeJson(`env-${process.pid}.json`, process.env)
+if (patchPath && existsSync(patchPath)) writeFileSync(P('patch-seen.json'), readFileSync(patchPath))
+log('lifecycle.jsonl', { event: 'start', argv })
+
+type Sess = { cwd: string; history: string[]; mcp: { url: string; headers: { name: string; value: string }[] } | null; model: string; effort: string; closed?: boolean }
+const sessions: Record<string, Sess> = readJson('sessions.json', {})
+const loadedHere = new Set<string>()
+const counters: Record<string, number> = readJson('counters.json', {})
+const saveSessions = () => writeJson('sessions.json', sessions)
+const bump = (k: string) => { counters[k] = (counters[k] ?? 0) + 1; writeJson('counters.json', counters); return counters[k]! }
+
+const cancels = new Map<string, () => void>()
+
+function send(f: object) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...f }) + '\n') }
+function update(sessionId: string, u: object) { send({ method: 'session/update', params: { sessionId, update: u } }) }
+
+const MODELS = ['deepseek-flash', 'deepseek-v4-pro', 'other-model']
+function configOptions(s: Sess) {
+  return [
+    { id: 'model', name: 'Model', type: 'select', currentValue: s.model, options: [{ group: 'deepseek-official', options: MODELS.map(m => ({ value: JSON.stringify(['deepseek-official', m]), name: m })) }] },
+    { id: 'reasoning_effort', name: 'Effort', type: 'select', currentValue: s.effort, options: ['off', 'low', 'high', 'max'].map(v => ({ value: v, name: v })) },
+  ]
+}
+
+let mcpSeq = 1
+async function callTool(s: Sess, sessionId: string, name: string, args: object): Promise<string> {
+  if (!s.mcp) return 'no mcp'
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  for (const h of s.mcp.headers) headers[h.name] = h.value
+  update(sessionId, { sessionUpdate: 'tool_call', toolCallId: `t${mcpSeq}`, title: name, status: 'pending' })
+  const res = await fetch(s.mcp.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: mcpSeq++, method: 'tools/call', params: { name, arguments: args } }) })
+  const body = await res.json() as any
+  const text = String(body?.result?.content?.[0]?.text ?? body?.error?.message ?? `http ${res.status}`)
+  log('tool-results.jsonl', { sessionId, name, args, text, isError: body?.result?.isError === true })
+  update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: `t${mcpSeq}`, status: 'completed' })
+  return text
+}
+
+function directive(text: string, name: string): string[] | null {
+  const m = text.match(new RegExp(`!${name}(?![a-z])(?::([^\\s:]+))?(?::([^\\s]+))?`))
+  return m ? [m[1] ?? '', m[2] ?? ''] : null
+}
+/** !name:N:tag 形式：前 N 次生效 */
+function firstN(text: string, name: string): boolean {
+  const d = directive(text, name)
+  if (!d) return false
+  const n = Number(d[0] || 1)
+  return bump(`${name}:${d[1]}`) <= n
+}
+
+function lastUserLine(text: string): string {
+  const lines = text.split('\n').filter(l => l.trim() && !l.startsWith('⟦'))
+  return (lines[lines.length - 1] ?? '').replace(/![a-z]+(?::\S+)?/g, '').trim()
+}
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+
+async function prompt(id: number, sessionId: string, blocks: { type: string; text?: string }[]) {
+  const s = sessions[sessionId]
+  if (!s || !loadedHere.has(sessionId)) return send({ id, error: { code: -32602, message: 'unknown session' } })
+  const texts = blocks.map(b => b.text ?? '')
+  const all = texts.join('\n')
+  const last = texts[texts.length - 1] ?? ''
+  // 和真 dsh 一样：先把用户消息记进历史，之后无论成败都留着
+  s.history.push(all)
+  saveSessions()
+  log('prompts.jsonl', { sessionId, text: all, blocks: texts.length, model: s.model })
+  update(sessionId, { sessionUpdate: 'usage_update', used: s.history.join('').length, size: 1_000_000 })
+
+  if (firstN(last, 'crash')) { log('lifecycle.jsonl', { event: 'crash' }); process.exit(3) }
+  if (directive(last, 'errauth')) return send({ id, error: { code: -32603, message: 'turn failed: MISSING_CREDENTIAL deepseek-official requires DEEPSEEK_API_KEY' } })
+  // !err 和真上游一样"粘"在会话上：一旦触发，这个会话接下来的 N 次请求都失败（包括补救提示）
+  const errD = directive(last, 'err')
+  if (errD && !counters[`err-armed:${errD[1]}`]) { counters[`err-armed:${errD[1]}`] = 1; counters[`err-left:${sessionId}`] = Number(errD[0] || 1); writeJson('counters.json', counters) }
+  if ((counters[`err-left:${sessionId}`] ?? 0) > 0) {
+    counters[`err-left:${sessionId}`]!--
+    writeJson('counters.json', counters)
+    return send({ id, error: { code: -32603, message: 'turn failed: upstream returned 500 Internal Server Error' } })
+  }
+  if (firstN(last, 'hangforever')) { await new Promise(() => {}); return }
+  if (firstN(last, 'hang')) {
+    await new Promise<void>(r => cancels.set(sessionId, r))
+    cancels.delete(sessionId)
+    return send({ id, result: { stopReason: 'cancelled' } })
+  }
+  if (firstN(last, 'noreply')) { update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '（自言自语）' } }); return send({ id, result: { stopReason: 'end_turn' } }) }
+  const slow = directive(last, 'slow')
+  if (slow) await sleep(Number(slow[0]) || 500)
+  if (directive(last, 'silent')) {
+    await callTool(s, sessionId, 'stay_silent', { reason: 'test' })
+    return send({ id, result: { stopReason: 'end_turn' } })
+  }
+  const react = directive(last, 'react')
+  if (react) await callTool(s, sessionId, 'react', { message_id: Number(react[0]), emoji: '❤️' })
+  const parts = Number(directive(last, 'parts')?.[0] || 1)
+  const base = last.startsWith('⟦系统') ? '接着刚才的说' : `收到：${lastUserLine(last)}`
+  const text = parts > 1 ? Array.from({ length: parts }, (_, i) => `${base}（第${i + 1}段）`).join('\n\n') : base
+  const args: Record<string, unknown> = { text }
+  const rt = directive(last, 'replyto')
+  if (rt) args.reply_to = Number(rt[0])
+  const file = directive(last, 'file')
+  if (file) args.files = [file[0]]
+  await callTool(s, sessionId, 'reply', args)
+  update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '好' } })
+  send({ id, result: { stopReason: 'end_turn' } })
+}
+
+let sessionSeq = Object.keys(sessions).length
+async function handle(f: any) {
+  if (f.id === undefined) {
+    if (f.method === 'session/cancel') { log('cancels.jsonl', { sessionId: f.params?.sessionId }); cancels.get(f.params?.sessionId)?.() }
+    return
+  }
+  const p = f.params ?? {}
+  switch (f.method) {
+    case 'initialize':
+      return send({ id: f.id, result: { protocolVersion: 1, agentInfo: { name: 'fake-acp', version: '0.0.0' }, agentCapabilities: { loadSession: false } } })
+    case 'session/new': {
+      const sid = `fake-${process.pid}-${++sessionSeq}`
+      const http = (p.mcpServers ?? []).find((m: any) => m.type === 'http')
+      sessions[sid] = { cwd: p.cwd, history: [], mcp: http ? { url: http.url, headers: http.headers ?? [] } : null, model: JSON.stringify(['deepseek-official', 'deepseek-flash']), effort: 'off' }
+      loadedHere.add(sid)
+      saveSessions()
+      log('sessions.jsonl', { event: 'new', sessionId: sid })
+      return send({ id: f.id, result: { sessionId: sid, configOptions: configOptions(sessions[sid]!) } })
+    }
+    case 'session/resume': {
+      const s = sessions[p.sessionId]
+      if (!s || s.closed) return send({ id: f.id, error: { code: -32602, message: 'session not found' } })
+      if (s.cwd !== p.cwd) return send({ id: f.id, error: { code: -32602, message: 'cwd mismatch' } })
+      if (loadedHere.has(p.sessionId)) return send({ id: f.id, error: { code: -32602, message: 'already loaded' } })
+      const http = (p.mcpServers ?? []).find((m: any) => m.type === 'http')
+      s.mcp = http ? { url: http.url, headers: http.headers ?? [] } : null
+      loadedHere.add(p.sessionId)
+      saveSessions()
+      log('sessions.jsonl', { event: 'resume', sessionId: p.sessionId })
+      return send({ id: f.id, result: { configOptions: configOptions(s) } })
+    }
+    case 'session/set_config_option': {
+      const s = sessions[p.sessionId]
+      if (!s) return send({ id: f.id, error: { code: -32602, message: 'unknown session' } })
+      log('config.jsonl', { sessionId: p.sessionId, configId: p.configId, value: p.value })
+      if (p.configId === 'model') s.model = p.value
+      if (p.configId === 'reasoning_effort') s.effort = p.value
+      saveSessions()
+      return send({ id: f.id, result: { configOptions: configOptions(s) } })
+    }
+    case 'session/list':
+      return send({ id: f.id, result: { sessions: [] } })
+    case 'session/close':
+      if (sessions[p.sessionId]) { sessions[p.sessionId]!.closed = true; saveSessions() }
+      return send({ id: f.id, result: {} })
+    case 'session/prompt':
+      return void prompt(f.id, p.sessionId, p.prompt ?? []).catch(e => send({ id: f.id, error: { code: -32603, message: `turn failed: ${e?.message}` } }))
+    default:
+      return send({ id: f.id, error: { code: -32601, message: `method not found: ${f.method}` } })
+  }
+}
+
+const dec = new TextDecoder()
+let buf = ''
+for await (const chunk of Bun.stdin.stream()) {
+  buf += dec.decode(chunk, { stream: true })
+  let i: number
+  while ((i = buf.indexOf('\n')) >= 0) {
+    const line = buf.slice(0, i).trim()
+    buf = buf.slice(i + 1)
+    if (line) void handle(JSON.parse(line))
+  }
+}
+log('lifecycle.jsonl', { event: 'stdin-closed' })
+process.exit(0)
