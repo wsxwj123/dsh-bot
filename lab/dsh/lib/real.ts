@@ -1,6 +1,5 @@
 // 需要真实密钥的验证脚本共用的小工具：读参数、检查密钥、起用量记录代理、跑一个 dsh 会话。
 import { readFileSync } from 'fs'
-import { basename } from 'path'
 import { AcpClient } from './acp-client'
 import { dshCmd, dshEnv, makeSandbox, samplePersona, type Sandbox } from './profile'
 import { deepseekUpstream, startUsageTap, type Tap, type TapRecord } from './usage-tap'
@@ -12,6 +11,8 @@ export type RealArgs = {
   model: string
   effort: 'off' | 'low' | 'high' | 'max'
   tapPort: number
+  /** 只出数字：报告里不写模型按人设说出的任何文字（回复、摘要、回答）。用自己的人设时默认打开。 */
+  numbersOnly: boolean
 }
 
 export function parseArgs(argv = process.argv.slice(2)): RealArgs {
@@ -22,12 +23,15 @@ export function parseArgs(argv = process.argv.slice(2)): RealArgs {
   const personaPath = get('persona')
   const effort = (get('effort') ?? 'low') as RealArgs['effort']
   if (!['off', 'low', 'high', 'max'].includes(effort)) throw new Error(`--effort 只能是 off/low/high/max`)
+  // 用自己的人设时默认只出数字；确实想看文字（只给自己看、不上传）时加 --with-text
+  const numbersOnly = argv.includes('--numbers-only') || (personaPath !== undefined && !argv.includes('--with-text'))
   return {
     persona: personaPath ? readFileSync(personaPath, 'utf8') : samplePersona(),
-    personaLabel: personaPath ? `自定义人设（${basename(personaPath)}）` : '仓库示例人设 channels/chenlulu/CLAUDE.md',
+    personaLabel: personaPath ? '自定义人设（路径不记录）' : '仓库示例人设 channels/chenlulu/CLAUDE.md',
     model: get('model') ?? 'deepseek-v4-flash',
     effort,
     tapPort: Number(get('tap-port') ?? 18190),
+    numbersOnly,
   }
 }
 

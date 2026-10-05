@@ -72,12 +72,32 @@ bun lab/dsh/real/real-04-builtin-compaction.ts
 
 用 `deepseek-v4-flash` 时，四个脚本的输入加起来大约几十万 token，而且大部分会命中缓存。
 
+### 用自己的人设时："只出数字"
+
+- 加了 `--persona` 时，脚本默认进入"只出数字"模式：报告里不写模型按人设说出的任何文字（回复、摘要、回答），只保留用量数字和"是 / 否"式的自动检查。
+- 只想自己看文字、不上传的话，加 `--with-text`。
+- 用示例人设时也想只出数字，加 `--numbers-only`。
+
 ### 跑完贴什么
 
 每个脚本最后都会打印报告文件的路径，路径形如 `lab/dsh/.runs/real-0X-<时间>/report.md`，把这几个 `report.md` 贴回来就行。
 
 - 用的是示例人设：报告里只有合成对话和数字，可以整份贴。
 - 用的是你自己的人设：报告里会有 bot 按你的人设说的话。请删掉"模型可见回复"和"交接摘要"两节再贴，只留数字。
+
+## 3. 现有部署的脱敏盘点与用量基线（在作者本机跑，只读）
+
+```bash
+python3 lab/dsh/local/inventory.py --repo <旧仓库目录> --out INVENTORY.md
+python3 lab/dsh/local/baseline_claude_usage.py --days 30 --out BASELINE.md
+```
+
+- `inventory.py`：列出各 bot 目录里有哪些文件、配置里有哪些字段、人设有多长、有几处 `{{…}}`、对应的 Claude Code 会话目录有多大、装了哪些 launchd 任务，以及各工具的版本。
+- `baseline_claude_usage.py`：从旧的 Claude Code 会话文件里统计每次请求的输入、缓存命中率、输出（按 message.id 去重）。新系统上线后用同一口径对比。
+- 两个脚本都只输出结构和数字，不输出任何内容、ID、密钥。bot 名默认换成 bot1、bot2……（`--keep-names` 才保留）。
+- 只依赖 Python 标准库。
+
+本机 AI 的完整任务书见 `docs/dsh-migration/LOCAL-AGENT-PROMPT.md`。
 
 ## 目录
 
@@ -93,4 +113,6 @@ lab/dsh/
   offline/facts.ts    离线事实核对（21 项）
   offline/dry-run-real.ts  用假模型演练真密钥脚本
   real/real-0*.ts     真密钥脚本
+  local/inventory.py  现有部署脱敏盘点
+  local/baseline_claude_usage.py  旧部署用量基线
 ```

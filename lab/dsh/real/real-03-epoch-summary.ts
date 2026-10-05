@@ -14,12 +14,13 @@ requireKey()
 const args = parseArgs()
 const out = runsDir(`real-03-${Date.now()}`)
 const report = new Report(out, '真密钥验证 03：分段续聊（我们自己写摘要、新会话补回原话）')
-report.line(`dsh 版本：${await dshVersion()}；模型：${args.model}；思考强度：${args.effort}；人设：${args.personaLabel}`)
+report.line(`dsh 版本：${await dshVersion()}；模型：${args.model}；思考强度：${args.effort}；人设：${args.personaLabel}；只出数字：${args.numbersOnly ? '是' : '否'}`)
 
 // ── 本机假发送：记录 bot 真正“发出去”的话；写摘要那一轮锁住 ──
 type Line = { who: '对方' | '我'; text: string; at: string }
 const transcript: Line[] = []
 let locked = false
+let lockedAttempts = 0
 const SECRET = crypto.randomUUID()
 const tools: McpTool[] = [{
   name: 'reply',
@@ -27,7 +28,7 @@ const tools: McpTool[] = [{
   inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
   async call(a, { headers }) {
     if (headers.get('authorization') !== `Bearer ${SECRET}`) return { text: '拒绝：口令不对', isError: true }
-    if (locked) return { text: '现在是整理记忆时间，不能发消息。请直接输出摘要正文。', isError: true }
+    if (locked) { lockedAttempts++; return { text: '现在是整理记忆时间，不能发消息。请直接输出摘要正文。', isError: true } }
     transcript.push({ who: '我', text: String(a.text ?? ''), at: new Date().toISOString() })
     return { text: '已送达 1 段' }
   },
@@ -121,13 +122,32 @@ try {
 await tap.settled()
 tap.stop()
 
-report.h(2, '合成对话里 bot 实际发出去的话（经 reply 工具）')
-report.table(['谁', '内容'], transcript.map(l => [l.who, l.text]))
-report.h(2, '模型写出的交接摘要')
-report.block(summary || '（没有拿到摘要文本）')
-report.h(2, '新会话（只给摘要 + 最近 4 条原话）的回答')
-report.block(recall || '（这一轮没有调用 reply）')
-report.line(`新会话首条消息的字数：${seedChars}`)
+// ── 自动检查（只看是否包含关键信息，不受“只出数字”影响）──
+const headings = ['【我说过的要紧话】', '【我答应过的事】', '【对方的情况】', '【正在聊的话题】', '【我们现在的关系和气氛】']
+const facts: [string, RegExp][] = [['小林', /小林/], ['猫叫豆豆', /豆豆/], ['下周三出差', /周三/], ['去成都', /成都/], ['在看《活着》', /活着/], ['提醒打电话', /电话/]]
+const botLines = transcript.filter(l => l.who === '我').length
+report.h(2, '自动检查')
+report.table(['检查项', '结果'], [
+  ['第 1 段里 bot 经 reply 发出的消息条数', botLines],
+  ['写摘要那一轮模型有没有试图调用 reply（被锁拦下的次数）', lockedAttempts],
+  ['摘要五个小标题齐全', headings.every(h => summary.includes(h)) ? '是' : `否（缺：${headings.filter(h => !summary.includes(h)).join('、')}）`],
+  ...facts.map(([name, re]): [string, string] => [`摘要提到「${name}」`, re.test(summary) ? '是' : '否']),
+  ['新会话回答提到猫叫豆豆', /豆豆/.test(recall) ? '是' : '否'],
+  ['新会话回答提到周三', /周三/.test(recall) ? '是' : '否'],
+  ['摘要字数', summary.length],
+  ['新会话首条消息字数', seedChars],
+])
+if (args.numbersOnly) {
+  report.h(2, '对话、摘要与回答')
+  report.line('（只出数字模式：不记录 bot 说的话、摘要正文和回答正文，只保留上面的自动检查。）')
+} else {
+  report.h(2, '合成对话里 bot 实际发出去的话（经 reply 工具）')
+  report.table(['谁', '内容'], transcript.map(l => [l.who, l.text]))
+  report.h(2, '模型写出的交接摘要')
+  report.block(summary || '（没有拿到摘要文本）')
+  report.h(2, '新会话（只给摘要 + 最近 4 条原话）的回答')
+  report.block(recall || '（这一轮没有调用 reply）')
+}
 report.h(2, '用量')
 usageTable(report, tap.records, r => labelOf.get(r.n) ?? '')
 const sumRec = tap.records.filter(r => labelOf.get(r.n) === '写摘要')

@@ -13,7 +13,7 @@ requireKey()
 const args = parseArgs()
 const out = runsDir(`real-01-${Date.now()}`)
 const report = new Report(out, '真密钥验证 01：只留人设后的实际输入 token')
-report.line(`dsh 版本：${await dshVersion()}；模型：${args.model}；思考强度：${args.effort}；人设：${args.personaLabel}（${args.persona.length} 字符）`)
+report.line(`dsh 版本：${await dshVersion()}；模型：${args.model}；思考强度：${args.effort}；人设：${args.personaLabel}（${args.persona.length} 字符）；只出数字：${args.numbersOnly ? '是' : '否'}`)
 
 const tap = startDeepseekTap(args.tapPort)
 const route = { kind: 'deepseek' as const, model: args.model }
@@ -37,7 +37,7 @@ for (const [name, rows] of configs) {
       const r = await c.prompt(sid, t)
       await tap.settled()
       for (const rec of tap.records.slice(before)) labelOf.set(rec.n, `${name} · 第${turns.indexOf(t) + 1}轮`)
-      replies.push([name, t, r.stopReason, c.messageText(sid, from).slice(0, 60)])
+      replies.push([name, t, r.stopReason, c.messageText(sid, from)])
       await Bun.sleep(3000) // 给供应商建缓存留一点时间
     }
   } catch (e: any) {
@@ -52,8 +52,14 @@ tap.stop()
 
 report.h(2, '每个请求的用量（DeepSeek 回报值）')
 usageTable(report, tap.records, r => labelOf.get(r.n) ?? '')
-report.h(2, '模型可见回复（只截前 60 字；用自己人设时可删掉这一节再贴）')
-report.table(['配置', '发送', 'stopReason', '回复（模型直接输出的文本）'], replies)
+if (args.numbersOnly) {
+  report.h(2, '模型可见回复')
+  report.line('（只出数字模式：不记录回复内容。）')
+  report.table(['配置', '发送', 'stopReason', '回复字数'], replies.map(([n, t, s, r]) => [n, t, s, r.length]))
+} else {
+  report.h(2, '模型可见回复（只截前 60 字）')
+  report.table(['配置', '发送', 'stopReason', '回复（模型直接输出的文本）'], replies.map(([n, t, st, r]) => [n, t, st, r.slice(0, 60)]))
+}
 
 const first = (name: string) => tap.records.find(r => labelOf.get(r.n) === `${name} · 第1轮`)?.usage.input
 const a = first('A 出厂+人设'), b = first('B 只留人设'), cc = first('C 出厂无人设')

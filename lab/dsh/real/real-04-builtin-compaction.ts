@@ -14,7 +14,7 @@ const extraArg = process.argv.indexOf('--extra')
 const EXTRA = extraArg >= 0 ? Number(process.argv[extraArg + 1]) : 6000
 const out = runsDir(`real-04-${Date.now()}`)
 const report = new Report(out, '真密钥验证 04：出厂压缩何时触发')
-report.line(`dsh 版本：${await dshVersion()}；模型：${args.model}；思考强度：${args.effort}`)
+report.line(`dsh 版本：${await dshVersion()}；模型：${args.model}；思考强度：${args.effort}；人设：${args.personaLabel}；只出数字：${args.numbersOnly ? '是' : '否'}`)
 
 const tap = startDeepseekTap(args.tapPort)
 const route = { kind: 'deepseek' as const, model: args.model }
@@ -86,7 +86,10 @@ for (const vr of results) {
   if (vr.error) report.line(`**失败**：${vr.error}`)
   report.table(['轮', 'dsh 估（usage_update.used）', 'DeepSeek 回报的输入', '本轮压缩请求数'], vr.perTurn)
   report.line(vr.compactTurns.length ? `在第 ${vr.compactTurns.join('、')} 轮发生压缩。` : '没有发生压缩（即使估值已超过阈值）。')
-  if (vr.summary) { report.h(3, '出厂压缩写出的摘要（前 1500 字）'); report.block(vr.summary.slice(0, 1500)) }
+  if (vr.summary) {
+    report.line(`摘要是否为英文“编程助手检查点”格式（含 ## Primary Request and Intent）：${/Primary Request and Intent/.test(vr.summary) ? '是' : '否'}；摘要字数 ${vr.summary.length}`)
+    if (!args.numbersOnly) { report.h(3, '出厂压缩写出的摘要（前 1500 字）'); report.block(vr.summary.slice(0, 1500)) }
+  }
 }
 report.h(2, '每个请求的用量')
 usageTable(report, tap.records, r => labelOf.get(r.n) ?? '')
