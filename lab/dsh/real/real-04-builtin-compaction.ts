@@ -1,8 +1,8 @@
 // 真密钥验证 04：dsh 出厂压缩（compaction-basic）在真实分词下何时触发、写出的摘要长什么样；
 // 顺带核对 dsh 自己估的上下文大小（ACP usage_update.used，压缩就是拿它和阈值比）与 DeepSeek 回报的输入 token 差多少。
-// 做法：先开一个会话发一句话，读出 dsh 估的大小 U0；把阈值设成 U0 + 6000（--extra 可改），保留最近 2000 token 原文；
+// 做法：先开一个会话发一句话，读出 dsh 估的大小 U0；把阈值设成 U0 + 1500（--extra 可改），保留最近 2000 token 原文；
 // 然后分别用“保留最近 2000 / 500 token 原文”各聊最多 20 轮，记录何时压缩、压缩写出什么。
-// 用法：DEEPSEEK_API_KEY=sk-... DSH=<dsh 路径> bun lab/dsh/real/real-04-builtin-compaction.ts [--persona 路径] [--extra 6000]
+// 用法：DEEPSEEK_API_KEY=sk-... DSH=<dsh 路径> bun lab/dsh/real/real-04-builtin-compaction.ts [--persona 路径] [--extra 1500]
 import { AcpClient } from '../lib/acp-client'
 import { dshVersion, personaOnlyRows, runsDir } from '../lib/profile'
 import { parseArgs, requireKey, sandboxFor, startBot, startDeepseekTap, newSession, usageTable } from '../lib/real'
@@ -11,7 +11,7 @@ import { Report } from '../lib/report'
 requireKey()
 const args = parseArgs()
 const extraArg = process.argv.indexOf('--extra')
-const EXTRA = extraArg >= 0 ? Number(process.argv[extraArg + 1]) : 6000
+const EXTRA = extraArg >= 0 ? Number(process.argv[extraArg + 1]) : 1500
 const out = runsDir(`real-04-${Date.now()}`)
 const report = new Report(out, '真密钥验证 04：出厂压缩何时触发')
 report.line(`dsh 版本：${await dshVersion()}；模型：${args.model}；思考强度：${args.effort}；人设：${args.personaLabel}；只出数字：${args.numbersOnly ? '是' : '否'}`)
@@ -85,7 +85,12 @@ for (const vr of results) {
   report.h(2, `保留最近 ${vr.retain} token：每轮 dsh 估的大小 vs DeepSeek 回报的输入`)
   if (vr.error) report.line(`**失败**：${vr.error}`)
   report.table(['轮', 'dsh 估（usage_update.used）', 'DeepSeek 回报的输入', '本轮压缩请求数'], vr.perTurn)
-  report.line(vr.compactTurns.length ? `在第 ${vr.compactTurns.join('、')} 轮发生压缩。` : '没有发生压缩（即使估值已超过阈值）。')
+  const maxUsed = Math.max(0, ...vr.perTurn.map(r => Number(r[1]) || 0))
+  report.line(vr.compactTurns.length
+    ? `在第 ${vr.compactTurns.join('、')} 轮发生压缩。`
+    : maxUsed >= thresholdTokens
+      ? `没有发生压缩，但 dsh 估值最高 ${maxUsed} 已超过阈值 ${thresholdTokens}。`
+      : `没有发生压缩：dsh 估值最高 ${maxUsed}，没到阈值 ${thresholdTokens}（可用 --extra 调低阈值重跑）。`)
   if (vr.summary) {
     report.line(`摘要是否为英文“编程助手检查点”格式（含 ## Primary Request and Intent）：${/Primary Request and Intent/.test(vr.summary) ? '是' : '否'}；摘要字数 ${vr.summary.length}`)
     if (!args.numbersOnly) { report.h(3, '出厂压缩写出的摘要（前 1500 字）'); report.block(vr.summary.slice(0, 1500)) }
