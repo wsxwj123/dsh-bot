@@ -67,7 +67,10 @@ test('文件白名单：目录外、相对路径、符号链接逃逸一律拒�
 })
 
 test('给模型的发送结果说明', () => {
-  expect(describeResults([{ index: 1, kind: 'text', state: 'sent' }]).text).toBe('已送达 1/1 段。')
+  expect(describeResults([{ index: 1, kind: 'text', state: 'sent' }]).text).toStartWith('已送达 1/1 段。对方已经看到了')
+  const dup = describeResults([{ index: 1, kind: 'text', state: 'duplicate' }, { index: 2, kind: 'text', state: 'sent' }])
+  expect(dup.text).toContain('第 1 段和这一轮已经发出的话相同')
+  expect(dup.isError).toBe(false)
   const d = describeResults([{ index: 1, kind: 'text', state: 'sent' }, { index: 2, kind: 'text', state: 'failed', reason: 'Telegram 拒收' }])
   expect(d.text).toContain('第 2 段未送达')
   expect(d.delivered).toBe(1)

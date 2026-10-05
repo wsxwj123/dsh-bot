@@ -83,3 +83,23 @@ test('前情：对方说的 + bot 真正发出去的，按时间排，有字数�
   expect(tr.map(e => `${e.who}:${e.text}`)).toEqual(['user:早上好', 'bot:早呀'])
   expect(l.recentTranscript('1', { maxChars: 2 }).length).toBe(1)
 })
+
+test('回复发到一半中断：能认出来；整段发完的不算', () => {
+  const l = new Ledger(':memory:')
+  const id = msg(l, '1', 'a', 1)
+  const seg = l.createSegment('1', 'tok', false)
+  const t = l.startTurn({ chatId: '1', segmentId: seg.id, kind: 'message', inboundIds: [id], attempt: 0 })
+  l.markTurnSent(t.id)
+  const o1 = l.outboundIntent({ okey: `turn:${t.id}:c1:p1`, chatId: '1', turnId: t.id, part: 1, ofParts: 3, kind: 'text', text: 'x' })
+  l.outboundResult(o1, 'sent', { tgMessageId: 1 })
+  l.recoverOnStartup(3)
+  expect(l.interruptedReply('1')).toEqual({ sent: 1, total: 3 })
+  const t2 = l.startTurn({ chatId: '1', segmentId: l.createSegment('1', 'tok2', true).id, kind: 'message', inboundIds: [], attempt: 0 })
+  l.finishTurn(t2.id, 'ok')
+  expect(l.interruptedReply('1')).toBeNull()
+})
+
+test('老账本自动补列', () => {
+  const l = new Ledger(':memory:')
+  expect(l.db.query('PRAGMA table_info(outbound)').all().some((c: any) => c.name === 'of_parts')).toBe(true)
+})

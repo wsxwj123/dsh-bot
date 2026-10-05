@@ -691,6 +691,7 @@ Python 周边（定时任务，基本保留）：主动消息、情绪、导演�
 - 新系统在 M1 就支持按 bot 配置 dsh 的 `llm-pi-ai` 路由，协议可选 `anthropic-messages`、`openai-completions` 等，地址和模型名都写在配置里。你的 provider-proxy 原本服务 Claude Code，应该说的是 Anthropic Messages 协议，可以直接接上。
 - 默认模型按你的选择用 `deepseek-flash`。
 - **需要你补一个信息**：provider-proxy 的地址，以及 gemini 模型的上下文窗口。M1 真机验收时再填就行。
+- 已查到（M1 真机验收，见 `docs/dsh-migration/M1.md` 第五节）：proxy 在 `127.0.0.1:8770`，Anthropic Messages 和 OpenAI 兼容两种协议都支持，模型名 `gemini-3.8-flash-high`。还缺访问密钥和上下文窗口。
 
 ### 10.5 版本
 

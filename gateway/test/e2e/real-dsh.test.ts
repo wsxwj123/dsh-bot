@@ -3,6 +3,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
+import { isAlive } from '../../src/dsh/process'
 import { startFakeLlm, type FakeLlm } from '../../../lab/dsh/lib/fake-llm'
 import { FakeTelegram } from '../fakes/fake-telegram'
 import { cleanup, Gateway, makeBot, OWNER, sleep, until, writeConfig, type BotEnv } from '../harness'
@@ -98,4 +99,16 @@ test.skipIf(!available)('真 dsh：改配置换模型，下一轮请求就用新
   expect(req.body.model).toBe('fake-chat-2')
   expect(JSON.stringify(req.body.messages)).toContain('[model changed:')
   expect(JSON.parse(readFileSync(join(b.botDir, 'state', 'dsh.pid'), 'utf8')).pid).toBe(pid)
+})
+
+test.skipIf(!available)('真 dsh：网关被强杀后，旧 dsh 不会一直留着（自己退出，或者网关重启时被清理）', async () => {
+  const pid = JSON.parse(readFileSync(join(b.botDir, 'state', 'dsh.pid'), 'utf8')).pid
+  expect(isAlive(pid)).toBe(true)
+  // 空闲的 dsh 标准输入一关就退出；正在处理一轮的，会先把这一轮做完（期间调我们的工具都会失败，发不出任何消息）。
+  // Windows 上子进程不会因为父进程退出而结束。所以统一用"重启网关后旧进程一定不在了"来验收。
+  await gw.kill()
+  await gw.start({ DSH_BOT_HARNESS: harness })
+  await until(() => !isAlive(pid), 'old dsh is gone after the gateway restarts', 20_000)
+  tg.pushText(OWNER, 'realC')
+  await until(() => llm.requests.some(r => JSON.stringify(r.body.messages).includes('realC')), 'new dsh works', 60_000)
 })

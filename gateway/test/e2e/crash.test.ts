@@ -2,6 +2,7 @@
 // 判断依据只看外部：假 Telegram 收到的发送、假模型（假 ACP）看到的历史、账本。
 import { afterEach, expect, test } from 'bun:test'
 import { FakeTelegram } from '../fakes/fake-telegram'
+import { isAlive } from '../../src/dsh/process'
 import { cleanup, Gateway, lifecycle, makeBot, maxTimesSeen, OWNER, prompts, sleep, until, type BotEnv } from '../harness'
 
 let tg: FakeTelegram | null = null
@@ -46,9 +47,13 @@ test('时刻二：消息已经送进 dsh，模型还在想', async () => {
   await until(() => texts(tg, 'warmupB').length > 0, 'warmup reply')
   const mid = tg.pushText(OWNER, 'crashB !hang:1:b')
   await until(() => prompts(b).some(p => p.text.includes('crashB')), 'prompt reached dsh')
+  const oldDsh = prompts(b).find(p => p.text.includes('crashB'))!.pid
   await gw.kill()
-  await until(() => lifecycle(b).some(l => l.event === 'stdin-closed'), 'old dsh exits when the gateway dies', 10_000)
+  // Mac / Linux：网关一死，dsh 的标准输入关闭，自己退出。
+  // Windows：子进程可能还挂着；网关重启时按 pid 文件核对命令行后清理掉它。
+  if (process.platform !== 'win32') await until(() => lifecycle(b).some(l => l.event === 'stdin-closed'), 'old dsh exits when the gateway dies', 10_000)
   await gw.start()
+  await until(() => !isAlive(oldDsh), 'old dsh is gone after restart', 15_000)
   await until(() => texts(tg, 'crashB').length > 0, 'reply after restart')
   await sleep(800)
   expect(texts(tg, 'crashB')).toEqual(['收到：crashB'])
@@ -77,9 +82,16 @@ test('时刻三：回复发出一半', async () => {
   expect(texts(tg, 'crashC')).toEqual(['收到：crashC（第1段）'])
   await gw.start()
   await sleep(1_500)
-  // 已经有一段送达：宁可少说，也不重复。模型不会再收到这条消息。
+  // 已经有一段送达：宁可少说，也不重复。这条消息不会再作为新消息交给模型。
   expect(texts(tg, 'crashC')).toEqual(['收到：crashC（第1段）'])
   expect(prompts(b).filter(p => p.text.includes('crashC')).length).toBe(1)
+  // 下一条消息进新会话：前情里有发出去的那一段，并且注明上一条回复只发出了前 1 段
+  tg.pushText(OWNER, 'afterC')
+  await until(() => texts(tg, 'afterC').length > 0, 'reply after restart')
+  const p = prompts(b).find(x => x.text.includes('afterC'))!
+  expect(p.text).toContain('你：收到：crashC（第1段）')
+  expect(p.text).toContain('本来要发 3 段，对方只收到了前 1 段')
+  expect(texts(tg, 'crashC')).toEqual(['收到：crashC（第1段）'])
   const led = gw.ledger()
   expect(led.inboundByKey(`tg:${OWNER}:${mid}`)!.state).toBe('done')
   led.close()

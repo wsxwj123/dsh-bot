@@ -83,3 +83,11 @@ export function formatSeed(entries: TranscriptEntry[], o: FormatOpts): string | 
 
 export const NUDGE_NO_ACTION = '⟦系统：你这一轮既没有用 reply 发消息，也没有调用 stay_silent。对方看不到你直接输出的文字。要回复就用 reply；决定不回就调用 stay_silent。⟧'
 export const NUDGE_RETRY = '⟦系统：上一条消息没能处理完（程序出错，不是对方的问题）。请接着回应对方上面那条消息。⟧'
+
+/** 新会话第一轮的提醒（很短，只在每个会话的第一轮出现一次） */
+export const NEW_SEGMENT_HINT = '⟦系统：新的会话从这里开始。回复对方请用 reply（直接输出的文字对方看不到）；决定不回就调用 stay_silent。⟧'
+
+/** 上一条回复发到一半程序就断了：告诉模型对方只收到了前几段，由它决定要不要补完 */
+export function formatInterrupted(sent: number, total: number): string {
+  return `⟦系统：你上一条回复发到一半程序中断了：本来要发 ${total} 段，对方只收到了前 ${sent} 段（就是上面最后的"你："那几句）。如果需要，可以自然地把没说完的意思补上，已经发出的部分不要重复。⟧`
+}

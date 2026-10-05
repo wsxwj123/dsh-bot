@@ -16,9 +16,9 @@ import { safeError, type Logger } from '../log'
 import type { McpServer, ToolDef } from '../mcp/server'
 import type { TelegramApi } from '../telegram/api'
 import { parseCommand } from '../telegram/inbound'
-import { describeResults, type Sender } from '../telegram/sender'
+import { describeResults, normText, planParts, type Sender } from '../telegram/sender'
 import { Backoff, randomToken, sleep } from '../util'
-import { formatMessages, formatSeed, NUDGE_NO_ACTION, NUDGE_RETRY } from './format'
+import { formatInterrupted, formatMessages, formatSeed, NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY } from './format'
 
 type ActiveTurn = {
   turnId: number
@@ -56,6 +56,8 @@ export class Engine {
   private waiting = new Set<string>()
   private loaded = new Map<string, number>() // sessionId → dsh 代数
   private dshStarting: Promise<void> | null = null
+  /** 启动时清理旧 dsh 的任务；拉起新 dsh 之前必须等它做完，免得把新进程当成旧的清掉 */
+  private reaping: Promise<void> = Promise.resolve()
   private dshBackoff = new Backoff(2_000, 60_000)
   private dshNextTryAt = 0
   private dshFailures = 0
@@ -134,14 +136,26 @@ export class Engine {
     const files = Array.isArray(args.files) ? args.files.filter((f): f is string => typeof f === 'string') : []
     if (!text.trim() && files.length === 0) return { text: 'text 不能为空。', isError: true }
     const replyTo = Number(args.reply_to)
+    // 模型偶尔会在同一轮里把刚说过的话再发一遍（真机验收里见过）。这里拦住：
+    // 大半段落和这一轮已发出的相同，就整次不发；只有个别段相同，就只跳过那几段。
+    const already = new Set(this.ledger.sentTextsInChain(at.rootId).map(normText))
+    if (already.size > 0 && files.length === 0) {
+      const texts = planParts(text, [], this.access()).flatMap(i => (i.kind === 'text' ? [normText(i.text)] : []))
+      const dup = texts.filter(t => already.has(t)).length
+      if (texts.length > 0 && dup * 2 >= texts.length) {
+        this.log.warn('tool.reply_duplicate_blocked', { turn: at.turnId, parts: texts.length, duplicates: dup })
+        return { text: '这些话这一轮已经发给对方了，对方都看到了，这次没有重复发送。这一轮可以结束了。' }
+      }
+    }
     at.toolsInFlight++
     at.replyCalls++
     at.lastProgressAt = Date.now()
     try {
-      const results = await this.sender.send({ chatId: at.chatId, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo: Number.isInteger(replyTo) && replyTo > 0 ? replyTo : undefined })
+      const results = await this.sender.send({ chatId: at.chatId, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo: Number.isInteger(replyTo) && replyTo > 0 ? replyTo : undefined, skipTexts: already })
       const d = describeResults(results)
       at.delivered += d.delivered
-      this.log.info('tool.reply', { turn: at.turnId, parts: results.length, delivered: d.delivered })
+      if (d.delivered > 0 && at.silent) { this.ledger.clearSilent(at.rootId); at.silent = false }
+      this.log.info('tool.reply', { turn: at.turnId, parts: results.length, delivered: d.delivered, duplicates: results.filter(r => r.state === 'duplicate').length })
       return { text: d.text, isError: d.isError }
     } finally {
       at.toolsInFlight--
@@ -169,6 +183,7 @@ export class Engine {
   async toolSilent(args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
     const at = this.activeFor(ctx.chatId, ctx.segmentId)
     if (!at) return { text: '这一轮已经结束。', isError: true }
+    if (this.ledger.deliveredInChain(at.rootId) > 0) return { text: '这一轮你已经回复过对方了，不需要再调用 stay_silent，直接结束这一轮就好。' }
     const reason = typeof args.reason === 'string' ? args.reason : ''
     this.ledger.markSilent(at.turnId, reason || '(未写原因)')
     at.silent = true
@@ -185,6 +200,8 @@ export class Engine {
       this.log.warn('recovery', { crashed: rep.crashedTurns.length, aborted: rep.abortedTurns.length, requeued: rep.requeued.length, settled: rep.settled.length, abandoned_segments: rep.abandonedSegments.length, ambiguous_outbound: rep.ambiguousOutbound.length })
     }
     this.fingerprint = restartFingerprint(this.patchInput())
+    // 上次网关被强杀时，正在处理一轮的 dsh 不会马上退出（Windows 上子进程也不会跟着父进程结束）。启动时就清理，不等下一条消息。
+    this.reaping = this.dsh.reapStale(this.dshSpec()).catch(e => this.log.warn('dsh.reap_failed', { err: safeError(e) }))
     this.configMtime = mtime(this.cfg.configPath)
     this.personaMtime = mtime(this.personaPath())
     const g = this.cfg.gw
@@ -232,6 +249,7 @@ export class Engine {
     if (wait > 0) throw new Error(`dsh restart backoff ${wait}ms`)
     this.dshStarting = (async () => {
       try {
+        await this.reaping
         if (!existsSync(this.personaPath())) throw new Error(`persona file missing: ${this.personaPath()}`)
         const input = this.patchInput()
         await this.dsh.start(this.dshSpec())
@@ -331,7 +349,9 @@ export class Engine {
       return 5_000
     }
     const prevTs = this.ledger.previousUserTs(chatId, batch[0]!.id)
-    let blocks = [...(seed ? [seed] : []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone })]
+    // 新会话的第一轮：前情（如果有）后面加一句提醒，和新消息分成两个内容块（real-03 与真机验收里新会话第一轮偶尔不用 reply）
+    const head = this.ledger.segmentTurnCount(seg.id) === 0 ? [seed ? `${seed}\n${NEW_SEGMENT_HINT}` : NEW_SEGMENT_HINT] : seed ? [seed] : []
+    let blocks = [...head, formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone })]
     let kind: TurnKind = 'message'
     let attempt = 0
     let rootId: number | undefined
@@ -485,7 +505,7 @@ export class Engine {
       const s = await conn.request<{ sessionId: string; configOptions?: any[] }>('session/new', { cwd: this.cfg.workDir, mcpServers: this.mcp.serverSpec(seg.id, seg.mcp_token) }, 60_000)
       this.ledger.setSegmentSession(seg.id, s.sessionId, '')
       this.loaded.set(s.sessionId, gen)
-      this.log.info('segment.created', { chat: chatId, segment: seg.id, seeded: seg.needs_seed === 1 })
+      this.log.info('segment.created', { chat: chatId, segment: seg.id, needs_seed: seg.needs_seed === 1 })
       seg = this.ledger.segment(seg.id)!
     }
     if (seg.model !== brainKey(this.brain)) await this.applyBrain(seg)
@@ -493,7 +513,10 @@ export class Engine {
     if (seg.needs_seed) {
       const clearAt = Number(this.ledger.getMeta(`clear_at:${chatId}`) ?? 0)
       const entries = this.ledger.recentTranscript(chatId, { maxChars: this.cfg.gw.seedRecentChars, sinceMs: clearAt, excludeInboundIds: batchIds })
-      seed = formatSeed(entries, { timeZone: this.cfg.gw.timezone })
+      const intr = this.ledger.interruptedReply(chatId)
+      const parts = [formatSeed(entries, { timeZone: this.cfg.gw.timezone }), intr ? formatInterrupted(intr.sent, intr.total) : null].filter((x): x is string => !!x)
+      seed = parts.length ? parts.join('\n') : null
+      this.log.info('segment.seed', { chat: chatId, segment: seg.id, entries: entries.length, interrupted: intr !== null })
     }
     return { seg: this.ledger.segment(seg.id)!, seed }
   }

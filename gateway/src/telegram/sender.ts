@@ -11,7 +11,7 @@ import { buildSendPlan } from './send_plan'
 export type PartResult = {
   index: number
   kind: 'text' | 'file'
-  state: 'sent' | 'failed' | 'ambiguous' | 'skipped'
+  state: 'sent' | 'failed' | 'ambiguous' | 'skipped' | 'duplicate'
   messageId?: number
   reason?: string
   retryAfterSec?: number
@@ -26,6 +26,13 @@ export type SendRequest = {
   replyTo?: number
   files?: string[]
   kind?: OutboundKind
+  /** 这些文字（按 normText 比较）这一轮已经发过了，遇到就跳过不发 */
+  skipTexts?: Set<string>
+}
+
+/** 比较"是不是同一句话"时用：去掉首尾空白，连续空白算一个 */
+export function normText(s: string): string {
+  return s.trim().replace(/\s+/g, ' ')
 }
 
 const MAX_CHUNK = 4096
@@ -112,6 +119,10 @@ export class Sender {
         await sleep(delay)
       }
       const replyTo = replyMode === 'off' ? undefined : (replyMode === 'all' || i === 0) ? req.replyTo : undefined
+      if (item.kind === 'text' && req.skipTexts?.has(normText(item.text))) {
+        results.push({ index: i + 1, kind: 'text', state: 'duplicate' })
+        continue
+      }
 
       let filePath: string | null = null
       if (item.kind === 'file') {
@@ -120,7 +131,7 @@ export class Sender {
       }
       const outKind: OutboundKind = item.kind === 'text' ? (req.kind ?? 'text') : PHOTO_EXTS.has(extname(filePath!).toLowerCase()) ? 'photo' : 'document'
       const okey = req.turnId !== null ? `turn:${req.turnId}:c${req.callSeq}:p${i + 1}` : null
-      const outId = this.ledger.outboundIntent({ okey, chatId: req.chatId, turnId: req.turnId, part: i + 1, kind: outKind, text: item.kind === 'text' ? item.text : null, file: filePath, replyTo: replyTo ?? null })
+      const outId = this.ledger.outboundIntent({ okey, chatId: req.chatId, turnId: req.turnId, part: i + 1, ofParts: items.length, kind: outKind, text: item.kind === 'text' ? item.text : null, file: filePath, replyTo: replyTo ?? null })
 
       let attempt = 0
       let useReply = replyTo
@@ -175,13 +186,17 @@ export class Sender {
 }
 
 /** 给模型看的发送结果说明 */
+export const DONE_HINT = '对方已经看到了。说完了就直接结束这一轮，不要把同样的话再发一遍。'
+
 export function describeResults(results: PartResult[]): { text: string; delivered: number; isError: boolean } {
   if (results.length === 0) return { text: '没有可发送的内容（文字为空）。', delivered: 0, isError: true }
   const sent = results.filter(r => r.state === 'sent')
   const amb = results.filter(r => r.state === 'ambiguous')
   const bad = results.filter(r => r.state === 'failed' || r.state === 'skipped')
-  if (bad.length === 0 && amb.length === 0) return { text: `已送达 ${sent.length}/${results.length} 段。`, delivered: sent.length, isError: false }
+  const dup = results.filter(r => r.state === 'duplicate')
+  if (bad.length === 0 && amb.length === 0 && dup.length === 0) return { text: `已送达 ${sent.length}/${results.length} 段。${DONE_HINT}`, delivered: sent.length, isError: false }
   const lines = [`送达 ${sent.length}/${results.length} 段。`]
+  for (const r of dup) lines.push(`第 ${r.index} 段和这一轮已经发出的话相同，没有重复发送。`)
   for (const r of amb) lines.push(`第 ${r.index} 段：${r.reason}，不要重发这一段。`)
   for (const r of bad) {
     lines.push(r.state === 'skipped'
@@ -189,5 +204,6 @@ export function describeResults(results: PartResult[]): { text: string; delivere
       : `第 ${r.index} 段未送达：${r.reason}。`)
   }
   if (bad.length) lines.push('未送达的段对方没有看到。需要的话可以稍后用 reply 补发，已送达的段不要重复。')
-  return { text: lines.join('\n'), delivered: sent.length + amb.length, isError: sent.length + amb.length === 0 }
+  else lines.push(DONE_HINT)
+  return { text: lines.join('\n'), delivered: sent.length + amb.length, isError: bad.length > 0 && sent.length + amb.length === 0 }
 }

@@ -14,6 +14,9 @@
 //   !file:PATH        回复时附带文件
 //   !slow:MS          回复前等 MS 毫秒
 //   !react:ID         给消息 ID 加 ❤️
+//   !dup              同一轮里把同样的回复再发一遍（模拟真模型偶尔的重复）
+//   !dupsome          第二次回复里只有一段和第一次相同
+//   !silentafter      回复之后又调用 stay_silent
 // 没有指令时回复"收到：<对方最后一句>"；补救提示（⟦系统…）回复"接着刚才的说"。
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
@@ -129,9 +132,13 @@ async function prompt(id: number, sessionId: string, blocks: { type: string; tex
   const args: Record<string, unknown> = { text }
   const rt = directive(last, 'replyto')
   if (rt) args.reply_to = Number(rt[0])
-  const file = directive(last, 'file')
-  if (file) args.files = [file[0]]
+  // 文件路径里可能有冒号（Windows 的盘符），不能用通用的指令解析
+  const file = last.match(/!file:(\S+)/)
+  if (file) args.files = [file[1]]
   await callTool(s, sessionId, 'reply', args)
+  if (directive(last, 'dup')) await callTool(s, sessionId, 'reply', args)
+  if (directive(last, 'dupsome')) await callTool(s, sessionId, 'reply', { text: `${base}（第1段）\n\n新的一段甲\n\n新的一段乙` })
+  if (directive(last, 'silentafter')) await callTool(s, sessionId, 'stay_silent', { reason: 'test' })
   update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '好' } })
   send({ id, result: { stopReason: 'end_turn' } })
 }

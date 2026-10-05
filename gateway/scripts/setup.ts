@@ -126,8 +126,19 @@ function check(): number {
     try { readTelegramToken(cfg.channelDir, {}); ok('Telegram 令牌在 channel/.env 里') } catch (e) { bad((e as Error).message); problems++ }
     const cred = checkCredentialsFile(cfg.credentialsPath)
     if (cred) { bad(cred); problems++ } else {
-      const text = readFileSync(cfg.credentialsPath, 'utf8')
-      if (text.includes('把这里换成你的密钥')) { bad('凭据文件里还是占位文字，请填入真实密钥'); problems++ } else ok('凭据文件在，权限正确')
+      ok('凭据文件在，权限正确')
+      // 只看密钥"长得像不像真的"，绝不打印值
+      let refs: Record<string, unknown> = {}
+      try { refs = ((Bun.YAML.parse(readFileSync(cfg.credentialsPath, 'utf8')) as { refs?: Record<string, unknown> })?.refs) ?? {} } catch { bad('凭据文件不是合法的 YAML'); problems++ }
+      const need = new Map<string, RegExp>()
+      if (cfg.brain.provider === 'deepseek-official') need.set('DEEPSEEK_API_KEY', /^sk-[A-Za-z0-9_-]{16,}$/)
+      for (const r of Object.values(cfg.brain.routes)) if (r.apiKeyEnv) need.set(r.apiKeyEnv, /^[\x21-\x7e]{8,}$/)
+      for (const [name, shape] of need) {
+        const v = refs[name]
+        if (typeof v !== 'string' || !v.trim()) { bad(`凭据文件里没有 ${name}`); problems++ }
+        else if (!shape.test(v.trim()) || /[<>]/.test(v)) { bad(`${name} 看起来还是占位文字，或者格式不对（没有显示内容）`); problems++ }
+        else ok(`${name} 已填，格式像真的密钥`)
+      }
     }
     cfg.gw.owners.length ? ok(`主人：${cfg.gw.owners.length} 个`) : (bad('没有主人（access.json 的 allowFrom 是空的）：/clear 和故障通知都用不了'), problems++)
     const [, bin] = defaultDshCommand(cfg.harnessDir)

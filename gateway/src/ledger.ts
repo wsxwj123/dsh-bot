@@ -76,6 +76,7 @@ export type OutboundRow = {
   text: string | null
   file: string | null
   reply_to: number | null
+  of_parts: number | null
   state: OutboundState
   tg_message_id: number | null
   error: string | null
@@ -151,6 +152,7 @@ CREATE TABLE IF NOT EXISTS outbound (
   text TEXT,
   file TEXT,
   reply_to INTEGER,
+  of_parts INTEGER,
   state TEXT NOT NULL,
   tg_message_id INTEGER,
   error TEXT,
@@ -197,10 +199,17 @@ export class Ledger {
     this.db.exec('PRAGMA synchronous = FULL')
     this.db.exec('PRAGMA busy_timeout = 5000')
     this.db.exec(SCHEMA)
+    this.migrate()
     if (!this.getMeta('schema_version')) this.setMeta('schema_version', String(SCHEMA_VERSION))
   }
 
   close(): void { this.db.close() }
+
+  /** 老账本补列（只加不删） */
+  private migrate(): void {
+    const cols = new Set(this.db.query<{ name: string }, []>('PRAGMA table_info(outbound)').all().map(c => c.name))
+    if (!cols.has('of_parts')) this.db.exec('ALTER TABLE outbound ADD COLUMN of_parts INTEGER')
+  }
 
   tx<T>(fn: () => T): T { return this.db.transaction(fn)() }
 
@@ -342,6 +351,34 @@ export class Ledger {
       `SELECT COUNT(*) AS n FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind IN ('text','photo','document') AND o.state IN ('sent','ambiguous','pending')`).get(rootId)
     return r?.n ?? 0
   }
+  /** 这一串里已经发出（或可能发出）的文字段，用来拦住模型把同样的话再发一遍 */
+  sentTextsInChain(rootId: number): string[] {
+    return this.db.query<{ text: string }, [number]>(
+      `SELECT o.text FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind = 'text' AND o.state IN ('sent','ambiguous','pending') AND o.text IS NOT NULL`).all(rootId).map(r => r.text)
+  }
+  clearSilent(rootId: number): void {
+    this.db.query('UPDATE turns SET silent = 0 WHERE root_id = ?').run(rootId)
+  }
+  segmentTurnCount(segmentId: number): number {
+    return this.db.query<{ n: number }, [number]>('SELECT COUNT(*) AS n FROM turns WHERE segment_id = ?').get(segmentId)?.n ?? 0
+  }
+  /**
+   * 这个聊天最近一轮是不是"回复发到一半网关就断了"：最近一轮状态是 crashed，
+   * 且它最后一次 reply 计划发的段数多于实际发出（或可能发出）的段数。
+   */
+  interruptedReply(chatId: string): { sent: number; total: number } | null {
+    const t = this.db.query<{ id: number; state: string }, [string]>('SELECT id, state FROM turns WHERE chat_id = ? ORDER BY id DESC LIMIT 1').get(chatId)
+    if (!t || t.state !== 'crashed') return null
+    const rows = this.db.query<{ okey: string | null; of_parts: number | null; state: string }, [number]>(
+      `SELECT okey, of_parts, state FROM outbound WHERE turn_id = ? AND okey IS NOT NULL ORDER BY id`).all(t.id)
+    if (rows.length === 0) return null
+    const call = rows[rows.length - 1]!.okey!.replace(/:p\d+$/, ':')
+    const mine = rows.filter(r => r.okey!.startsWith(call))
+    const total = Math.max(...mine.map(r => r.of_parts ?? 0))
+    const sent = mine.filter(r => r.state === 'sent' || r.state === 'ambiguous').length
+    return total > sent && sent > 0 ? { sent, total } : null
+  }
+
   silentInChain(rootId: number): boolean {
     const r = this.db.query<{ n: number }, [number]>('SELECT COUNT(*) AS n FROM turns WHERE root_id = ? AND silent = 1').get(rootId)
     return (r?.n ?? 0) > 0
@@ -349,9 +386,9 @@ export class Ledger {
 
   // ─── outbound ───
   /** 先记"打算发"，再真的发；崩溃时留下的 pending 一律按"可能已送达"处理，绝不重发。 */
-  outboundIntent(o: { okey?: string | null; chatId: string; turnId: number | null; part: number; kind: OutboundKind; text?: string | null; file?: string | null; replyTo?: number | null }): number {
-    const r = this.db.query(`INSERT INTO outbound (okey, chat_id, turn_id, part, kind, text, file, reply_to, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`)
-      .run(o.okey ?? null, o.chatId, o.turnId, o.part, o.kind, o.text ?? null, o.file ?? null, o.replyTo ?? null, this.now())
+  outboundIntent(o: { okey?: string | null; chatId: string; turnId: number | null; part: number; ofParts?: number | null; kind: OutboundKind; text?: string | null; file?: string | null; replyTo?: number | null }): number {
+    const r = this.db.query(`INSERT INTO outbound (okey, chat_id, turn_id, part, of_parts, kind, text, file, reply_to, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`)
+      .run(o.okey ?? null, o.chatId, o.turnId, o.part, o.ofParts ?? null, o.kind, o.text ?? null, o.file ?? null, o.replyTo ?? null, this.now())
     return Number(r.lastInsertRowid)
   }
   outboundResult(id: number, state: Exclude<OutboundState, 'pending'>, o: { tgMessageId?: number | null; error?: string | null } = {}): void {

@@ -122,6 +122,7 @@ export class DshProcess {
     let rec: { pid?: number; patch?: string } = {}
     try { rec = JSON.parse(readFileSync(spec.pidFile, 'utf8')) } catch {}
     const pid = Number(rec.pid)
+    if (pid > 0 && pid === this.proc?.pid) return // 是自己刚拉起来的，不动
     if (pid > 0 && isAlive(pid)) {
       const cmd = await processCommandLine(pid)
       if (cmd && rec.patch && cmd.includes(rec.patch)) {
