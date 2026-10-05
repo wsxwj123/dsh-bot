@@ -37,6 +37,8 @@ test('引用的消息不存在：去掉引用重发', async () => {
   const tried = tg.calls.filter(c => c.method === 'sendMessage' && String(c.params.text).includes('quoteE'))
   expect(tried.length).toBe(2)
   expect(tried[0]!.params.reply_parameters.message_id).toBe(424242)
+  // 假模型拿到工具结果后才写记录，比 Telegram 收到消息晚一点
+  await until(() => toolResults(b).some(r => r.name === 'reply'), 'tool result recorded')
   expect(toolResults(b).find(r => r.name === 'reply')!.text).toContain('已送达 1/1 段')
 })
 
