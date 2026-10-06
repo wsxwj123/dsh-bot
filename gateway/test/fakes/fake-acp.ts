@@ -17,6 +17,8 @@
 //   !dup              同一轮里把同样的回复再发一遍（模拟真模型偶尔的重复）
 //   !dupsome          第二次回复里只有一段和第一次相同
 //   !silentafter      回复之后又调用 stay_silent
+//   !remember:文字     先调用 remember（文字里的下划线换成空格）
+// 程序发来的"⟦系统·整理记忆⟧"：先试着调一次 react（应被锁），再输出一份假摘要（state 目录里 summary-mode=empty 时输出空）
 // 没有指令时回复"收到：<对方最后一句>"；补救提示（⟦系统…）回复"接着刚才的说"。
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
@@ -101,6 +103,19 @@ async function prompt(id: number, sessionId: string, blocks: { type: string; tex
   log('prompts.jsonl', { sessionId, text: all, blocks: texts.length, model: s.model })
   update(sessionId, { sessionUpdate: 'usage_update', used: s.history.join('').length, size: 1_000_000 })
 
+  // 写交接摘要：先试着调一次工具（应该被锁住），再直接输出摘要文字。summary-mode 文件写 empty 时输出空摘要
+  if (last.startsWith('⟦系统·整理记忆⟧')) {
+    if (s.mcp) await callTool(s, sessionId, 'react', { message_id: 1, emoji: '❤️' })
+    const mode = existsSync(P('summary-mode')) ? readFileSync(P('summary-mode'), 'utf8').trim() : ''
+    const n = bump('summary')
+    const lines = all.split('\n').filter(l => l.includes('对方：') || (!l.startsWith('⟦') && l.trim())).length
+    const text = mode === 'empty' ? '' : [
+      `【我说过的要紧话】无（假摘要#${n}）`, '【我答应过的事】无', `【对方的情况】材料里大约有 ${lines} 行`, '【正在聊的话题】无', '【我们现在的关系和气氛】平常',
+    ].join('\n')
+    log('summaries.jsonl', { sessionId, n, mode, withTools: !!s.mcp, chars: text.length })
+    if (text) update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
+    return send({ id, result: { stopReason: 'end_turn' } })
+  }
   if (firstN(last, 'crash')) { log('lifecycle.jsonl', { event: 'crash' }); process.exit(3) }
   if (directive(last, 'errauth')) return send({ id, error: { code: -32603, message: 'turn failed: MISSING_CREDENTIAL deepseek-official requires DEEPSEEK_API_KEY' } })
   // !err 和真上游一样"粘"在会话上：一旦触发，这个会话接下来的 N 次请求都失败（包括补救提示）
@@ -124,6 +139,8 @@ async function prompt(id: number, sessionId: string, blocks: { type: string; tex
     await callTool(s, sessionId, 'stay_silent', { reason: 'test' })
     return send({ id, result: { stopReason: 'end_turn' } })
   }
+  const rem = last.match(/!remember:(\S+)/)
+  if (rem) await callTool(s, sessionId, 'remember', { text: rem[1]!.replace(/_/g, ' ') })
   const react = directive(last, 'react')
   if (react) await callTool(s, sessionId, 'react', { message_id: Number(react[0]), emoji: '❤️' })
   const parts = Number(directive(last, 'parts')?.[0] || 1)

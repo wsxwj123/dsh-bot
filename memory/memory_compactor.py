@@ -3,9 +3,14 @@
 
 流程：
 1. 对每个 enabled bot，读 memory.md + 最近 7 天对话
-2. 用 claude --print 调用 LLM 提炼新增/变更
+2. 调用 LLM 提炼新增/变更（新系统的 bot 直连 DeepSeek，旧系统走 claude --print）
 3. 输出新版 memory.md（≤2000 字，老化"临时记忆"）
 4. USER-MANUAL-LOCK 块原样保留
+
+新系统（dsh-bot 网关）的 bot：对话从送达账本读（含 bot 真正发出去的话），
+MEMORY.md 在 <频道目录>/memory/ 下。网关里的 remember 工具也会往这个文件追加，
+所以写回前会重读一次：整理期间新记下的条目不会被覆盖掉。写入是原子的（先写临时文件再改名）。
+要整理新系统的 bot，把 HUB_CONFIGS_DIR 指到新系统的配置目录（默认 ~/.dsh-bot/configs）。
 """
 import os
 import sys
@@ -25,7 +30,7 @@ from memory.memory_inject import memory_path, ensure_memory_exists
 
 
 COMPACTOR_PROMPT = """你帮一个 AI 角色（人格已定型）维护它的 MEMORY.md 文件。
-这是 Claude Code 的 auto-memory 路径，bot 自己也在对话中更新它。
+这是它的长期记忆，bot 自己也在对话中往里记东西。
 你的工作是每周一次"压缩+整理"，不是重写人设。
 
 【现有 MEMORY.md】
@@ -50,12 +55,51 @@ COMPACTOR_PROMPT = """你帮一个 AI 角色（人格已定型）维护它的 ME
 6. 如果包含 `<!-- USER-MANUAL-LOCK ... -->` 块，**原样保留**
 7. 如果现有内容是 SOUL 风格（# 我是谁 / # 我的样子 / # 日常生活 等），保持这个结构
 8. **如果不确定要不要改某段，就不改**
+9. 如果有「## 随手记」一节（bot 平时随手记下的条目）：长期有用的并进合适的段落，过时的删掉，并完的条目从随手记里去掉
 
 输出完整的新版 MEMORY.md（保留原有的所有段落标题和大部分内容），不要解释，不要 markdown 包装。"""
 
 
 # 提取 USER-MANUAL-LOCK 块
 LOCK_RE = re.compile(r"<!--\s*USER-MANUAL-LOCK.*?-->", re.DOTALL)
+
+
+def _call_llm(prompt: str, dsh_bot: bool) -> str:
+    """新系统的 bot 直连 DeepSeek（新系统里没有 claude 命令行），失败退避重试 2 次；旧系统照旧。"""
+    if not dsh_bot:
+        return call_claude(prompt, timeout=180)
+    import deepseek_client
+    last_err = None
+    for wait in (0, 5, 20):
+        if wait:
+            time.sleep(wait)
+        try:
+            return deepseek_client.call_text(prompt, timeout=180, max_tokens=6000)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    raise RuntimeError(f"DeepSeek 调用失败：{type(last_err).__name__}")
+
+
+def merge_concurrent_additions(original: str, latest: str, new_memory: str) -> str:
+    """original：整理开始时读到的；latest：写回前重读的；new_memory：LLM 整理出的新版。
+    latest 里有、original 里没有的行（整理期间 bot 新记下的），追加到新版的「## 随手记」里。"""
+    if latest == original:
+        return new_memory
+    before = set(original.splitlines())
+    added = [l for l in latest.splitlines() if l.strip() and l not in before and l not in new_memory]
+    if not added:
+        return new_memory
+    out = new_memory.rstrip()
+    if "## 随手记" not in out:
+        out += "\n\n## 随手记"
+    return out + "\n" + "\n".join(added) + "\n"
+
+
+def write_atomic(path: str, text: str) -> None:
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 def compact_one(bot_cfg: dict) -> bool:
@@ -91,7 +135,7 @@ def compact_one(bot_cfg: dict) -> bool:
     prompt = COMPACTOR_PROMPT.format(current_memory=current, recent_dialog=recent)
 
     try:
-        new_memory = call_claude(prompt, timeout=180)
+        new_memory = _call_llm(prompt, dsh_bot=chat_history.is_dsh_bot(bot_dir))
         quota.record_call("memory_compact", quota.MEMORY_COMPACT_WEIGHT)
         # 剥掉 LLM 可能加的 ```markdown … ``` 包裹：否则 Claude Code auto-memory
         # 解析器会把整个 MEMORY.md 当成一个代码块 → 记忆条目全部失效（bot3 已中招）。
@@ -118,12 +162,18 @@ def compact_one(bot_cfg: dict) -> bool:
     if lock_content and "USER-MANUAL-LOCK" not in new_memory:
         new_memory = new_memory.rstrip() + "\n\n" + lock_content + "\n"
 
-    # 备份 + 写入
+    # 整理期间 bot 又记了新条目（网关的 remember 工具）：并进来，不覆盖
+    try:
+        latest = open(p, encoding="utf-8").read()
+    except Exception:
+        latest = current
+    new_memory = merge_concurrent_additions(current, latest, new_memory)
+
+    # 备份 + 原子写入
     backup_path = p + ".bak"
     try:
         shutil.copy(p, backup_path)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(new_memory)
+        write_atomic(p, new_memory)
         sys.stderr.write(f"[{bot_id}] memory.md 已更新（备份至 .bak）\n")
         return True
     except Exception as e:

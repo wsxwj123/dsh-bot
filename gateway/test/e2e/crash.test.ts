@@ -3,7 +3,8 @@
 import { afterEach, expect, test } from 'bun:test'
 import { FakeTelegram } from '../fakes/fake-telegram'
 import { isAlive } from '../../src/dsh/process'
-import { cleanup, Gateway, lifecycle, makeBot, maxTimesSeen, OWNER, prompts, sleep, until, type BotEnv } from '../harness'
+import { join } from 'path'
+import { cleanup, Gateway, lifecycle, makeBot, maxTimesSeen, OWNER, prompts, readJsonl, sleep, until, type BotEnv } from '../harness'
 
 let tg: FakeTelegram | null = null
 let b: BotEnv | null = null
@@ -66,6 +67,14 @@ test('时刻二：消息已经送进 dsh，模型还在想', async () => {
   expect(first.blocks).toBe(2)
   expect(first.text).toContain('对方：warmupB')
   expect(first.text).toContain('你：收到：warmupB')
+  // 旧会话用不了：用账本流水在一个不带工具的临时会话里补写了摘要，带进了新段开头；补写摘要的材料里没有那条还没处理完的消息
+  const sums = readJsonl<{ sessionId: string; n: number; withTools: boolean }>(join(b.acpState, 'summaries.jsonl'))
+  expect(sums.length).toBe(1)
+  expect(sums[0]!.withTools).toBe(false)
+  expect(first.text).toContain(`假摘要#${sums[0]!.n}`)
+  const material = prompts(b).find(p => p.sessionId === sums[0]!.sessionId)!
+  expect(material.text).toContain('对方：warmupB')
+  expect(material.text).not.toContain('crashB')
   const led = gw.ledger()
   const row = led.inboundByKey(`tg:${OWNER}:${mid}`)!
   expect(row.state).toBe('done')

@@ -91,3 +91,68 @@ export const NEW_SEGMENT_HINT = '⟦系统：新的会话从这里开始。回�
 export function formatInterrupted(sent: number, total: number): string {
   return `⟦系统：你上一条回复发到一半程序中断了：本来要发 ${total} 段，对方只收到了前 ${sent} 段（就是上面最后的"你："那几句）。如果需要，可以自然地把没说完的意思补上，已经发出的部分不要重复。⟧`
 }
+
+// ─── 换段：交接摘要（格式在 real-03 里用真模型验证过：五个小标题齐全、事实保留、命中缓存） ───
+
+export const SUMMARY_HEADINGS = ['【我说过的要紧话】', '【我答应过的事】', '【对方的情况】', '【正在聊的话题】', '【我们现在的关系和气氛】']
+
+const SUMMARY_RULES = [
+  '请为到目前为止的对话写一份交接摘要，供你下次接着聊时使用。要求：',
+  '1. 中文，第一人称（"我"是你自己，"对方"是用户），不超过 600 字。',
+  '2. 按下面五个小标题输出，没有就写"无"：',
+  `${SUMMARY_HEADINGS[0]}你实际发给对方、之后可能被提起的话，尽量引用原话。`,
+  `${SUMMARY_HEADINGS[1]}时间、内容、是否已经做到。`,
+  `${SUMMARY_HEADINGS[2]}对方透露的事实、喜好、近况、计划（带时间）。`,
+  `${SUMMARY_HEADINGS[3]}还没聊完的话题、对方在等你回应的问题。`,
+  `${SUMMARY_HEADINGS[4]}称呼、亲近程度、情绪基调、需要注意的分寸。`,
+  '3. 只写对话里真实出现过的内容，不要编造，不要写成剧情梗概。',
+].join('\n')
+
+/** 在旧会话里写摘要（这一轮所有工具都锁着） */
+export const SUMMARY_PROMPT = [
+  '⟦系统·整理记忆⟧ 这不是对方发来的消息，不要回复对方，这一轮也不要调用任何工具，直接输出摘要正文。',
+  SUMMARY_RULES,
+].join('\n')
+
+/** 旧会话用不了（dsh 崩溃等）时，用账本里的流水单独请求一次写摘要 */
+export function formatLedgerSummaryPrompt(previous: string | null, entries: TranscriptEntry[], o: FormatOpts): string {
+  const lines = ['⟦系统·整理记忆⟧ 这不是对方发来的消息，不要回复对方，不要调用任何工具，直接输出摘要正文。下面是程序从聊天记录里整理出来的材料。']
+  if (previous) lines.push('【更早的摘要】', escapeUserText(previous))
+  lines.push('【这一段的聊天记录】')
+  for (const e of entries) lines.push(`⟦${clock(e.ts, o.timeZone)}⟧ ${e.who === 'bot' ? '我' : '对方'}：${escapeUserText(e.text)}`)
+  lines.push('', SUMMARY_RULES, '4. 如果有更早的摘要，把里面仍然有用的内容合进新摘要。')
+  return lines.join('\n')
+}
+
+/** 摘要清理与校验。不像样（太短、小标题缺太多）就返回 null，调用方保留上一份，不覆盖。 */
+export function cleanSummary(text: string | null | undefined): string | null {
+  if (!text) return null
+  let t = text.trim()
+  if (t.startsWith('```')) t = t.replace(/^```[a-z]*\n?/i, '').replace(/\n?```\s*$/, '').trim()
+  if (t.length < 20) return null
+  const hits = SUMMARY_HEADINGS.filter(h => t.includes(h)).length
+  if (hits < 3) return null
+  return t.length > 6000 ? t.slice(0, 6000) : t
+}
+
+export type SeedParts = {
+  memory: string | null
+  summary: string | null
+  entries: TranscriptEntry[]
+  interrupted: { sent: number; total: number } | null
+}
+
+/** 新段开头：长期记忆 + 最近一份摘要 + 最近原话（+ 回复被中断的说明）。各部分都没有就返回 null。 */
+export function formatSeedParts(p: SeedParts, o: FormatOpts): string | null {
+  const out: string[] = []
+  if (p.memory?.trim()) out.push('⟦长期记忆：你自己记下的事，供参考，不要照念⟧', escapeUserText(p.memory.trim()), '⟦长期记忆结束⟧')
+  if (p.summary?.trim()) out.push('⟦之前聊天的交接摘要（你自己写的）⟧', escapeUserText(p.summary.trim()), '⟦摘要结束⟧')
+  const raw = formatSeed(p.entries, o)
+  if (raw) out.push(raw)
+  if (p.interrupted) out.push(formatInterrupted(p.interrupted.sent, p.interrupted.total))
+  return out.length ? out.join('\n') : null
+}
+
+export function formatMemoryHint(items: string[]): string {
+  return ['⟦系统：你在别的聊天里新记下了这些事（供参考）：', ...items.map(t => `- ${escapeUserText(t)}`), '⟧'].join('\n')
+}

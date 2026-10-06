@@ -27,6 +27,7 @@ beforeAll(async () => {
       // 换模型后 dsh 会在用户消息后面插一条英文说明 "[model changed: …]"，所以最后一条用户消息是它
       { match: 'model changed', tool: { name: 'mcp__tg__reply', arguments: { text: '换了模型' } } },
       { match: '已送达', text: '' },
+      { match: '⟦系统·整理记忆⟧', text: '【我说过的要紧话】说过"真的收到了"\n【我答应过的事】无\n【对方的情况】对方在测试\n【正在聊的话题】换段\n【我们现在的关系和气氛】轻松（真dsh摘要）' },
     ],
   })
   b = makeBot(tg, {
@@ -53,7 +54,7 @@ afterAll(async () => {
   cleanup(b)
 })
 
-test.skipIf(!available)('真 dsh：只留人设、只有我们的 3 个工具、不带隐私字段，回复能发出去', async () => {
+test.skipIf(!available)('真 dsh：只留人设、只有我们自己的 4 个工具、不带隐私字段，回复能发出去', async () => {
   tg.pushText(OWNER, '你好 realA')
   await until(() => tg.sentTo(OWNER).some(s => s.text === '第二段'), 'reply via real dsh', 60_000)
   // 工具结果回到模型那里（逐段送达情况），这一轮才算结束
@@ -68,7 +69,7 @@ test.skipIf(!available)('真 dsh：只留人设、只有我们的 3 个工具、
   expect(systemText).toContain('{⁠{user}}')
   expect(systemText).toContain('运行规则')
   expect(systemText).not.toContain('MCP resource')
-  expect(body.tools.map((t: any) => t.function.name).sort()).toEqual(['mcp__tg__react', 'mcp__tg__reply', 'mcp__tg__stay_silent'])
+  expect(body.tools.map((t: any) => t.function.name).sort()).toEqual(['mcp__tg__react', 'mcp__tg__remember', 'mcp__tg__reply', 'mcp__tg__stay_silent'])
   const raw = JSON.stringify(body)
   expect(raw).not.toContain('dsh_session_log')
   expect(raw).not.toContain('dsh_plugin_packages')
@@ -99,6 +100,34 @@ test.skipIf(!available)('真 dsh：改配置换模型，下一轮请求就用新
   expect(req.body.model).toBe('fake-chat-2')
   expect(JSON.stringify(req.body.messages)).toContain('[model changed:')
   expect(JSON.parse(readFileSync(join(b.botDir, 'state', 'dsh.pid'), 'utf8')).pid).toBe(pid)
+})
+
+test.skipIf(!available)('真 dsh：用量快到线时来了新消息，先在旧会话里写摘要换段，新消息进新会话、开头带上摘要', async () => {
+  const led = gw.ledger()
+  const used = led.activeSegment(String(OWNER))!.used_tokens!
+  led.close()
+  // 把预算压到只比现在多一点：下一条消息一进来就会超
+  b.brain = { ...b.brain, model: 'fake-chat', max_input_tokens: used + 20 }
+  writeConfig(b)
+  await sleep(500)
+  tg.pushText(OWNER, 'realD')
+  await until(() => llm.requests.some(r => JSON.stringify(r.body.messages).includes('realD')), 'realD processed', 60_000)
+  const sumReq = llm.requests.find(r => JSON.stringify(r.body.messages).includes('⟦系统·整理记忆⟧'))!
+  expect(sumReq).toBeDefined()
+  const sumMsgs = JSON.stringify(sumReq.body.messages)
+  expect(sumMsgs).toContain('realB') // 在旧会话里写：前面的对话都在
+  expect(sumMsgs).not.toContain('realD')
+  const next = llm.requests.find(r => JSON.stringify(r.body.messages).includes('realD'))!
+  const users = next.body.messages.filter((m: any) => m.role === 'user')
+  expect(users.length).toBe(1) // 新会话：前情和新消息是同一条用户消息里的两个内容块
+  const first = JSON.stringify(users[0].content)
+  expect(first).toContain('⟦之前聊天的交接摘要')
+  expect(first).toContain('真dsh摘要')
+  expect(first).toContain('你：换了模型') // 最近原话里有 bot 真正发出去的话
+  expect(first).not.toContain('⟦系统·整理记忆⟧')
+  b.brain = { ...b.brain, max_input_tokens: 1_000_000 }
+  writeConfig(b)
+  await sleep(500)
 })
 
 test.skipIf(!available)('真 dsh：网关被强杀后，旧 dsh 不会一直留着（自己退出，或者网关重启时被清理）', async () => {

@@ -45,6 +45,14 @@ export type GatewayOpts = {
   maxTurnRetries: number
   /** 换段或崩溃恢复时，新会话开头最多补回多少字的最近原话 */
   seedRecentChars: number
+  /** 用到模型上下文窗口的多少比例就换段（方案 10.2：80%） */
+  rollRatio: number
+  /** 新段开头最多带多少字的长期记忆 */
+  memoryMaxChars: number
+  /** 写一份摘要最多等多久 */
+  summaryTimeoutMs: number
+  /** 用账本流水补写摘要时，最多喂给模型多少字 */
+  summarySourceMaxChars: number
   /** 两次重试之间的等待（毫秒），按次数取，超出取最后一个 */
   retryBackoffMs: number[]
   /** Telegram 429 时最多原地等多久，超过就如实告诉模型 */
@@ -69,6 +77,8 @@ export type BotConfig = {
   root: string
   botDir: string
   channelDir: string
+  /** 长期记忆目录：<频道目录>/memory（MEMORY.md 和主题记忆文件） */
+  memoryDir: string
   stateDir: string
   dshHome: string
   workDir: string
@@ -165,6 +175,10 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     stallWarnMs: num(g.turn_stall_warn_ms, Math.min(60_000, stallCancelMs), 'gateway.turn_stall_warn_ms'),
     maxTurnRetries: num(g.max_turn_retries, 2, 'gateway.max_turn_retries'),
     seedRecentChars: num(g.seed_recent_chars, 12_000, 'gateway.seed_recent_chars'),
+    rollRatio: Math.min(0.95, Math.max(0.1, num(g.roll_ratio, 0.8, 'gateway.roll_ratio'))),
+    memoryMaxChars: num(g.memory_max_chars, 20_000, 'gateway.memory_max_chars'),
+    summaryTimeoutMs: num(g.summary_timeout_ms, 180_000, 'gateway.summary_timeout_ms'),
+    summarySourceMaxChars: num(g.summary_source_max_chars, 60_000, 'gateway.summary_source_max_chars'),
     retryBackoffMs: backoff.length ? backoff : [0],
     maxSendWaitMs: num(g.max_send_wait_ms, 10_000, 'gateway.max_send_wait_ms'),
     telegramApi: str(g.telegram_api, 'https://api.telegram.org').replace(/\/+$/, ''),
@@ -206,6 +220,7 @@ export function loadBotConfig(configPath: string, env: Record<string, string | u
     root,
     botDir,
     channelDir,
+    memoryDir: join(channelDir, 'memory'),
     stateDir: join(botDir, 'state'),
     dshHome: join(botDir, 'dsh-home'),
     workDir: join(botDir, 'work'),

@@ -1,7 +1,12 @@
-"""读 worker session jsonl，提取 bot 真实出站消息。
+"""读对话历史：bot 真正发出去的话、用户说的话、最后一次说话的时间。
 
-这是反重复的真实数据源——引擎自己的 heartbeat_log 只是注入情境，
-bot 实际发出去什么需要从 session jsonl 读 assistant role 消息。
+两种数据源，函数名和返回格式完全一样，调用方不用改：
+1. 新系统（dsh-bot 网关）：读送达账本 <bot 目录>/state/ledger.sqlite（只读打开）。
+   bot 的话只算真正送达（或可能送达）的 reply；用户的话只算真实用户消息，不含程序注入的合成消息。
+2. 旧系统（Claude Code worker）：读 ~/.claude/projects/<slug>/*.jsonl。找不到账本时自动走这条路。
+
+账本的位置：频道目录的上一级里的 state/ledger.sqlite（新系统默认布局 bots/<bot>/channel 与 bots/<bot>/state），
+或者用环境变量 DSH_BOT_LEDGER 直接指定；传了 bot_name 时也会找 $DSH_BOT_HOME/bots/<bot_name>/state/ledger.sqlite。
 
 slug 算法（与 Claude Code 一致，已实测）：
   ~/.claude/channels/mybot  →  -Users-you--claude-channels-mybot
@@ -9,9 +14,77 @@ slug 算法（与 Claude Code 一致，已实测）：
 import os
 import glob
 import json
+import sqlite3
 import time
 import uuid
 from datetime import datetime
+
+
+# ─── 新系统：送达账本 ──────────────────────────────────────────────
+
+def _ledger_path(bot_dir: str | None, bot_name: str | None = None) -> str | None:
+    """找这个 bot 的账本；找不到返回 None（调用方回到旧数据源）。"""
+    cands = []
+    env = os.environ.get("DSH_BOT_LEDGER")
+    if env:
+        cands.append(os.path.expanduser(env))
+    if bot_dir:
+        d = os.path.abspath(os.path.expanduser(bot_dir))
+        cands.append(os.path.join(os.path.dirname(d), "state", "ledger.sqlite"))
+    if bot_name:
+        home = os.path.expanduser(os.environ.get("DSH_BOT_HOME") or "~/.dsh-bot")
+        cands.append(os.path.join(home, "bots", bot_name, "state", "ledger.sqlite"))
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def is_dsh_bot(bot_dir: str | None, bot_name: str | None = None) -> bool:
+    """这个 bot 是不是已经由新系统（dsh-bot 网关）在跑。"""
+    return _ledger_path(bot_dir, bot_name) is not None
+
+
+def _ledger_query(path: str, sql: str, params: tuple = ()) -> list[tuple]:
+    """只读打开账本查询。读失败（被锁、文件坏了）返回空列表，不抛。"""
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        try:
+            return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
+
+def _ledger_user_rows(path: str, since_ms: int, chat_id: str | None = None) -> list[tuple[int, str]]:
+    """真实用户消息：[(ts 毫秒, 正文)]，时间正序。"""
+    sql = "SELECT ts, text FROM inbound WHERE kind = 'user' AND ts >= ?"
+    params: tuple = (since_ms,)
+    if chat_id:
+        sql += " AND chat_id = ?"
+        params += (str(chat_id),)
+    return _ledger_query(path, sql + " ORDER BY ts, id", params)
+
+
+def _ledger_bot_rows(path: str, since_ms: int, chat_id: str | None = None) -> list[tuple[int, str]]:
+    """bot 真正发出去（或可能已发出）的 reply 段：[(ts 毫秒, 正文)]，时间正序。不含程序发的系统通知。"""
+    sql = ("SELECT COALESCE(sent_at, created_at), text FROM outbound "
+           "WHERE kind = 'text' AND state IN ('sent', 'ambiguous') AND turn_id IS NOT NULL AND text IS NOT NULL "
+           "AND COALESCE(sent_at, created_at) >= ?")
+    params: tuple = (since_ms,)
+    if chat_id:
+        sql += " AND chat_id = ?"
+        params += (str(chat_id),)
+    return _ledger_query(path, sql + " ORDER BY 1, id", params)
+
+
+def _ledger_dialog(path: str, since_ms: int, chat_id: str | None = None) -> list[tuple[str, str, int]]:
+    """[(role, 正文, ts 秒)]，role 是 'user' / 'assistant'，时间正序。"""
+    rows = [("user", t, int(ts // 1000)) for ts, t in _ledger_user_rows(path, since_ms, chat_id)]
+    rows += [("assistant", t, int(ts // 1000)) for ts, t in _ledger_bot_rows(path, since_ms, chat_id)]
+    rows.sort(key=lambda r: r[2])
+    return rows
 
 
 def _project_slug_for(bot_dir: str) -> str:
@@ -180,6 +253,11 @@ def _extract_real_reply_text(content) -> str:
 
 def get_recent_assistant_messages(bot_dir: str, days: int = 3, limit: int = 10) -> list[str]:
     """返回最近 N 天 assistant role 消息文本（前 80 字摘要），最多 limit 条。"""
+    lp = _ledger_path(bot_dir)
+    if lp:
+        cutoff_ms = int((time.time() - days * 86400) * 1000)
+        msgs = [t[:80] for _, t in _ledger_bot_rows(lp, cutoff_ms) if t and len(t) > 5]
+        return msgs[-limit:]
     proj_dir = _project_dir(bot_dir)
     if not os.path.isdir(proj_dir):
         return []
@@ -210,6 +288,18 @@ def get_recent_assistant_messages(bot_dir: str, days: int = 3, limit: int = 10) 
 
 def get_recent_dialog(bot_dir: str, days: int = 7, max_chars: int = 12000) -> str:
     """memory_compactor 用：拿最近 N 天的 user+assistant 对话片段。"""
+    lp = _ledger_path(bot_dir)
+    if lp:
+        cutoff_ms = int((time.time() - days * 86400) * 1000)
+        snippets = [f"[{'用户' if role == 'user' else '我'}] {text[:200]}" for role, text, _ in _ledger_dialog(lp, cutoff_ms)]
+        # 字数有上限时保留最近的部分（时间正序输出）
+        out, total = [], 0
+        for sn in reversed(snippets):
+            if total + len(sn) > max_chars:
+                break
+            out.append(sn)
+            total += len(sn) + 1
+        return "\n".join(reversed(out))
     proj_dir = _project_dir(bot_dir)
     if not os.path.isdir(proj_dir):
         return ""
@@ -313,6 +403,10 @@ def last_user_msg_ts(bot_dir: str, chat_id: str = None,
     bot_name：dispatcher 写 marker 用 BOT_NAME；若 bot_dir 的 basename 与 bot_name
     不一致，显式传 bot_name 避免 marker 找错（一般两者相同，可不传）。
     """
+    lp = _ledger_path(bot_dir, bot_name)
+    if lp:
+        rows = _ledger_user_rows(lp, 0, chat_id)
+        return int(rows[-1][0] // 1000) if rows else None
     state_dir = os.path.expanduser("~/.claude/dispatcher/.self-initiate-state")
     marker_key = bot_name or os.path.basename(os.path.abspath(bot_dir))
     if chat_id:
@@ -367,7 +461,14 @@ def get_thread_tail(bot_dir: str, chat_id: str = None,
       把自己跳过的历史塞进 prompt 后继续选择跳过，形成沉默循环
     - 截 200 字 / 条
     - 只看 max_hours 内的（默认 72h）
+    - 新系统（账本）：私聊、群聊各是各的会话，传了 chat_id 就只看这个聊天
     """
+    lp = _ledger_path(bot_dir, bot_name)
+    if lp:
+        cutoff_ms = int((time.time() - max_hours * 3600) * 1000)
+        rows = [(role, text[:200], ts) for role, text, ts in _ledger_dialog(lp, cutoff_ms, chat_id)
+                if text and len(text.strip()) >= 2]
+        return rows[-n:]
     proj_dir = _project_dir(bot_dir)
     if not os.path.isdir(proj_dir):
         return []
@@ -435,6 +536,9 @@ def mins_since_last_user_msg(bot_dir: str, chat_id: str = None,
     bot_name：dispatcher 用 BOT_NAME 拼 marker；若 bot_dir.basename 与 bot_name 不同，
     显式传 bot_name 才能找对文件（一般两者相同）。
     """
+    if _ledger_path(bot_dir, bot_name):
+        last = last_user_msg_ts(bot_dir, chat_id, bot_name)
+        return None if last is None else int((time.time() - last) // 60)
     state_dir = os.path.expanduser("~/.claude/dispatcher/.self-initiate-state")
     marker_key = bot_name or os.path.basename(os.path.abspath(bot_dir))
     if chat_id:
