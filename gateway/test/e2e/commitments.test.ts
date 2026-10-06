@@ -48,6 +48,7 @@ test('commitment_create 登记 → 到点触发一轮 → 真正送达才算兑�
 test('兜底：说了"半小时后提醒你"却没登记 → 自动登记并告诉模型；含糊的说法提醒它自己登记', async () => {
   const { tg, b, gw } = await setup()
   await say(tg, '!say:好的，半小时后提醒你喝水', '好的，半小时后提醒你喝水')
+  await until(() => commitments(gw).length > 0, 'auto commitment') // 回复送到之后，这一轮才收尾、做兜底识别
   const c = commitments(gw)
   expect(c.length).toBe(1)
   expect(c[0].source).toBe('auto')

@@ -69,6 +69,8 @@ export type GatewayOpts = {
   hangTickMs: number
   /** 测试用：换掉作息查询命令（默认 python3 hang_situation.py <bot> --plan） */
   situationCmd?: string[]
+  /** 作息查询结果（含"查不到"）缓存多久（默认 5 分钟） */
+  situationTtlMs: number
   logLevel: 'debug' | 'info' | 'warn' | 'error'
   logMaxBytes: number
   logKeep: number
@@ -195,6 +197,7 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     commitPollMs: num(g.commit_poll_ms, 30_000, 'gateway.commit_poll_ms'),
     commitRetryMs: Array.isArray(g.commit_retry_ms) ? g.commit_retry_ms.map((v, i) => num(v, 0, `gateway.commit_retry_ms[${i}]`)) : [5 * 60_000, 15 * 60_000],
     hangTickMs: num(g.hang_tick_ms, 60_000, 'gateway.hang_tick_ms'),
+    situationTtlMs: num(g.situation_ttl_ms, 5 * 60_000, 'gateway.situation_ttl_ms'),
     situationCmd: Array.isArray(g.situation_cmd) && g.situation_cmd.length > 0 ? g.situation_cmd.map(String) : undefined,
     logLevel: level as GatewayOpts['logLevel'],
     logMaxBytes: num(g.log_max_bytes, 10 * 1024 * 1024, 'gateway.log_max_bytes'),

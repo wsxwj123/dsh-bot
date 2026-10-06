@@ -16,7 +16,6 @@ export type Situation = {
 }
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..', '..')
-const TTL_MS = 5 * 60_000
 
 export function isAsleep(s: Situation | null): boolean {
   return !!s && /睡|sleep/i.test(s.state)
@@ -26,6 +25,8 @@ export class SituationBridge {
   private cache: Situation | null = null
   private inflight: Promise<Situation | null> | null = null
   private warnedAt = 0
+  /** 上次查询失败的时刻：查不到也缓存一段时间，不每次检查都去起一个 Python 进程 */
+  private failedAt = 0
 
   constructor(
     private readonly botId: string,
@@ -33,15 +34,17 @@ export class SituationBridge {
     private readonly log: Logger,
     /** 测试用：换掉默认的 python3 hang_situation.py <bot> --plan */
     private readonly cmd?: string[],
+    private readonly ttlMs = 5 * 60_000,
   ) {}
 
   /** 最近一次查到的（不发起新查询）；超过 10 分钟没更新就当不知道 */
   current(now = Date.now()): Situation | null {
-    return this.cache && now - this.cache.at < 2 * TTL_MS ? this.cache : null
+    return this.cache && now - this.cache.at < 2 * this.ttlMs ? this.cache : null
   }
 
   async get(now = Date.now()): Promise<Situation | null> {
-    if (this.cache && now - this.cache.at < TTL_MS) return this.cache
+    if (this.cache && now - this.cache.at < this.ttlMs) return this.cache
+    if (now - this.failedAt < this.ttlMs) return this.current(now)
     return this.refresh()
   }
 
@@ -84,6 +87,7 @@ export class SituationBridge {
       }
       return this.cache
     } catch (e) {
+      this.failedAt = Date.now()
       if (Date.now() - this.warnedAt > 10 * 60_000) { this.warnedAt = Date.now(); this.log.warn('situation.unavailable', { err: safeError(e) }) }
       return this.current()
     }

@@ -100,6 +100,8 @@ export class Engine {
   private waiting = new Set<string>()
   private loaded = new Map<string, number>() // sessionId → dsh 代数
   private dshStarting: Promise<void> | null = null
+  /** 空闲重启 dsh 进行中：这期间来的消息要等旧进程停完再用新进程（CI 上抓到过：消息被交给正在退出的旧进程） */
+  private restarting: Promise<void> | null = null
   /** 启动时清理旧 dsh 的任务；拉起新 dsh 之前必须等它做完，免得把新进程当成旧的清掉 */
   private reaping: Promise<void> = Promise.resolve()
   private dshBackoff = new Backoff(2_000, 60_000)
@@ -140,7 +142,7 @@ export class Engine {
     this.configBrain = cfg.brain
     this.brain = this.withOverride(cfg.brain)
     this.memory = new MemoryStore(cfg.memoryDir)
-    this.situation = new SituationBridge(cfg.id, cfg.configPath, log, cfg.gw.situationCmd)
+    this.situation = new SituationBridge(cfg.id, cfg.configPath, log, cfg.gw.situationCmd, cfg.gw.situationTtlMs)
     this.commitments = new Commitments({
       ledger, log, situation: this.situation,
       timeZone: () => this.cfg.gw.timezone,
@@ -428,6 +430,7 @@ export class Engine {
   }
 
   private async ensureDsh(): Promise<void> {
+    if (this.restarting) await this.restarting
     if (this.dsh.running) return
     if (this.dshStarting) return this.dshStarting
     const wait = this.dshNextTryAt - Date.now()
@@ -1156,8 +1159,11 @@ export class Engine {
     if (!this.restartPending || this.runningCount > 0) return
     this.restartPending = false
     this.log.info('dsh.restart_idle')
-    await this.dsh.stop()
-    this.loaded.clear()
+    this.restarting = (async () => {
+      await this.dsh.stop()
+      this.loaded.clear()
+    })().finally(() => { this.restarting = null })
+    await this.restarting
     for (const c of this.ledger.chatsWithPending()) this.schedule(c)
   }
 
