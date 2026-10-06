@@ -3,7 +3,7 @@ import { loadAccess } from '../config'
 import type { Ledger } from '../ledger'
 import { safeError, type Logger } from '../log'
 import { Backoff, crashPoint } from '../util'
-import { TgApiError, type TelegramApi, type TgUpdate } from './api'
+import { TgApiError, type TelegramApi, type TgMessage, type TgUpdate } from './api'
 import { gate, toInbound } from './inbound'
 
 export type PollerHealth = { lastOkAt: number; lastError: string | null; conflict: boolean }
@@ -18,7 +18,11 @@ export class Poller {
     private readonly api: TelegramApi,
     private readonly ledger: Ledger,
     private readonly log: Logger,
-    private readonly o: { channelDir: string; botId: number | null; pollTimeoutS: number; onInbound: (chatId: string) => void; onFatal: (why: string) => void },
+    private readonly o: {
+      channelDir: string; botId: number | null; pollTimeoutS: number; onInbound: (chatId: string) => void; onFatal: (why: string) => void
+      /** 真人发来的消息：群消息（记进群聊记录）和私聊消息（记"刚聊过"，导演据此不点正在私聊的 bot） */
+      onHumanMessage?: (msg: TgMessage, observed: boolean) => void
+    },
   ) {}
 
   start(): void {
@@ -79,9 +83,15 @@ export class Poller {
     if (!msg) { this.ledger.recordUpdate(u.update_id, null); return }
     const access = loadAccess(this.o.channelDir)
     const g = gate(msg, access)
-    if (!g.deliver) {
+    if (g.deliver === false) {
       this.ledger.recordUpdate(u.update_id, null)
       this.log.info('inbound.dropped', { chat: msg.chat.id, reason: g.reason })
+      return
+    }
+    if (g.deliver === 'observe') {
+      this.ledger.recordUpdate(u.update_id, null)
+      this.log.info('inbound.observed', { chat: msg.chat.id })
+      this.o.onHumanMessage?.(msg, true)
       return
     }
     const row = toInbound(msg, this.o.botId)
@@ -92,6 +102,7 @@ export class Poller {
     this.log.chatLine(row.senderName || '对方', row.chatId, row.text)
     // 已读回执：私聊没有原生的"已读"，沿用旧系统的 👀
     if (row.kind === 'user') void this.api.setMessageReaction(row.chatId, msg.message_id, '👀').catch(() => {})
+    if (row.kind === 'user') this.o.onHumanMessage?.(msg, false)
     this.o.onInbound(row.chatId)
   }
 }

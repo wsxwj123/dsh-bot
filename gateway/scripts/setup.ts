@@ -65,6 +65,20 @@ function credentials(): number {
   return 0
 }
 
+/** 多个 bot：新 bot 的本机接口端口取已有配置里没用过的下一个（从 17950 起） */
+function nextPort(cfgDir: string): number {
+  const used = new Set<number>()
+  try {
+    for (const f of readdirSync(cfgDir)) {
+      const m = f.endsWith('.yml') ? readFileSync(join(cfgDir, f), 'utf8').match(/^dispatcher_port:\s*(\d+)/m) : null
+      if (m) used.add(Number(m[1]))
+    }
+  } catch {}
+  let p = 17950
+  while (used.has(p)) p++
+  return p
+}
+
 function bot(): number {
   const id = rest[0]
   const from = opt('from')
@@ -98,7 +112,7 @@ function bot(): number {
       `id: ${id}`,
       `display_name: ${id}`,
       `bot_channel_path: ${JSON.stringify(ch)}`,
-      `dispatcher_port: ${Number(opt('port') ?? 17950)}   # 本机接口端口，只听 127.0.0.1`,
+      `dispatcher_port: ${Number(opt('port') ?? nextPort(cfgDir))}   # 本机接口端口，只听 127.0.0.1；每个 bot 不一样`,
       '# life_config: ~/旧仓库/configs/<旧名>.yml   # 作息、生活、情绪等设置从旧配置读（M3 起）；这里写了的键优先',
       '',
       'brain:',

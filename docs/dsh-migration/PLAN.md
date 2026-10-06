@@ -730,4 +730,5 @@ M1 私聊收发 → M2 记忆 → M3 承诺与主动消息 → M4 语音、生�
 - M2 的说明、验收结果和真机清单见 `docs/dsh-migration/M2.md`。
 - M3 的说明、验收结果和真机清单见 `docs/dsh-migration/M3.md`。
 - M4 的说明、验收结果和真机清单见 `docs/dsh-migration/M4.md`。
+- M5 的说明、验收结果和真机清单见 `docs/dsh-migration/M5.md`。
 - 真机验收用 bot5。验收前需要你先停掉 bot5 的旧程序：同一个令牌，同一时刻只能有一个程序在收消息。

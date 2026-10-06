@@ -27,7 +27,7 @@ type Update = { update_id: number; message: any }
 
 export class FakeTelegram {
   readonly token = '123456789:AAFakeTokenForTestsOnly_abcdefghijklmnop'
-  readonly bot = { id: 900001, is_bot: true, first_name: 'TestBot', username: 'test_dsh_bot' }
+  readonly bot: { id: number; is_bot: true; first_name: string; username: string }
   server: ReturnType<typeof Bun.serve>
   sent: Sent[] = []
   calls: { method: string; at: number; params: Record<string, any> }[] = []
@@ -38,7 +38,9 @@ export class FakeTelegram {
   private nextMsg = 1000
   private waiters: (() => void)[] = []
 
-  constructor() {
+  /** 多个 bot（群聊测试）：每个假 Telegram 当一个不同的 bot */
+  constructor(o: { botId?: number; username?: string } = {}) {
+    this.bot = { id: o.botId ?? 900001, is_bot: true, first_name: o.username ?? 'TestBot', username: o.username ?? 'test_dsh_bot' }
     this.server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: req => this.handle(req) })
   }
 
@@ -47,8 +49,10 @@ export class FakeTelegram {
   stop(): void { this.server.stop(true) }
 
   /** 用户发来一条私聊文字 */
-  pushText(fromId: number, text: string, o: { chatId?: number; replyTo?: { message_id: number; text?: string; fromBot?: boolean }; firstName?: string } = {}): number {
-    const mid = this.nextMsg++
+  pushText(fromId: number, text: string, o: { chatId?: number; replyTo?: { message_id: number; text?: string; fromBot?: boolean }; firstName?: string; messageId?: number } = {}): number {
+    // messageId：同一条群消息投给多个 bot 时，消息编号要相同
+    const mid = o.messageId ?? this.nextMsg++
+    if (o.messageId) this.nextMsg = Math.max(this.nextMsg, o.messageId + 1)
     const chatId = o.chatId ?? fromId
     const message: any = {
       message_id: mid,
