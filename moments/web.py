@@ -183,8 +183,13 @@ def _ago(ts: int) -> str:
     return f"{diff // 86400}天前"
 
 
+def _moments_id(b: dict) -> str:
+    """朋友圈库里记这个 bot 用的名字：新系统的 bot 用旧系统里的名字（config_loader 的 _life_id）"""
+    return b.get("_life_id") or b["_bot_id"]
+
+
 def _bot_meta(b: dict) -> dict:
-    bot_id = b["_bot_id"]
+    bot_id = _moments_id(b)
     profile = db.get_profile(bot_id)
     signature = profile.get("signature") or b.get("bio", "")
     # 名字优先 db.display_name（用户改的），fallback yml display_name
@@ -223,7 +228,7 @@ def feed():
     likes_map = db.likers_bulk(ids)
     comments_map = db.comments_bulk(ids)
     bots = config_loader.list_enabled_bots()
-    bot_meta_by_id = {b["_bot_id"]: _bot_meta(b) for b in bots}
+    bot_meta_by_id = {_moments_id(b): _bot_meta(b) for b in bots}
     # 用户自己作为"虚拟 bot"，其朋友圈卡片头像/名字也走这里
     bot_meta_by_id[USER_PROFILE_KEY] = _user_meta()
 
@@ -406,7 +411,7 @@ def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
     user_address = cfg.get("user_address", USER_ADDRESS_FALLBACK)
     visibility_label = "私密" if (moment.get("visibility") or "public") == "private" else "公开"
     moment_text = (moment.get("text") or "")[:200]
-    bot_id = cfg.get("id") or cfg.get("_bot_id")
+    bot_id = cfg.get("_life_id") or cfg.get("id") or cfg.get("_bot_id")
 
     # 取该 moment 当前所有评论（含历史 + 你刚发的这条），让 bot 看到完整上下文
     # 排除 comment_id 自己（因为下面要单独突出"最新这条"）
@@ -576,7 +581,7 @@ def _trigger_bot_see_user_moment(bot_cfg: dict, moment_id: int, text: str,
     - 不知道还有谁评了
     """
     import json as _json
-    bot_id = bot_cfg["_bot_id"]
+    bot_id = _moments_id(bot_cfg)
     bot_dir = bot_cfg["bot_channel_path"]
     chat_id = str(bot_cfg.get("chat_id", ""))
     if not chat_id:

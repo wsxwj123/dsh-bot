@@ -72,6 +72,10 @@ def load_bot(bot_id: str) -> dict:
         with open(os.path.expanduser(life.strip()), encoding="utf-8") as f:
             base = yaml.safe_load(f) or {}
         cfg = {**base, **cfg}
+    # 朋友圈、画风里用的名字（旧系统里的 bot 名），见 _life_alias
+    life_id = cfg.get("life_id") or (os.path.splitext(os.path.basename(life.strip()))[0] if isinstance(life, str) and life.strip() else None)
+    if life_id:
+        cfg["_life_id"] = str(life_id)
 
     # 运行时会注入的计算字段不应来自 YAML；先清掉残留，避免旧值绕过年龄闸门。
     cfg.pop("_age", None)

@@ -151,6 +151,7 @@ def test_新系统的bot用旧名字也能找到配置(tmp_path, monkeypatch):
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(cfgs))
     cfg = config_loader.load_bot("chen")
     assert cfg["bot_channel_path"] == "/new/channel" and cfg["chat_id"] == "1"
+    assert cfg["_life_id"] == "chen"                          # 朋友圈网页按这个名字找头像、认"自己的评论"
     assert config_loader.load_bot("bot5")["bot_channel_path"] == "/new/channel"
     with pytest.raises(FileNotFoundError):
         config_loader.load_bot("nobody")

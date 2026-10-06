@@ -337,7 +337,7 @@ export class Engine {
       const d = describeResults(results)
       at.delivered += d.delivered
       if (d.delivered > 0 && at.silent) { this.ledger.clearSilent(at.rootId); at.silent = false }
-      this.log.info('tool.reply', { turn: at.turnId, parts: results.length, delivered: d.delivered, duplicates: results.filter(r => r.state === 'duplicate').length })
+      this.log.info('tool.reply', { turn: at.turnId, parts: results.length, delivered: d.delivered, duplicates: results.filter(r => r.state === 'duplicate').length, ...(voice ? { voice: true } : {}) })
       return { text: d.text, isError: d.isError }
     } finally {
       at.toolsInFlight--
