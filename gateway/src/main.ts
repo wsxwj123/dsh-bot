@@ -47,7 +47,7 @@ async function main(): Promise<void> {
   mkdirSync(cfg.botDir, { recursive: true, mode: 0o700 })
   if (process.platform !== 'win32') chmodSync(cfg.botDir, 0o700)
   for (const d of [cfg.stateDir, cfg.dshHome, cfg.workDir, cfg.homeDir, cfg.logsDir, cfg.mediaDir]) mkdirSync(d, { recursive: true, mode: 0o700 })
-  const log = new Logger({ dir: cfg.logsDir, level: cfg.gw.logLevel, console: process.env.DSH_BOT_LOG_CONSOLE === '1', maxBytes: cfg.gw.logMaxBytes, keep: cfg.gw.logKeep, bot: cfg.id })
+  const log = new Logger({ dir: cfg.logsDir, level: cfg.gw.logLevel, console: process.env.DSH_BOT_LOG_CONSOLE === '1' || (process.stderr.isTTY === true && process.env.DSH_BOT_LOG_CONSOLE !== '0'), pretty: process.stderr.isTTY === true, maxBytes: cfg.gw.logMaxBytes, keep: cfg.gw.logKeep, bot: cfg.id })
 
   const token = readTelegramToken(cfg.channelDir)
   registerSecret(token)

@@ -46,3 +46,12 @@ test('Logger 写盘前脱敏', () => {
   expect(existsSync(join(dir, 'chat.log'))).toBe(true)
   rmSync(dir, { recursive: true, force: true })
 })
+
+test('看日志：一行一条，时间在前，告警和错误有标记；对话行换成一行；读不懂的行原样给', () => {
+  const { formatEvent, formatChat } = require('../../src/logview') as typeof import('../../src/logview')
+  const at = '2026-10-06T15:41:05.000Z'
+  const ev = formatEvent(JSON.stringify({ at, level: 'warn', event: 'tool.reply_slow', bot: 'bot5', turn: 60, detail: 'a b' }))
+  expect(ev).toMatch(/^\d{2}:\d{2}:\d{2} {2}⚠ tool\.reply_slow {2}turn=60 detail=a b$/)
+  expect(formatEvent('not json')).toBe('not json')
+  expect(formatChat(`${at} [42] bot: 第一行⏎第二行`)).toMatch(/^\d{2}:\d{2}:\d{2} {2}💬 \[42\] bot: 第一行 \/ 第二行$/)
+})
