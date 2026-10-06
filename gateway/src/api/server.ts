@@ -16,7 +16,11 @@ export type ApiDeps = {
   sender: Sender
   channelDir: string
   allowDirs: () => string[]
+  /** 电话里 bot 说过的话 → 登记承诺，返回要告诉模型的话 */
+  callPromises?: (chatId: string, lines: string[]) => string[]
   health: () => { ok: boolean } & Record<string, unknown>
+  /** 管理台看模型、换模型（和 /model 命令同一套逻辑） */
+  model?: { info: () => Promise<unknown>; set: (spec: string) => Promise<{ ok: boolean }> }
   onInbound: (chatId: string) => void
 }
 
@@ -44,6 +48,12 @@ export class ApiServer {
       const h = this.d.health()
       return json(h, h.ok ? 200 : 503)
     }
+    if (req.method === 'GET' && url.pathname === '/v1/model' && this.d.model) {
+      try { return json(await this.d.model.info()) } catch (e) {
+        this.d.log.error('api.failed', { path: url.pathname, err: safeError(e) })
+        return json({ error: 'internal error' }, 500)
+      }
+    }
     if (req.method !== 'POST') return json({ error: 'not found' }, 404)
     const ct = (req.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
     if (ct !== 'application/json') return json({ error: 'content-type must be application/json' }, 415)
@@ -62,6 +72,13 @@ export class ApiServer {
       switch (url.pathname) {
         case '/v1/inject': return this.inject(body)
         case '/v1/send': return await this.send(body)
+        case '/v1/model': {
+          if (!this.d.model) return json({ error: 'not found' }, 404)
+          const spec = typeof body.spec === 'string' ? body.spec.slice(0, 200) : ''
+          if (!spec.trim()) return json({ error: 'spec is required' }, 400)
+          const r = await this.d.model.set(spec)
+          return json(r, r.ok ? 200 : 400)
+        }
         default: return json({ error: 'not found' }, 404)
       }
     } catch (e) {
@@ -83,7 +100,11 @@ export class ApiServer {
     if (!chatId || !text.trim()) return json({ error: 'chat_id and text are required' }, 400)
     if (!this.chatAllowed(chatId)) return json({ error: 'chat not allowed' }, 403)
     const key = typeof b.key === 'string' && b.key ? b.key.slice(0, 120) : randomToken(12)
-    const r = this.d.ledger.insertInbound({ ukey: `ext:${source}:${key}`, chatId, kind: 'synthetic', text, ts: Date.now(), meta: { source } })
+    // bot 自己说过的话（电话里）：找许诺登记成承诺，登记结果附在这条消息后面告诉模型
+    const lines = Array.isArray(b.bot_lines) ? b.bot_lines.filter((x): x is string => typeof x === 'string').slice(0, 200) : []
+    const dup = this.d.ledger.inboundByKey(`ext:${source}:${key}`)
+    const hints = lines.length && !dup && this.d.callPromises ? this.d.callPromises(chatId, lines) : []
+    const r = this.d.ledger.insertInbound({ ukey: `ext:${source}:${key}`, chatId, kind: 'synthetic', text: hints.length ? `${text}\n${hints.join('\n')}` : text, ts: Date.now(), meta: { source } })
     if (r.inserted) this.d.onInbound(chatId)
     return json({ ok: true, id: r.id, duplicate: !r.inserted })
   }

@@ -183,8 +183,13 @@ def _ago(ts: int) -> str:
     return f"{diff // 86400}天前"
 
 
+def _moments_id(b: dict) -> str:
+    """朋友圈库里记这个 bot 用的名字：新系统的 bot 用旧系统里的名字（config_loader 的 _life_id）"""
+    return b.get("_life_id") or b["_bot_id"]
+
+
 def _bot_meta(b: dict) -> dict:
-    bot_id = b["_bot_id"]
+    bot_id = _moments_id(b)
     profile = db.get_profile(bot_id)
     signature = profile.get("signature") or b.get("bio", "")
     # 名字优先 db.display_name（用户改的），fallback yml display_name
@@ -223,7 +228,7 @@ def feed():
     likes_map = db.likers_bulk(ids)
     comments_map = db.comments_bulk(ids)
     bots = config_loader.list_enabled_bots()
-    bot_meta_by_id = {b["_bot_id"]: _bot_meta(b) for b in bots}
+    bot_meta_by_id = {_moments_id(b): _bot_meta(b) for b in bots}
     # 用户自己作为"虚拟 bot"，其朋友圈卡片头像/名字也走这里
     bot_meta_by_id[USER_PROFILE_KEY] = _user_meta()
 
@@ -379,6 +384,18 @@ def api_comment():
     })
 
 
+def _deliver_dsh(bot_dir: str, chat_id: str, text: str, source: str, key: str) -> bool:
+    """新系统（dsh-bot 网关）的 bot：通知投给网关（命令换成工具用法），返回 True；旧系统的 bot 返回 False，照旧写 inbox。"""
+    import gateway_client
+    if not gateway_client.available(bot_dir):
+        return False
+    try:
+        return gateway_client.inject(bot_dir, chat_id, gateway_client.for_dsh(text), source, key)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"[moments.web] 投给网关失败：{type(e).__name__}\n")
+        return True  # 新系统的 bot 不再写 inbox（没有人读）
+
+
 def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
                               comment_id: int, user_display: str):
     """写 inbox JSON 让 dispatcher 唤起 worker；worker 通过 Bash 调脚本回写朋友圈。"""
@@ -394,7 +411,7 @@ def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
     user_address = cfg.get("user_address", USER_ADDRESS_FALLBACK)
     visibility_label = "私密" if (moment.get("visibility") or "public") == "private" else "公开"
     moment_text = (moment.get("text") or "")[:200]
-    bot_id = cfg.get("id") or cfg.get("_bot_id")
+    bot_id = cfg.get("_life_id") or cfg.get("id") or cfg.get("_bot_id")
 
     # 取该 moment 当前所有评论（含历史 + 你刚发的这条），让 bot 看到完整上下文
     # 排除 comment_id 自己（因为下面要单独突出"最新这条"）
@@ -448,6 +465,8 @@ def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
     _ = user_display
 
     ms = int(time.time() * 1000)
+    if _deliver_dsh(bot_dir, chat_id, text, "moment_reply", f"moment-reply:{moment['id']}:{comment_id}"):
+        return "gateway"
     fname = os.path.join(inbox, f"moment-reply-{ms}.json")
     iso_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     payload = {
@@ -562,7 +581,7 @@ def _trigger_bot_see_user_moment(bot_cfg: dict, moment_id: int, text: str,
     - 不知道还有谁评了
     """
     import json as _json
-    bot_id = bot_cfg["_bot_id"]
+    bot_id = _moments_id(bot_cfg)
     bot_dir = bot_cfg["bot_channel_path"]
     chat_id = str(bot_cfg.get("chat_id", ""))
     if not chat_id:
@@ -631,6 +650,8 @@ def _trigger_bot_see_user_moment(bot_cfg: dict, moment_id: int, text: str,
     )
 
     ms = int(time.time() * 1000)
+    if _deliver_dsh(bot_dir, chat_id, inbox_text, "user_moment", f"user-moment:{moment_id}"):
+        return
     fname = os.path.join(inbox, f"user-moment-{ms}-{moment_id}.json")
     iso_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     payload = {

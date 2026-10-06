@@ -15,7 +15,7 @@
 // <根> 默认 ~/.dsh-bot，可用环境变量 DSH_BOT_HOME 改。
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
-import { checkCredentialsFile, ConfigError, expandHome, loadBotConfig, readTelegramToken, rootDir } from '../src/config'
+import { checkCredentialsFile, ConfigError, expandHome, loadAccess, loadBotConfig, readTelegramToken, rootDir } from '../src/config'
 import { defaultDshCommand } from '../src/dsh/process'
 
 const REPO = resolve(import.meta.dir, '..', '..')
@@ -24,6 +24,7 @@ const [cmd, ...rest] = process.argv.slice(2)
 const opt = (n: string) => { const i = rest.indexOf(`--${n}`); return i >= 0 ? rest[i + 1] : undefined }
 const ok = (s: string) => console.log(`  ✅ ${s}`)
 const bad = (s: string) => console.log(`  ⚠️  ${s}`)
+const note = (s: string) => console.log(`  ·  ${s}`)
 
 async function harness(): Promise<number> {
   const dest = join(root, 'harness')
@@ -176,7 +177,7 @@ function memory(): number {
   return 0
 }
 
-function check(): number {
+async function check(): Promise<number> {
   const path = rest[0]
   if (!path) { bad('用法：setup.ts check <配置文件>'); return 2 }
   let problems = 0
@@ -186,10 +187,10 @@ function check(): number {
     existsSync(join(cfg.channelDir, 'CLAUDE.md')) ? ok('人设文件在') : (bad(`缺人设：${join(cfg.channelDir, 'CLAUDE.md')}`), problems++)
     try { readTelegramToken(cfg.channelDir, {}); ok('Telegram 令牌在 channel/.env 里') } catch (e) { bad((e as Error).message); problems++ }
     const cred = checkCredentialsFile(cfg.credentialsPath)
+    let refs: Record<string, unknown> = {}
     if (cred) { bad(cred); problems++ } else {
       ok('凭据文件在，权限正确')
       // 只看密钥"长得像不像真的"，绝不打印值
-      let refs: Record<string, unknown> = {}
       try { refs = ((Bun.YAML.parse(readFileSync(cfg.credentialsPath, 'utf8')) as { refs?: Record<string, unknown> })?.refs) ?? {} } catch { bad('凭据文件不是合法的 YAML'); problems++ }
       const need = new Map<string, RegExp>()
       if (cfg.brain.provider === 'deepseek-official') need.set('DEEPSEEK_API_KEY', /^sk-[A-Za-z0-9_-]{16,}$/)
@@ -205,6 +206,26 @@ function check(): number {
     const [, bin] = defaultDshCommand(cfg.harnessDir)
     existsSync(bin!) ? ok(`dsh 已安装在 ${cfg.harnessDir}`) : (bad('dsh 还没装：先跑 setup.ts harness'), problems++)
     Bun.which('node') ? ok('node 在') : (bad('没找到 node（dsh 要用 node 运行）'), problems++)
+    // 语音、生图、朋友圈：没配不算问题，只是对应的功能用不了。不显示路径和名字（输出会贴进报告）
+    loadAccess(cfg.channelDir).voiceId ? ok('音色已配（access.json 的 voiceId）') : note('没配音色：bot 想发语音时会改发文字')
+    try {
+      const r = await fetch(`${cfg.gw.voiceBridgeUrl}/health`, { signal: AbortSignal.timeout(3000) })
+      r.ok ? ok('voice-bridge 在跑') : note(`voice-bridge 回了 ${r.status}`)
+    } catch { note('voice-bridge 连不上：收到的语音转不成文字，也发不了语音') }
+    if (cfg.gw.imageProvider === 'off') note('生图关着（image_provider: off）')
+    else {
+      const dir = expandHome(cfg.gw.imageSkillDir ?? join(import.meta.dir, '..', '..', 'skills', `${cfg.gw.imageProvider}-skill`))
+      existsSync(join(dir, 'SKILL.md')) ? ok(`生图（${cfg.gw.imageProvider}）的说明文件在`) : note('找不到生图说明文件（image_skill_dir 下的 SKILL.md）')
+      if (cfg.gw.imageProvider === 'novelai') {
+        const inRefs = typeof refs.NOVELAI_BEARER_TOKEN === 'string' && refs.NOVELAI_BEARER_TOKEN.trim() !== ''
+        let inSkill = false
+        try { inSkill = /^\s*(NOVELAI_JWT|NOVELAI_BEARER_TOKEN|NOVELAI_TOKEN)\s*=\s*\S/m.test(readFileSync(join(dir, '.env.local'), 'utf8')) } catch {}
+        inRefs || inSkill ? ok(`NovelAI 令牌已配（在${inRefs ? '凭据文件' : '技能目录的 .env.local'}里，没有显示内容）`) : note('没找到 NovelAI 令牌：凭据文件 refs 里加 NOVELAI_BEARER_TOKEN，或者写在技能目录的 .env.local')
+      }
+    }
+    if (!cfg.gw.botlifeDb) note('没设 botlife_db：朋友圈用新仓库自己的 state.db，和网页上看到的不是同一份')
+    else existsSync(expandHome(cfg.gw.botlifeDb)) ? ok('朋友圈库在') : note('botlife_db 指的文件不存在')
+    note(cfg.lifeId !== cfg.id ? '朋友圈、画风按旧系统里的名字找（取自 life_config 或 life_id）' : '朋友圈、画风按新配置的 id 找（没写 life_config）')
   } catch (e) {
     bad(e instanceof ConfigError ? e.message : String((e as Error).message ?? e))
     return 1

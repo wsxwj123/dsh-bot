@@ -1,6 +1,7 @@
 // 逐段发送并逐段记账。每段的结局都如实返回给调用方（最终告诉模型），已经发出去的段绝不重发。
-import { existsSync, realpathSync, statSync } from 'fs'
-import { extname, relative, isAbsolute } from 'path'
+import { existsSync, realpathSync, rmSync, statSync } from 'fs'
+import { tmpdir } from 'os'
+import { extname, isAbsolute, join, relative } from 'path'
 import type { Access } from '../config'
 import type { Ledger, OutboundKind } from '../ledger'
 import { safeError, type Logger } from '../log'
@@ -28,6 +29,13 @@ export type SendRequest = {
   kind?: OutboundKind
   /** 这些文字（按 normText 比较）这一轮已经发过了，遇到就跳过不发 */
   skipTexts?: Set<string>
+  /** 这些文件（真实路径）这一轮已经发过或正在发，遇到就跳过不发 */
+  skipFiles?: Set<string>
+  /** 发语音：把一段文字合成语音文件，返回路径；合成失败返回 null */
+  voice?: (text: string) => Promise<string | null>
+  /** 语音朗读稿，按段对应文字段（第 i 段文字配第 i 段朗读稿）。和旧系统一样：每段先发文字，再发语音；
+   *  没给朗读稿就读文字本身；某段朗读稿是空的，这一段只发文字 */
+  voiceTexts?: string[]
 }
 
 /** 比较"是不是同一句话"时用：去掉首尾空白，连续空白算一个 */
@@ -79,6 +87,18 @@ export function planParts(text: string, files: string[], access: Access): SendIt
   return items
 }
 
+/** 大 PNG 先转成 JPEG 再发（Telegram 收到照片本来也会压成 JPEG）。真机上 2MB 的 PNG 经代理要传 30 秒以上（M4 问题 4）。
+ *  只在有 sips 的 Mac 上做（系统自带，不加依赖）；转不成就发原图。返回临时文件路径，调用方发完删掉 */
+export function shrinkPhoto(path: string): string | null {
+  if (process.platform !== 'darwin' || extname(path).toLowerCase() !== '.png') return null
+  try { if (statSync(path).size < 1_000_000) return null } catch { return null }
+  const sips = Bun.which('sips')
+  if (!sips) return null
+  const out = join(tmpdir(), `dshbot-photo-${process.pid}-${Date.now()}.jpg`)
+  const r = Bun.spawnSync([sips, '-s', 'format', 'jpeg', '-s', 'formatOptions', '85', path, '--out', out], { stdout: 'ignore', stderr: 'ignore' })
+  return r.exitCode === 0 && existsSync(out) ? out : null
+}
+
 /** 文件只允许来自白名单目录（防止把本机任意文件发出去）。返回规范化后的真实路径，不允许时返回 null。 */
 export function allowedFile(path: string, allowDirs: string[]): string | null {
   if (!isAbsolute(path) || !existsSync(path)) return null
@@ -95,6 +115,10 @@ export function allowedFile(path: string, allowDirs: string[]): string | null {
 }
 
 export class Sender {
+  /** 网关正在停止：还没开始发的段不再发（真机 M4 问题 7：停了以后用户还陆续收到消息） */
+  private halted = false
+  halt(): void { this.halted = true }
+
   constructor(
     private readonly api: TelegramApi,
     private readonly ledger: Ledger,
@@ -111,8 +135,15 @@ export class Sender {
     let waitBudget = this.o.maxSendWaitMs
     let stopAfter: { retryAfterSec: number } | null = null
 
+    let textIdx = 0
     for (let i = 0; i < items.length; i++) {
       const item = items[i]!
+      const ti = item.kind === 'text' ? textIdx++ : -1
+      if (this.halted) {
+        this.log.info('send.halted', { chat: req.chatId, part: i + 1 })
+        results.push({ index: i + 1, kind: item.kind, state: 'skipped', reason: '网关正在停止' })
+        continue
+      }
       if (stopAfter) { results.push({ index: i + 1, kind: item.kind, state: 'skipped', reason: '被 Telegram 限流', retryAfterSec: stopAfter.retryAfterSec }); continue }
       if (i > 0 && delay > 0) {
         void this.api.sendChatAction(req.chatId).catch(() => {})
@@ -128,6 +159,9 @@ export class Sender {
       if (item.kind === 'file') {
         filePath = allowedFile(item.path, this.o.allowDirs())
         if (!filePath) { results.push({ index: i + 1, kind: 'file', state: 'failed', reason: '文件不存在或不在允许发送的目录里' }); continue }
+        // 同一轮里同一个文件只发一次（真机 M4 问题 3：发图慢、模型以为没发出去又调一次 reply，图发了两遍）
+        if (req.skipFiles?.has(filePath)) { results.push({ index: i + 1, kind: 'file', state: 'duplicate' }); continue }
+        req.skipFiles?.add(filePath)
       }
       const outKind: OutboundKind = item.kind === 'text' ? (req.kind ?? 'text') : PHOTO_EXTS.has(extname(filePath!).toLowerCase()) ? 'photo' : 'document'
       const okey = req.turnId !== null ? `turn:${req.turnId}:c${req.callSeq}:p${i + 1}` : null
@@ -136,16 +170,19 @@ export class Sender {
       let attempt = 0
       let useReply = replyTo
       let triedWithoutReply = false
+      const shrunk = outKind === 'photo' ? shrinkPhoto(filePath!) : null
+      if (shrunk) this.log.info('send.photo_shrunk', { chat: req.chatId, part: i + 1, from: statSync(filePath!).size, to: statSync(shrunk).size })
       for (;;) {
         attempt++
         try {
           const m = item.kind === 'text'
             ? await this.api.sendMessage(req.chatId, item.text, { replyTo: useReply })
-            : await this.api.sendFile(outKind === 'photo' ? 'photo' : 'document', req.chatId, filePath!, { replyTo: useReply })
+            : await this.api.sendFile(outKind === 'photo' ? 'photo' : 'document', req.chatId, shrunk ?? filePath!, { replyTo: useReply })
           crashPoint('after_send_before_record')
           this.ledger.outboundResult(outId, 'sent', { tgMessageId: m.message_id })
           results.push({ index: i + 1, kind: item.kind, state: 'sent', messageId: m.message_id })
           if (item.kind === 'text') this.log.chatLine('bot', req.chatId, item.text)
+          if (item.kind === 'text' && req.voice) await this.sendVoice(req, i + 1, req.voiceTexts ? (req.voiceTexts[ti] ?? '') : item.text)
           if (i === 0 && items.length > 1) crashPoint('mid_reply')
           break
         } catch (e) {
@@ -180,8 +217,20 @@ export class Sender {
           break
         }
       }
+      if (shrunk) rmSync(shrunk, { force: true })
     }
     return results
+  }
+
+  /** 文字段发出后补发语音（文字已经在了，语音失败只记日志，不影响这一段算送达） */
+  private async sendVoice(req: SendRequest, part: number, text: string): Promise<void> {
+    if (!text.trim() || !req.voice) return
+    const audio = await req.voice(text)
+    let ok = false
+    if (audio) {
+      try { await this.api.sendFile('voice', req.chatId, audio); ok = true } catch (e) { this.log.warn('send.voice_failed', { chat: req.chatId, part, err: safeError(e) }) }
+    }
+    this.log.info('send.voice', { chat: req.chatId, part, ok })
   }
 }
 
@@ -196,7 +245,7 @@ export function describeResults(results: PartResult[]): { text: string; delivere
   const dup = results.filter(r => r.state === 'duplicate')
   if (bad.length === 0 && amb.length === 0 && dup.length === 0) return { text: `已送达 ${sent.length}/${results.length} 段。${DONE_HINT}`, delivered: sent.length, isError: false }
   const lines = [`送达 ${sent.length}/${results.length} 段。`]
-  for (const r of dup) lines.push(`第 ${r.index} 段和这一轮已经发出的话相同，没有重复发送。`)
+  for (const r of dup) lines.push(`第 ${r.index} 段这一轮已经发过（或正在发），没有重复发送。`)
   for (const r of amb) lines.push(`第 ${r.index} 段：${r.reason}，不要重发这一段。`)
   for (const r of bad) {
     lines.push(r.state === 'skipped'

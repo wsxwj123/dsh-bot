@@ -4,6 +4,7 @@
 // 任何地方都不要把 Error 对象原样写进日志：bun 的网络错误里会带完整请求地址（含 bot 令牌），先过 safeError()。
 import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'fs'
 import { dirname } from 'path'
+import { formatEvent } from './logview'
 
 const PATTERNS: RegExp[] = [
   /\b\d{6,12}:[A-Za-z0-9_-]{30,}\b/g,          // Telegram bot 令牌
@@ -71,7 +72,8 @@ export class Logger {
   private readonly file?: RotatingFile
   private readonly chat?: RotatingFile
   constructor(
-    readonly opts: { dir?: string; level?: Level; console?: boolean; maxBytes?: number; keep?: number; bot?: string } = {},
+    /** pretty：终端里打印成一行一条的人话格式（见 logview.ts），文件里照旧是 JSON */
+    readonly opts: { dir?: string; level?: Level; console?: boolean; pretty?: boolean; maxBytes?: number; keep?: number; bot?: string } = {},
   ) {
     if (opts.dir) {
       this.file = new RotatingFile(`${opts.dir}/gateway.log`, opts.maxBytes, opts.keep)
@@ -85,7 +87,7 @@ export class Logger {
     let line: string
     try { line = redact(JSON.stringify(rec)) } catch { line = redact(`{"event":"${event}","note":"unserializable"}`) }
     this.file?.write(line)
-    if (this.opts.console) process.stderr.write(line + '\n')
+    if (this.opts.console) process.stderr.write((this.opts.pretty ? formatEvent(line) : line) + '\n')
   }
 
   debug(event: string, fields?: Record<string, unknown>) { this.log('debug', event, fields) }

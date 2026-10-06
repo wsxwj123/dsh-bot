@@ -18,8 +18,9 @@ export type Fault = {
   status?: number
   description?: string
   retryAfter?: number
-  /** 'garbled'：先当作已投递记下来，再回一个读不出来的响应（模拟"发出去了但回包丢了"） */
-  mode?: 'error' | 'garbled'
+  /** 'garbled'：先当作已投递记下来，再回一个读不出来的响应（模拟"发出去了但回包丢了"）；'slow'：等 delayMs 再正常处理（模拟大文件上传慢） */
+  mode?: 'error' | 'garbled' | 'slow'
+  delayMs?: number
 }
 
 type Update = { update_id: number; message: any }
@@ -63,6 +64,24 @@ export class FakeTelegram {
     return mid
   }
 
+  /** 用户发来一张图片（可带说明文字） */
+  pushPhoto(fromId: number, caption?: string): number {
+    return this.pushMedia(fromId, { photo: [{ file_id: 'photo-small', width: 90, height: 90 }, { file_id: 'photo-big', width: 800, height: 600 }], ...(caption ? { caption } : {}) })
+  }
+
+  /** 用户发来一条语音 */
+  pushVoice(fromId: number): number {
+    return this.pushMedia(fromId, { voice: { file_id: 'voice-1', duration: 3, mime_type: 'audio/ogg' } })
+  }
+
+  private pushMedia(fromId: number, extra: object): number {
+    const mid = this.nextMsg++
+    const message = { message_id: mid, date: Math.floor(Date.now() / 1000), chat: { id: fromId, type: 'private' }, from: { id: fromId, is_bot: false, first_name: `user${fromId}` }, ...extra }
+    this.updates.push({ update_id: this.nextUpdate++, message })
+    for (const w of this.waiters.splice(0)) w()
+    return mid
+  }
+
   sentTo(chatId: number | string): Sent[] {
     return this.sent.filter(s => s.chatId === String(chatId))
   }
@@ -78,6 +97,9 @@ export class FakeTelegram {
 
   private async handle(req: Request): Promise<Response> {
     const url = new URL(req.url)
+    // 文件下载：/file/bot<令牌>/<路径>
+    const fm = url.pathname.match(/^\/file\/bot([^/]+)\/(.+)$/)
+    if (fm) return fm[1] === this.token ? new Response(new TextEncoder().encode(`fake file ${fm[2]}`)) : new Response('no', { status: 401 })
     const m = url.pathname.match(/^\/bot([^/]+)\/(\w+)$/)
     if (!m || m[1] !== this.token) return Response.json({ ok: false, error_code: 401, description: 'Unauthorized' }, { status: 401 })
     const method = m[2]!
@@ -92,7 +114,8 @@ export class FakeTelegram {
     }
     this.calls.push({ method, at: Date.now(), params })
     const fault = this.takeFault(method, params)
-    if (fault && fault.mode !== 'garbled') {
+    if (fault?.mode === 'slow') await new Promise(r => setTimeout(r, fault.delayMs ?? 1000))
+    else if (fault && fault.mode !== 'garbled') {
       return Response.json({ ok: false, error_code: fault.status ?? 400, description: fault.description ?? 'Bad Request: injected fault', ...(fault.retryAfter ? { parameters: { retry_after: fault.retryAfter } } : {}) }, { status: fault.status ?? 400 })
     }
     switch (method) {
@@ -104,12 +127,14 @@ export class FakeTelegram {
         this.reactions.push({ chatId: String(params.chat_id), messageId: Number(params.message_id), emoji: r })
         return ok(true)
       }
+      case 'getFile': return ok({ file_id: params.file_id, file_path: String(params.file_id).startsWith('voice') ? 'voice/file_1.oga' : 'photos/file_2.jpg' })
       case 'sendMessage':
       case 'sendPhoto':
+      case 'sendVoice':
       case 'sendDocument': {
         const rp = params.reply_parameters
         const replyTo = rp?.message_id ? Number(rp.message_id) : undefined
-        const s: Sent = { method, chatId: String(params.chat_id), messageId: this.nextMsg++, at: Date.now(), ...(params.text !== undefined ? { text: String(params.text) } : {}), ...(replyTo ? { replyTo } : {}), ...(params.photo ?? params.document ? { file: String(params.photo ?? params.document) } : {}) }
+        const s: Sent = { method, chatId: String(params.chat_id), messageId: this.nextMsg++, at: Date.now(), ...(params.text !== undefined ? { text: String(params.text) } : {}), ...(replyTo ? { replyTo } : {}), ...(params.photo ?? params.document ?? params.voice ? { file: String(params.photo ?? params.document ?? params.voice) } : {}) }
         this.sent.push(s)
         if (fault?.mode === 'garbled') return new Response('<html>bad gateway', { status: 200 })
         return ok({ message_id: s.messageId, date: Math.floor(Date.now() / 1000), chat: { id: Number(params.chat_id), type: 'private' }, text: params.text })

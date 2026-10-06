@@ -1,7 +1,7 @@
 # gateway：每个 bot 一个网关进程
 
 取代旧的 `dispatcher/`（调度器 + worker 管理器）。大脑换成 DeepSeek Harness（dsh），通过 ACP 协议驱动。
-设计见 `docs/dsh-migration/PLAN.md`，各期的说明和真机清单见 `docs/dsh-migration/M1.md`、`M2.md`、`M3.md`。
+设计见 `docs/dsh-migration/PLAN.md`，各期的说明和真机清单见 `docs/dsh-migration/M1.md`、`M2.md`、`M3.md`、`M4.md`。
 
 ## 运行
 

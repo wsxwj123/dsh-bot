@@ -54,7 +54,7 @@ afterAll(async () => {
   cleanup(b)
 })
 
-test.skipIf(!available)('真 dsh：只留人设、只有我们自己的 7 个工具、不带隐私字段，回复能发出去', async () => {
+test.skipIf(!available)('真 dsh：只留人设、只有我们自己的 10 个工具、不带隐私字段，回复能发出去', async () => {
   tg.pushText(OWNER, '你好 realA')
   await until(() => tg.sentTo(OWNER).some(s => s.text === '第二段'), 'reply via real dsh', 60_000)
   // 工具结果回到模型那里（逐段送达情况），这一轮才算结束
@@ -69,7 +69,7 @@ test.skipIf(!available)('真 dsh：只留人设、只有我们自己的 7 个工
   expect(systemText).toContain('{⁠{user}}')
   expect(systemText).toContain('运行规则')
   expect(systemText).not.toContain('MCP resource')
-  expect(body.tools.map((t: any) => t.function.name).sort()).toEqual(['mcp__tg__commitment_cancel', 'mcp__tg__commitment_create', 'mcp__tg__commitment_list', 'mcp__tg__react', 'mcp__tg__remember', 'mcp__tg__reply', 'mcp__tg__stay_silent'])
+  expect(body.tools.map((t: any) => t.function.name).sort()).toEqual(['mcp__tg__commitment_cancel', 'mcp__tg__commitment_create', 'mcp__tg__commitment_list', 'mcp__tg__generate_image', 'mcp__tg__image_guide', 'mcp__tg__moments', 'mcp__tg__react', 'mcp__tg__remember', 'mcp__tg__reply', 'mcp__tg__stay_silent'])
   const raw = JSON.stringify(body)
   expect(raw).not.toContain('dsh_session_log')
   expect(raw).not.toContain('dsh_plugin_packages')

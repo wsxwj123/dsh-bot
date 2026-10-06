@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>新系统模型 · 管理台</title>
+</head>
+<body>
+{% include "_nav.html" %}
+<div class="wrap">
+  <h1>新系统模型</h1>
+  <div class="sub">新系统（dsh）bot 用的模型。和在 Telegram 里发 /model 是一回事：换了以后这个 bot 的所有聊天从下一条消息起生效，重启后保持；选「配置文件里的」换回去。</div>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">bot</h2>
+      <button class="btn ghost mini" type="button" id="refresh">刷新</button>
+    </div>
+    <div class="muted" id="msg" style="margin-top:6px"></div>
+    <table style="margin-top:8px">
+      <thead><tr><th>bot</th><th>现在用的</th><th>换成</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden>没有在跑的新系统 bot。</div>
+  </div>
+</div>
+<script>
+const msg = document.getElementById('msg');
+function el(tag, text, cls) { const e = document.createElement(tag); if (text) e.textContent = text; if (cls) e.className = cls; return e; }
+async function load() {
+  hubSay(msg, '读取中…');
+  const r = await hubApi('/hub/api/dsh-model');
+  const rows = document.getElementById('rows');
+  rows.textContent = '';
+  const bots = (r.body && r.body.bots) || [];
+  document.getElementById('empty').hidden = bots.length > 0;
+  hubSay(msg, r.status === 200 ? '' : '读取失败');
+  for (const b of bots) {
+    const tr = document.createElement('tr');
+    tr.appendChild(el('td', b.name + (b.name !== b.id ? '（' + b.id + '）' : '')));
+    if (b.error) { tr.appendChild(el('td', '网关没响应：' + b.error, 'muted')); tr.appendChild(el('td')); tr.appendChild(el('td')); rows.appendChild(tr); continue; }
+    const cur = b.current.provider + ' / ' + b.current.model;
+    const same = b.current.provider === b.config.provider && b.current.model === b.config.model;
+    tr.appendChild(el('td', cur + (same ? '' : '（命令换的）'), 'mono'));
+    const sel = document.createElement('select');
+    const def = document.createElement('option');
+    def.value = 'default'; def.textContent = '配置文件里的：' + b.config.provider + ' / ' + b.config.model;
+    sel.appendChild(def);
+    for (const c of b.choices || []) {
+      const o = document.createElement('option');
+      o.value = c.provider + '/' + c.model; o.textContent = c.provider + ' / ' + c.model;
+      if (c.provider === b.current.provider && c.model === b.current.model && !same) o.selected = true;
+      sel.appendChild(o);
+    }
+    const td = el('td'); td.appendChild(sel); tr.appendChild(td);
+    const btn = el('button', '换', 'btn mini'); btn.type = 'button';
+    btn.onclick = async () => {
+      btn.disabled = true;
+      const s = await hubApi('/hub/api/dsh-model/' + encodeURIComponent(b.id), {method: 'POST', body: JSON.stringify({spec: sel.value})});
+      btn.disabled = false;
+      hubSay(msg, b.name + '：' + ((s.body && (s.body.text || s.body.detail)) || ('失败（' + s.status + '）')));
+      if (s.status === 200) load();
+    };
+    const td2 = el('td'); td2.appendChild(btn); tr.appendChild(td2);
+    rows.appendChild(tr);
+  }
+}
+document.getElementById('refresh').onclick = load;
+load();
+</script>
+</body>
+</html>

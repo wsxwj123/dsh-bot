@@ -64,6 +64,9 @@ def main():
     for r in rows:
         ts = datetime.fromtimestamp(r["ts"]).strftime("%m-%d %H:%M")
         vis = r.get("visibility", "public")
+        # 别的 bot 的私密圈只有它和用户看得到：查别的 bot 时不列出来
+        if whose not in ("self", "user") and vis == "private":
+            continue
         text = r.get("text", "")[:120]
         print(f"[{ts}] ({vis}) {text}")
 

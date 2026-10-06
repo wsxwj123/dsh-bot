@@ -35,8 +35,31 @@ def load_global() -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _life_alias(d: str, bot_id: str):
+    """新系统（dsh-bot）的配置也能用旧名字找到：朋友圈、画风里记的是 bot 在旧系统里的名字。
+    旧名字是配置里的 life_id，没写就取 life_config 指向的旧配置文件名。"""
+    if not os.path.isdir(d):
+        return None
+    for fn in sorted(os.listdir(d)):
+        if fn.startswith("_") or not fn.endswith(".yml"):
+            continue
+        try:
+            with open(os.path.join(d, fn), encoding="utf-8") as f:
+                y = yaml.safe_load(f) or {}
+        except Exception:
+            continue
+        life = y.get("life_id")
+        if not life and isinstance(y.get("life_config"), str) and y["life_config"].strip():
+            life = os.path.splitext(os.path.basename(y["life_config"].strip()))[0]
+        if life and str(life) == bot_id:
+            return os.path.join(d, fn)
+    return None
+
+
 def load_bot(bot_id: str) -> dict:
     p = os.path.join(_configs_dir(), f"{bot_id}.yml")
+    if not os.path.exists(p):
+        p = _life_alias(_configs_dir(), bot_id) or p
     if not os.path.exists(p):
         raise FileNotFoundError(f"配置不存在：{p}")
     with open(p, encoding="utf-8") as f:
@@ -49,6 +72,10 @@ def load_bot(bot_id: str) -> dict:
         with open(os.path.expanduser(life.strip()), encoding="utf-8") as f:
             base = yaml.safe_load(f) or {}
         cfg = {**base, **cfg}
+    # 朋友圈、画风里用的名字（旧系统里的 bot 名），见 _life_alias
+    life_id = cfg.get("life_id") or (os.path.splitext(os.path.basename(life.strip()))[0] if isinstance(life, str) and life.strip() else None)
+    if life_id:
+        cfg["_life_id"] = str(life_id)
 
     # 运行时会注入的计算字段不应来自 YAML；先清掉残留，避免旧值绕过年龄闸门。
     cfg.pop("_age", None)

@@ -11,6 +11,7 @@ bot CLAUDE.md 加规则即可：用户说"发个朋友圈/晒一下/分享个 X"
 
 返回：朋友圈 id + 文案
 """
+import dataclasses
 import sys
 import os
 from datetime import datetime
@@ -51,6 +52,10 @@ def main():
     if topic_hint and not sit.hobby:
         sit = SitNS(sit.recurring, sit.sporadic,
                     {"name": f"想分享：{topic_hint}", "effect": topic_hint, "kind": "obsession"})
+
+    # 用户正在聊天里让她发圈：人显然醒着、也不在上课，作息表上的"睡觉/上课"不拦（真机 M4：半夜聊着天要发圈，被"睡觉"挡住）
+    if sit.recurring is not None and sit.recurring.state in ("sleeping", "busy_class"):
+        sit = SitNS(dataclasses.replace(sit.recurring, state="free"), sit.sporadic, sit.hobby)
 
     # 关掉 silence/limit（用户主动要求，应优先于自动节流）
     g_force = {**g, "moments": {**(g.get("moments") or {}), "silence_threshold_minutes": 0}}

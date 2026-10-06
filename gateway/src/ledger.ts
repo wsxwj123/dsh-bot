@@ -229,6 +229,10 @@ export class Ledger {
 
   tgOffset(): number { return Number(this.getMeta('tg_offset') ?? 0) }
 
+  /** 语音转写、图片下载完成后更新这条消息的文字和附加信息 */
+  updateInbound(id: number, text: string, meta: Record<string, unknown>): void {
+    this.db.query('UPDATE inbound SET text = ?, meta = ? WHERE id = ?').run(text, JSON.stringify(meta), id)
+  }
   inbound(id: number): InboundRow | null {
     return this.db.query<InboundRow, [number]>('SELECT * FROM inbound WHERE id = ?').get(id)
   }
@@ -388,6 +392,11 @@ export class Ledger {
   sentTextsInChain(rootId: number): string[] {
     return this.db.query<{ text: string }, [number]>(
       `SELECT o.text FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind = 'text' AND o.state IN ('sent','ambiguous','pending') AND o.text IS NOT NULL`).all(rootId).map(r => r.text)
+  }
+  /** 这一轮（含重试、提醒）已经发出、可能发出或正在发的文件 */
+  sentFilesInChain(rootId: number): string[] {
+    return this.db.query<{ file: string }, [number]>(
+      `SELECT o.file FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind IN ('photo','document') AND o.state IN ('sent','ambiguous','pending') AND o.file IS NOT NULL`).all(rootId).map(r => r.file)
   }
   clearSilent(rootId: number): void {
     this.db.query('UPDATE turns SET silent = 0 WHERE root_id = ?').run(rootId)

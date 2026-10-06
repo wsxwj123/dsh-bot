@@ -15,8 +15,8 @@ export type TgMessage = {
   caption?: string
   entities?: { type: string; offset: number; length: number }[]
   reply_to_message?: TgMessage
-  photo?: unknown[]
-  voice?: unknown
+  photo?: { file_id: string; file_size?: number; width?: number; height?: number }[]
+  voice?: { file_id: string; duration?: number; mime_type?: string; file_size?: number }
   audio?: unknown
   video?: unknown
   video_note?: unknown
@@ -118,8 +118,21 @@ export class TelegramApi {
     })
   }
 
-  sendFile(kind: 'photo' | 'document', chatId: string, path: string, o: { replyTo?: number; caption?: string } = {}) {
-    const method = kind === 'photo' ? 'sendPhoto' : 'sendDocument'
+  getFile(fileId: string) {
+    return this.call<{ file_path?: string; file_size?: number }>('getFile', { file_id: fileId }, { timeoutMs: 20_000 })
+  }
+
+  /** 下载 getFile 拿到的文件。地址里带令牌，只在这里用，不写日志。 */
+  async download(filePath: string, maxBytes = 20 * 1024 * 1024): Promise<Uint8Array> {
+    const res = await fetch(`${this.base}/file/bot${this.token}/${filePath}`, { signal: AbortSignal.timeout(60_000) })
+    if (!res.ok) throw new TgApiError('download', res.status, `HTTP ${res.status}`)
+    const buf = new Uint8Array(await res.arrayBuffer())
+    if (buf.byteLength > maxBytes) throw new TgApiError('download', 413, 'file too large')
+    return buf
+  }
+
+  sendFile(kind: 'photo' | 'document' | 'voice', chatId: string, path: string, o: { replyTo?: number; caption?: string } = {}) {
+    const method = kind === 'photo' ? 'sendPhoto' : kind === 'voice' ? 'sendVoice' : 'sendDocument'
     return this.call<TgMessage>(method, {
       chat_id: chatId,
       ...(o.caption ? { caption: o.caption } : {}),

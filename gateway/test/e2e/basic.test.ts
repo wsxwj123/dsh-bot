@@ -111,7 +111,7 @@ test('只有个别段重复：跳过重复的段，其余照发', async () => {
   await sleep(300)
   expect(tg.sentTo(OWNER).filter(s => s.text?.includes('dupQ') || s.text?.startsWith('新的一段')).map(s => s.text))
     .toEqual(['收到：dupQ（第1段）', '收到：dupQ（第2段）', '新的一段甲', '新的一段乙'])
-  await until(() => toolResults(b).some(r => r.name === 'reply' && r.text.includes('第 1 段和这一轮已经发出的话相同')), 'duplicate part reported to the model')
+  await until(() => toolResults(b).some(r => r.name === 'reply' && r.text.includes('第 1 段这一轮已经发过（或正在发）')), 'duplicate part reported to the model')
 })
 
 test('回复之后又说"不回复"：不算沉默', async () => {

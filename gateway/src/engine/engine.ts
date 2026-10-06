@@ -7,7 +7,7 @@
 //   卡住 → session/cancel；取消不掉就重启 dsh，按"进程死了"处理
 import { existsSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
-import { loadAccess, reloadBrain, type Access, type Brain, type BotConfig } from '../config'
+import { expandHome, loadAccess, reloadBrain, type Access, type Brain, type BotConfig } from '../config'
 import { AcpError, AcpExited, AcpTimeout, type SessionUpdate } from '../dsh/acp'
 import { buildDshEnv, defaultDshCommand, type DshProcess, type DshSpec } from '../dsh/process'
 import { buildPatchRows, modelValue, patchText, promptFingerprint, restartFingerprint, type PatchInput } from '../dsh/profile'
@@ -19,9 +19,11 @@ import { parseCommand } from '../telegram/inbound'
 import { describeResults, normText, planParts, type Sender } from '../telegram/sender'
 import { Backoff, randomToken, sleep } from '../util'
 import { MemoryStore } from '../memory'
+import { imageBlock, Media, rowMedia } from '../media/media'
 import { Commitments } from '../commit/service'
 import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
+import { LifeActions } from '../life/actions'
 import {
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, summaryPrompt,
@@ -50,6 +52,21 @@ function safeMeta(m: string | null): Record<string, unknown> | null {
 /** 旧调度器的被晾提示以 [hang-check] 开头；新系统统一用 ⟦系统…⟧ 标记程序说明 */
 function hangText(t: string): string {
   return t.replace(/^\[hang-check\]\s*/, '⟦系统·被晾⟧ ')
+}
+
+/** 发给模型的一块内容：文字，或者一张图片（文件路径） */
+type Block = string | { image: string }
+
+function promptItems(blocks: Block[], noImages: boolean): object[] {
+  return blocks.map(b => {
+    if (typeof b === 'string') return { type: 'text', text: b }
+    const img = noImages ? null : imageBlock(b.image)
+    return img ?? { type: 'text', text: '⟦对方发来一张图片，但你现在用的模型看不到图片内容。可以如实告诉对方，或者请对方描述一下⟧' }
+  })
+}
+
+function str(v: unknown): string | undefined {
+  return typeof v === 'string' && v.trim() ? v.trim() : undefined
 }
 
 /** 主人能用的命令（/start 等其它命令照样被网关吞掉，不交给模型） */
@@ -129,6 +146,10 @@ export class Engine {
   readonly situation: SituationBridge
   readonly commitments: Commitments
   readonly hang: HangRuntime
+  readonly media: Media
+  readonly actions: LifeActions
+  /** 发过图片但被 dsh 拒了的模型（看不了图）：之后对这个模型只说"有一张图"，不再附图 */
+  private noImages = new Set<string>()
 
   constructor(
     readonly cfg: BotConfig,
@@ -142,6 +163,19 @@ export class Engine {
     this.configBrain = cfg.brain
     this.brain = this.withOverride(cfg.brain)
     this.memory = new MemoryStore(cfg.memoryDir)
+    this.media = new Media({
+      api, ledger, log, mediaDir: cfg.mediaDir, bridgeUrl: cfg.gw.voiceBridgeUrl,
+      bridgeToken: () => this.credRef('VOICE_BRIDGE_TOKEN'),
+      sharedDirs: () => this.cfg.gw.imageDirs.map(expandHome),
+    })
+    this.actions = new LifeActions({
+      botId: cfg.lifeId, configPath: cfg.configPath, log, mediaDir: cfg.mediaDir,
+      imageProvider: () => this.cfg.gw.imageProvider,
+      imageSkillDir: () => this.cfg.gw.imageSkillDir ?? join(import.meta.dir, '..', '..', '..', 'skills', `${this.cfg.gw.imageProvider}-skill`),
+      stateDb: () => this.cfg.gw.botlifeDb,
+      credRef: name => this.credRef(name),
+      notify: (chatId, text, key) => { this.injectSynthetic(chatId, text, key, { source: 'image' }) },
+    })
     this.situation = new SituationBridge(cfg.id, cfg.configPath, log, cfg.gw.situationCmd, cfg.gw.situationTtlMs)
     this.commitments = new Commitments({
       ledger, log, situation: this.situation,
@@ -175,6 +209,10 @@ export class Engine {
             text: { type: 'string', description: '要发的文字' },
             reply_to: { type: 'number', description: '可选：要引用回复的消息编号（⟦…⟧ 里 # 后面的数字）' },
             files: { type: 'array', items: { type: 'string' }, description: '可选：要一起发的图片或文件的绝对路径' },
+            as_voice: { type: 'boolean', description: '可选：同时发语音。每段先发文字，再发这一段的语音' },
+            voice_text: { type: 'string', description: '可选：语音朗读稿（as_voice 时用）。用空行分段，和 text 的段一一对应；不写就读 text 本身' },
+            voice_emotion: { type: 'string', description: '可选：语音的情绪，比如 HAPPY、SAD、ANGRY、NEUTRAL' },
+            voice_instruct: { type: 'string', description: '可选：语气提示，十个字以内，比如"小声""撒娇"' },
           },
           required: ['text'],
         },
@@ -195,6 +233,41 @@ export class Engine {
         description: '把值得长期记住的事记下来（对方的喜好、重要的日子、你们的约定、你们之间发生的事）。一次一条，写清楚是什么。不要记密码、证件号这类敏感信息。',
         inputSchema: { type: 'object', properties: { text: { type: 'string', description: '要记住的一件事，一两句话' } }, required: ['text'] },
         call: (args, ctx) => engine().toolRemember(args, ctx),
+      },
+      {
+        name: 'image_guide',
+        description: '生图的写法说明（第一次生图前看一遍；同一段对话里看过就不用再看）。',
+        inputSchema: { type: 'object', properties: {} },
+        call: (args, ctx) => engine().toolLife('guide', args, ctx),
+      },
+      {
+        name: 'generate_image',
+        description: '生成一张图片（自拍、给对方看的照片、朋友圈配图）。按 image_guide 的规则写好描述再调用。返回图片路径；生成得慢时先返回"还在生成"，好了程序会告诉你。',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            intermediate: { type: 'object', description: 'NovelAI：按 image_guide 写好的结构化描述（intermediate.json 的内容）' },
+            prompt: { type: 'string', description: 'ComfyUI：英文描述' },
+            ratio: { type: 'string', enum: ['portrait', 'landscape', 'square', 'wide'], description: '画幅' },
+            reuse_seed: { type: 'boolean', description: '同一场景再来一张时为 true' },
+          },
+        },
+        call: (args, ctx) => engine().toolLife('image', args, ctx),
+      },
+      {
+        name: 'moments',
+        description: '朋友圈：recent 看最近的圈（whose=self/user/别的 bot 名，days 默认 7）；like 点赞或取消（moment_id）；reply 评论或回复评论（moment_id、parent_comment_id（评论圈本身填 0）、text、可选 image）；post 发一条圈（可选 topic、visibility=public/private）；set_image 给圈配图（moment_id、images）；delete_comment 删自己的评论（comment_id）。',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['recent', 'like', 'reply', 'post', 'set_image', 'delete_comment'] },
+            whose: { type: 'string' }, days: { type: 'number' }, moment_id: { type: 'number' }, parent_comment_id: { type: 'number' },
+            comment_id: { type: 'number' }, text: { type: 'string' }, image: { type: 'string' }, topic: { type: 'string' },
+            visibility: { type: 'string', enum: ['public', 'private'] }, images: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['action'],
+        },
+        call: (args, ctx) => engine().toolLife('moments', args, ctx),
       },
       {
         name: 'commitment_create',
@@ -258,17 +331,26 @@ export class Engine {
     at.toolsInFlight++
     at.replyCalls++
     at.lastProgressAt = Date.now()
-    try {
-      const results = await this.sender.send({ chatId: at.chatId, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo: Number.isInteger(replyTo) && replyTo > 0 ? replyTo : undefined, skipTexts: already })
-      const d = describeResults(results)
-      at.delivered += d.delivered
-      if (d.delivered > 0 && at.silent) { this.ledger.clearSilent(at.rootId); at.silent = false }
-      this.log.info('tool.reply', { turn: at.turnId, parts: results.length, delivered: d.delivered, duplicates: results.filter(r => r.state === 'duplicate').length })
-      return { text: d.text, isError: d.isError }
-    } finally {
-      at.toolsInFlight--
-      at.lastProgressAt = Date.now()
-    }
+    const asVoice = args.as_voice === true || args.as_voice === 'true'
+    const voiceId = asVoice ? this.access().voiceId : undefined
+    if (asVoice && !voiceId) this.log.warn('tool.reply_voice_unconfigured', { turn: at.turnId })
+    const voice = voiceId ? (t: string) => this.media.synthesize(t, voiceId, str(args.voice_emotion), str(args.voice_instruct)) : undefined
+    const voiceTexts = voice && typeof args.voice_text === 'string' && args.voice_text.trim() ? args.voice_text.split(/\n\s*\n/).map(x => x.trim()) : undefined
+    const skipFiles = new Set(this.ledger.sentFilesInChain(at.rootId))
+    const sending = this.sender.send({ chatId: at.chatId, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo: Number.isInteger(replyTo) && replyTo > 0 ? replyTo : undefined, skipTexts: already, skipFiles, voice, voiceTexts })
+      .then(results => {
+        const d = describeResults(results)
+        at.delivered += d.delivered
+        if (d.delivered > 0 && at.silent) { this.ledger.clearSilent(at.rootId); at.silent = false }
+        this.log.info('tool.reply', { turn: at.turnId, parts: results.length, delivered: d.delivered, duplicates: results.filter(r => r.state === 'duplicate').length, ...(voice ? { voice: true } : {}) })
+        return d
+      })
+      .finally(() => { at.toolsInFlight--; at.lastProgressAt = Date.now() })
+    // dsh 等一次工具调用最多 60 秒，超时模型会以为没发出去、再发一遍（真机 M4 问题 3）。发得慢就先告诉它"在发了"，后台接着发
+    const first = await Promise.race([sending, sleep(this.cfg.gw.replyReturnMs).then(() => null)])
+    if (first) return { text: first.text, isError: first.isError }
+    this.log.info('tool.reply_slow', { turn: at.turnId })
+    return { text: '正在发送（图片或语音比较大，需要一点时间），对方会陆续收到。不要再用 reply 重发这些内容；说完了就结束这一轮。' }
   }
 
   async toolReact(args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
@@ -305,6 +387,21 @@ export class Engine {
     } catch (e) {
       this.log.error('tool.remember_failed', { err: safeError(e) })
       return { text: '这次没记上（写文件出错）。', isError: true }
+    }
+  }
+
+  async toolLife(op: 'guide' | 'image' | 'moments', args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
+    const at = this.activeFor(ctx.chatId, ctx.segmentId)
+    if (!at) return { text: '这一轮已经结束。', isError: true }
+    if (at.mode === 'summary') return LOCKED
+    at.lastProgressAt = Date.now()
+    if (op === 'guide') return this.actions.imageGuide()
+    at.toolsInFlight++
+    try {
+      return op === 'image' ? await this.actions.generateImage(at.chatId, args) : await this.actions.moments(args)
+    } finally {
+      at.toolsInFlight--
+      at.lastProgressAt = Date.now()
     }
   }
 
@@ -392,8 +489,15 @@ export class Engine {
     return r.id
   }
 
-  async stop(waitMs = 60_000): Promise<void> {
+  /** 开始停止（Ctrl+C 时 dsh 和网关同时收到信号）：dsh 退出算正常，没开始发的段不再发 */
+  beginStop(): void {
     this.stopping = true
+    this.dsh.expectExit()
+    this.sender.halt()
+  }
+
+  async stop(waitMs = 60_000): Promise<void> {
+    this.beginStop()
     for (const t of this.timers) clearInterval(t)
     for (const st of this.chats.values()) if (st.timer) clearTimeout(st.timer)
     // 不打断正在生成的回复：等它们结束（有上限）
@@ -521,8 +625,10 @@ export class Engine {
       pending = this.ledger.pendingFor(chatId)
     }
     const cut = pending.findIndex(p => p.kind === 'command')
-    const batch = cut >= 0 ? pending.slice(0, cut) : pending
-    if (batch.length === 0) return 0
+    const raw = cut >= 0 ? pending.slice(0, cut) : pending
+    if (raw.length === 0) return 0
+    // 语音转写、图片下载：放在这里做（每个聊天自己排队），不卡收消息和别的聊天
+    const batch = await this.media.prepare(raw)
     try {
       await this.ensureDsh()
     } catch {
@@ -562,7 +668,9 @@ export class Engine {
     const commitHints = this.pendingHints(chatId)
     if (commitHints.length) this.ledger.setMeta(`hints:${chatId}`, '')
     const life = batch.some(r => r.kind === 'user') ? this.lifeLines(chatId, seg.id, this.ledger.segmentTurnCount(seg.id) === 0) : []
-    let blocks = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone })]
+    // 对方发来的图片：附在消息后面（模型看不了图时，runPrompt 里换成一句说明）
+    const images: Block[] = batch.flatMap(r => { const m = rowMedia(r); return m?.kind === 'photo' && m.path ? [{ image: m.path }] : [] })
+    let blocks: Block[] = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone }), ...images]
     let kind: TurnKind = 'message'
     let attempt = 0
     let rootId: number | undefined
@@ -635,7 +743,7 @@ export class Engine {
   }
 
   /** 发一轮 prompt 并盯着它：卡住就取消，取消不掉就重启 dsh。 */
-  private async runPrompt(turnId: number, rootId: number, seg: SegmentRow, blocks: string[], mode: ActiveTurn['mode'] = 'chat'): Promise<Outcome> {
+  private async runPrompt(turnId: number, rootId: number, seg: SegmentRow, blocks: Block[], mode: ActiveTurn['mode'] = 'chat'): Promise<Outcome> {
     const conn = this.dsh.conn
     const sessionId = seg.session_id!
     if (!conn) return { type: 'crashed', err: 'dsh not running' }
@@ -678,7 +786,20 @@ export class Engine {
     this.ledger.markTurnSent(turnId)
     if (seg.needs_seed) { this.ledger.segmentSeeded(seg.id); seg.needs_seed = 0 }
     try {
-      const res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: blocks.map(text => ({ type: 'text', text })) }, 0)
+      const bk = brainKey(this.brain)
+      let res: { stopReason?: string }
+      try {
+        res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: promptItems(blocks, this.noImages.has(bk)) }, 0)
+      } catch (e) {
+        // 这个模型看不了图：dsh 整条拒收（没进历史），去掉图片、换成一句说明再发一次
+        if (!(e instanceof AcpError) || !blocks.some(b => typeof b !== 'string') || this.noImages.has(bk) || !/image|UNSUPPORTED_CONTENT|attachment/i.test(e.message)) throw e
+        this.noImages.add(bk)
+        this.log.warn('prompt.images_unsupported', { model: this.brain.model })
+        res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: promptItems(blocks, true) }, 0)
+      }
+      // reply 先回了"在发了"、后台还在发：等发完再收尾，不然这一轮会被当成"没回"去提醒，又发一遍
+      const sendDeadline = Date.now() + 5 * 60_000
+      while (at.toolsInFlight > 0 && Date.now() < sendDeadline) await sleep(200)
       if (at.cancelledAt !== null || res?.stopReason === 'cancelled') return { type: 'cancelled', used }
       return { type: 'ok', stopReason: String(res?.stopReason ?? ''), used, text: at.textOut }
     } catch (e) {
@@ -1066,6 +1187,23 @@ export class Engine {
     return `【系统】已换成 ${c.provider} / ${c.model}，下一条消息起生效。这个 bot 的所有聊天都换，重启后保持；/model default 换回配置文件里的。`
   }
 
+  // ─── 管理台换模型（本机接口 /v1/model）：和 /model 命令同一套逻辑 ───
+
+  async modelInfo(): Promise<{ current: ModelChoice; config: ModelChoice; choices: ModelChoice[] }> {
+    const file = this.configBrain
+    let choices: ModelChoice[] = []
+    try { choices = await this.modelChoicesNow() } catch (e) { this.log.warn('api.model_choices_failed', { err: safeError(e) }) }
+    return { current: { provider: this.brain.provider, model: this.brain.model }, config: { provider: file.provider, model: file.model }, choices }
+  }
+
+  async modelSet(spec: string): Promise<{ ok: boolean; text: string; current: ModelChoice }> {
+    const before = brainKey(this.brain)
+    const s = spec.trim()
+    const text = s === 'default' ? await this.cmdModel('', 'default') : s ? await this.cmdModel('', s) : '【系统】没给模型名。'
+    const ok = brainKey(this.brain) !== before || /现在用的就是/.test(text)
+    return { ok, text: text.replace(/^【系统】/, ''), current: { provider: this.brain.provider, model: this.brain.model } }
+  }
+
   // ─── /model、/provider 换的模型：记在账本里，重启后保持；配置文件里的模型改了就作废（以后改的为准） ───
 
   private withOverride(file: Brain): Brain {
@@ -1111,10 +1249,15 @@ export class Engine {
     if (provider !== 'deepseek-official' && !route) return { status: 'unknown' }
     const env = route ? route.apiKeyEnv : 'DEEPSEEK_API_KEY'
     if (!env) return { status: 'none' }
+    return { status: this.credRef(env) ? 'ok' : 'missing', env }
+  }
+
+  /** 凭据文件里某个键的值（像样的才返回，否则 null）。只给网关自己用，绝不写日志、不回给模型。 */
+  private credRef(name: string): string | null {
     let refs: Record<string, unknown> = {}
     try { refs = (Bun.YAML.parse(readFileSync(this.cfg.credentialsPath, 'utf8')) as { refs?: Record<string, unknown> })?.refs ?? {} } catch {}
-    const v = refs[env]
-    return { status: typeof v === 'string' && /^[\x21-\x7e]{8,}$/.test(v.trim()) ? 'ok' : 'missing', env }
+    const v = refs[name]
+    return typeof v === 'string' && /^[\x21-\x7e]{8,}$/.test(v.trim()) ? v.trim() : null
   }
 
   // ─── 通知主人 ───

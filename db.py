@@ -10,7 +10,8 @@ import json
 import contextlib
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.db")
+# BOTLIFE_STATE_DB：新网关跑朋友圈脚本时指到朋友圈网页用的那个库（新旧仓库并存的切换期要共用一份）
+DB_PATH = os.environ.get("BOTLIFE_STATE_DB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.db")
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;

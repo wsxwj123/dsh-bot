@@ -560,6 +560,9 @@ def _write_moment_image(bot_id: str, bot_cfg: dict, moment_id: int,
         f"- 完成 set_image 后即结束本任务"
     )
     ms = int(time.time() * 1000)
+    from moments.web import _deliver_dsh
+    if _deliver_dsh(bot_dir, chat_id, inbox_text, "moment_image", f"moment-image:{moment_id}"):
+        return "gateway"
     fname = os.path.join(inbox, f"moment-image-{ms}.json")
     from datetime import timezone
     iso_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
