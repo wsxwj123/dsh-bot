@@ -114,13 +114,23 @@ export const SUMMARY_PROMPT = [
   SUMMARY_RULES,
 ].join('\n')
 
+/** 主人用 /compact 时写的"要特别留意的事"，附在摘要指令后面 */
+function focusLine(focus: string | undefined): string[] {
+  const f = focus?.trim().slice(0, 300)
+  return f ? [`4. 主人特别交代，这次整理要留意：${escapeUserText(f)}`] : []
+}
+
+export function summaryPrompt(focus?: string): string {
+  return [SUMMARY_PROMPT, ...focusLine(focus)].join('\n')
+}
+
 /** 旧会话用不了（dsh 崩溃等）时，用账本里的流水单独请求一次写摘要 */
-export function formatLedgerSummaryPrompt(previous: string | null, entries: TranscriptEntry[], o: FormatOpts): string {
+export function formatLedgerSummaryPrompt(previous: string | null, entries: TranscriptEntry[], o: FormatOpts, focus?: string): string {
   const lines = ['⟦系统·整理记忆⟧ 这不是对方发来的消息，不要回复对方，不要调用任何工具，直接输出摘要正文。下面是程序从聊天记录里整理出来的材料。']
   if (previous) lines.push('【更早的摘要】', escapeUserText(previous))
   lines.push('【这一段的聊天记录】')
   for (const e of entries) lines.push(`⟦${clock(e.ts, o.timeZone)}⟧ ${e.who === 'bot' ? '我' : '对方'}：${escapeUserText(e.text)}`)
-  lines.push('', SUMMARY_RULES, '4. 如果有更早的摘要，把里面仍然有用的内容合进新摘要。')
+  lines.push('', SUMMARY_RULES, '4. 如果有更早的摘要，把里面仍然有用的内容合进新摘要。', ...focusLine(focus).map(l => l.replace(/^4\./, '5.')))
   return lines.join('\n')
 }
 

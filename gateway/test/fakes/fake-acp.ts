@@ -51,9 +51,17 @@ function send(f: object) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0',
 function update(sessionId: string, u: object) { send({ method: 'session/update', params: { sessionId, update: u } }) }
 
 const MODELS = ['deepseek-flash', 'deepseek-v4-pro', 'other-model']
+// 和真 dsh 一样，补丁层里 llm-pi-ai 配的路由也列进可选模型
+const ROUTE_GROUPS: { group: string; options: { value: string; name: string }[] }[] = (() => {
+  try {
+    const rows = JSON.parse(readFileSync(patchPath!, 'utf8')) as { id: string; config?: { providers?: Record<string, { models?: { id: string }[] }> } }[]
+    const providers = rows.find(r => r.id === 'llm-pi-ai')?.config?.providers ?? {}
+    return Object.entries(providers).map(([name, r]) => ({ group: name, options: (r.models ?? []).map(m => ({ value: JSON.stringify([name, m.id]), name: m.id })) }))
+  } catch { return [] }
+})()
 function configOptions(s: Sess) {
   return [
-    { id: 'model', name: 'Model', type: 'select', currentValue: s.model, options: [{ group: 'deepseek-official', options: MODELS.map(m => ({ value: JSON.stringify(['deepseek-official', m]), name: m })) }] },
+    { id: 'model', name: 'Model', type: 'select', currentValue: s.model, options: [{ group: 'deepseek-official', options: MODELS.map(m => ({ value: JSON.stringify(['deepseek-official', m]), name: m })) }, ...ROUTE_GROUPS] },
     { id: 'reasoning_effort', name: 'Effort', type: 'select', currentValue: s.effort, options: ['off', 'low', 'high', 'max'].map(v => ({ value: v, name: v })) },
   ]
 }

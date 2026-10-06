@@ -15,7 +15,7 @@ export function gate(msg: TgMessage, access: Access): GateResult {
 }
 
 /** 网关自己处理的命令；其它以 / 开头的文字照常交给模型 */
-export const GATEWAY_COMMANDS = new Set(['clear', 'start'])
+export const GATEWAY_COMMANDS = new Set(['clear', 'start', 'compact', 'model', 'models', 'provider', 'providers', 'help', 'commands'])
 
 export type Command = { name: string; target: string | null; args: string }
 
