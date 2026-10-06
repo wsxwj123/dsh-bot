@@ -62,7 +62,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            tests: unit/test_chat_history_ledger.py unit/test_chat_history_namespace.py unit/test_project_slug.py
+          # test_project_slug.py 是旧系统原有的测试，按 Mac/Linux 的路径写的，Windows 上不跑
+          - os: windows-latest
+            tests: unit/test_chat_history_ledger.py unit/test_chat_history_namespace.py
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -72,4 +77,4 @@ jobs:
       - run: python -m pip install pytest pyyaml
       - name: 读账本的 Python 测试
         working-directory: tests
-        run: python -m pytest -q unit/test_chat_history_ledger.py unit/test_chat_history_namespace.py unit/test_project_slug.py
+        run: python -m pytest -q ${{ matrix.tests }}
