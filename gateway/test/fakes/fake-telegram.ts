@@ -63,6 +63,24 @@ export class FakeTelegram {
     return mid
   }
 
+  /** 用户发来一张图片（可带说明文字） */
+  pushPhoto(fromId: number, caption?: string): number {
+    return this.pushMedia(fromId, { photo: [{ file_id: 'photo-small', width: 90, height: 90 }, { file_id: 'photo-big', width: 800, height: 600 }], ...(caption ? { caption } : {}) })
+  }
+
+  /** 用户发来一条语音 */
+  pushVoice(fromId: number): number {
+    return this.pushMedia(fromId, { voice: { file_id: 'voice-1', duration: 3, mime_type: 'audio/ogg' } })
+  }
+
+  private pushMedia(fromId: number, extra: object): number {
+    const mid = this.nextMsg++
+    const message = { message_id: mid, date: Math.floor(Date.now() / 1000), chat: { id: fromId, type: 'private' }, from: { id: fromId, is_bot: false, first_name: `user${fromId}` }, ...extra }
+    this.updates.push({ update_id: this.nextUpdate++, message })
+    for (const w of this.waiters.splice(0)) w()
+    return mid
+  }
+
   sentTo(chatId: number | string): Sent[] {
     return this.sent.filter(s => s.chatId === String(chatId))
   }
@@ -78,6 +96,9 @@ export class FakeTelegram {
 
   private async handle(req: Request): Promise<Response> {
     const url = new URL(req.url)
+    // 文件下载：/file/bot<令牌>/<路径>
+    const fm = url.pathname.match(/^\/file\/bot([^/]+)\/(.+)$/)
+    if (fm) return fm[1] === this.token ? new Response(new TextEncoder().encode(`fake file ${fm[2]}`)) : new Response('no', { status: 401 })
     const m = url.pathname.match(/^\/bot([^/]+)\/(\w+)$/)
     if (!m || m[1] !== this.token) return Response.json({ ok: false, error_code: 401, description: 'Unauthorized' }, { status: 401 })
     const method = m[2]!
@@ -104,12 +125,14 @@ export class FakeTelegram {
         this.reactions.push({ chatId: String(params.chat_id), messageId: Number(params.message_id), emoji: r })
         return ok(true)
       }
+      case 'getFile': return ok({ file_id: params.file_id, file_path: String(params.file_id).startsWith('voice') ? 'voice/file_1.oga' : 'photos/file_2.jpg' })
       case 'sendMessage':
       case 'sendPhoto':
+      case 'sendVoice':
       case 'sendDocument': {
         const rp = params.reply_parameters
         const replyTo = rp?.message_id ? Number(rp.message_id) : undefined
-        const s: Sent = { method, chatId: String(params.chat_id), messageId: this.nextMsg++, at: Date.now(), ...(params.text !== undefined ? { text: String(params.text) } : {}), ...(replyTo ? { replyTo } : {}), ...(params.photo ?? params.document ? { file: String(params.photo ?? params.document) } : {}) }
+        const s: Sent = { method, chatId: String(params.chat_id), messageId: this.nextMsg++, at: Date.now(), ...(params.text !== undefined ? { text: String(params.text) } : {}), ...(replyTo ? { replyTo } : {}), ...(params.photo ?? params.document ?? params.voice ? { file: String(params.photo ?? params.document ?? params.voice) } : {}) }
         this.sent.push(s)
         if (fault?.mode === 'garbled') return new Response('<html>bad gateway', { status: 200 })
         return ok({ message_id: s.messageId, date: Math.floor(Date.now() / 1000), chat: { id: Number(params.chat_id), type: 'private' }, text: params.text })

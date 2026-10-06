@@ -71,6 +71,8 @@ export type GatewayOpts = {
   situationCmd?: string[]
   /** 作息查询结果（含"查不到"）缓存多久（默认 5 分钟） */
   situationTtlMs: number
+  /** 语音服务（仓库里的 voice-bridge）地址，只用本机 */
+  voiceBridgeUrl: string
   logLevel: 'debug' | 'info' | 'warn' | 'error'
   logMaxBytes: number
   logKeep: number
@@ -197,6 +199,7 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     commitPollMs: num(g.commit_poll_ms, 30_000, 'gateway.commit_poll_ms'),
     commitRetryMs: Array.isArray(g.commit_retry_ms) ? g.commit_retry_ms.map((v, i) => num(v, 0, `gateway.commit_retry_ms[${i}]`)) : [5 * 60_000, 15 * 60_000],
     hangTickMs: num(g.hang_tick_ms, 60_000, 'gateway.hang_tick_ms'),
+    voiceBridgeUrl: str(g.voice_bridge_url, 'http://127.0.0.1:7788'),
     situationTtlMs: num(g.situation_ttl_ms, 5 * 60_000, 'gateway.situation_ttl_ms'),
     situationCmd: Array.isArray(g.situation_cmd) && g.situation_cmd.length > 0 ? g.situation_cmd.map(String) : undefined,
     logLevel: level as GatewayOpts['logLevel'],
@@ -277,6 +280,8 @@ export type Access = {
   textChunkLimit?: number
   chunkMode?: 'length' | 'newline'
   replyToMode?: 'first' | 'all' | 'off'
+  /** Fish Audio 的音色 id；没有就不能发语音（降级成文字） */
+  voiceId?: string
 }
 
 export function readAccess(channelDir: string): Access | null {

@@ -19,6 +19,7 @@ import { parseCommand } from '../telegram/inbound'
 import { describeResults, normText, planParts, type Sender } from '../telegram/sender'
 import { Backoff, randomToken, sleep } from '../util'
 import { MemoryStore } from '../memory'
+import { imageBlock, Media, rowMedia } from '../media/media'
 import { Commitments } from '../commit/service'
 import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
@@ -50,6 +51,21 @@ function safeMeta(m: string | null): Record<string, unknown> | null {
 /** 旧调度器的被晾提示以 [hang-check] 开头；新系统统一用 ⟦系统…⟧ 标记程序说明 */
 function hangText(t: string): string {
   return t.replace(/^\[hang-check\]\s*/, '⟦系统·被晾⟧ ')
+}
+
+/** 发给模型的一块内容：文字，或者一张图片（文件路径） */
+type Block = string | { image: string }
+
+function promptItems(blocks: Block[], noImages: boolean): object[] {
+  return blocks.map(b => {
+    if (typeof b === 'string') return { type: 'text', text: b }
+    const img = noImages ? null : imageBlock(b.image)
+    return img ?? { type: 'text', text: '⟦对方发来一张图片，但你现在用的模型看不到图片内容。可以如实告诉对方，或者请对方描述一下⟧' }
+  })
+}
+
+function str(v: unknown): string | undefined {
+  return typeof v === 'string' && v.trim() ? v.trim() : undefined
 }
 
 /** 主人能用的命令（/start 等其它命令照样被网关吞掉，不交给模型） */
@@ -129,6 +145,9 @@ export class Engine {
   readonly situation: SituationBridge
   readonly commitments: Commitments
   readonly hang: HangRuntime
+  readonly media: Media
+  /** 发过图片但被 dsh 拒了的模型（看不了图）：之后对这个模型只说"有一张图"，不再附图 */
+  private noImages = new Set<string>()
 
   constructor(
     readonly cfg: BotConfig,
@@ -142,6 +161,10 @@ export class Engine {
     this.configBrain = cfg.brain
     this.brain = this.withOverride(cfg.brain)
     this.memory = new MemoryStore(cfg.memoryDir)
+    this.media = new Media({
+      api, ledger, log, mediaDir: cfg.mediaDir, bridgeUrl: cfg.gw.voiceBridgeUrl,
+      bridgeToken: () => this.credRef('VOICE_BRIDGE_TOKEN'),
+    })
     this.situation = new SituationBridge(cfg.id, cfg.configPath, log, cfg.gw.situationCmd, cfg.gw.situationTtlMs)
     this.commitments = new Commitments({
       ledger, log, situation: this.situation,
@@ -175,6 +198,9 @@ export class Engine {
             text: { type: 'string', description: '要发的文字' },
             reply_to: { type: 'number', description: '可选：要引用回复的消息编号（⟦…⟧ 里 # 后面的数字）' },
             files: { type: 'array', items: { type: 'string' }, description: '可选：要一起发的图片或文件的绝对路径' },
+            as_voice: { type: 'boolean', description: '可选：用语音发（每一段文字合成一条语音）' },
+            voice_emotion: { type: 'string', description: '可选：语音的情绪，比如 HAPPY、SAD、ANGRY、NEUTRAL' },
+            voice_instruct: { type: 'string', description: '可选：语气提示，十个字以内，比如"小声""撒娇"' },
           },
           required: ['text'],
         },
@@ -259,7 +285,10 @@ export class Engine {
     at.replyCalls++
     at.lastProgressAt = Date.now()
     try {
-      const results = await this.sender.send({ chatId: at.chatId, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo: Number.isInteger(replyTo) && replyTo > 0 ? replyTo : undefined, skipTexts: already })
+      const voiceId = args.as_voice === true || args.as_voice === 'true' ? this.access().voiceId : undefined
+      if ((args.as_voice === true || args.as_voice === 'true') && !voiceId) this.log.warn('tool.reply_voice_unconfigured', { turn: at.turnId })
+      const voice = voiceId ? (t: string) => this.media.synthesize(t, voiceId, str(args.voice_emotion), str(args.voice_instruct)) : undefined
+      const results = await this.sender.send({ chatId: at.chatId, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo: Number.isInteger(replyTo) && replyTo > 0 ? replyTo : undefined, skipTexts: already, voice })
       const d = describeResults(results)
       at.delivered += d.delivered
       if (d.delivered > 0 && at.silent) { this.ledger.clearSilent(at.rootId); at.silent = false }
@@ -521,8 +550,10 @@ export class Engine {
       pending = this.ledger.pendingFor(chatId)
     }
     const cut = pending.findIndex(p => p.kind === 'command')
-    const batch = cut >= 0 ? pending.slice(0, cut) : pending
-    if (batch.length === 0) return 0
+    const raw = cut >= 0 ? pending.slice(0, cut) : pending
+    if (raw.length === 0) return 0
+    // 语音转写、图片下载：放在这里做（每个聊天自己排队），不卡收消息和别的聊天
+    const batch = await this.media.prepare(raw)
     try {
       await this.ensureDsh()
     } catch {
@@ -562,7 +593,9 @@ export class Engine {
     const commitHints = this.pendingHints(chatId)
     if (commitHints.length) this.ledger.setMeta(`hints:${chatId}`, '')
     const life = batch.some(r => r.kind === 'user') ? this.lifeLines(chatId, seg.id, this.ledger.segmentTurnCount(seg.id) === 0) : []
-    let blocks = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone })]
+    // 对方发来的图片：附在消息后面（模型看不了图时，runPrompt 里换成一句说明）
+    const images: Block[] = batch.flatMap(r => { const m = rowMedia(r); return m?.kind === 'photo' && m.path ? [{ image: m.path }] : [] })
+    let blocks: Block[] = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone }), ...images]
     let kind: TurnKind = 'message'
     let attempt = 0
     let rootId: number | undefined
@@ -635,7 +668,7 @@ export class Engine {
   }
 
   /** 发一轮 prompt 并盯着它：卡住就取消，取消不掉就重启 dsh。 */
-  private async runPrompt(turnId: number, rootId: number, seg: SegmentRow, blocks: string[], mode: ActiveTurn['mode'] = 'chat'): Promise<Outcome> {
+  private async runPrompt(turnId: number, rootId: number, seg: SegmentRow, blocks: Block[], mode: ActiveTurn['mode'] = 'chat'): Promise<Outcome> {
     const conn = this.dsh.conn
     const sessionId = seg.session_id!
     if (!conn) return { type: 'crashed', err: 'dsh not running' }
@@ -678,7 +711,17 @@ export class Engine {
     this.ledger.markTurnSent(turnId)
     if (seg.needs_seed) { this.ledger.segmentSeeded(seg.id); seg.needs_seed = 0 }
     try {
-      const res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: blocks.map(text => ({ type: 'text', text })) }, 0)
+      const bk = brainKey(this.brain)
+      let res: { stopReason?: string }
+      try {
+        res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: promptItems(blocks, this.noImages.has(bk)) }, 0)
+      } catch (e) {
+        // 这个模型看不了图：dsh 整条拒收（没进历史），去掉图片、换成一句说明再发一次
+        if (!(e instanceof AcpError) || !blocks.some(b => typeof b !== 'string') || this.noImages.has(bk) || !/image|UNSUPPORTED_CONTENT|attachment/i.test(e.message)) throw e
+        this.noImages.add(bk)
+        this.log.warn('prompt.images_unsupported', { model: this.brain.model })
+        res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: promptItems(blocks, true) }, 0)
+      }
       if (at.cancelledAt !== null || res?.stopReason === 'cancelled') return { type: 'cancelled', used }
       return { type: 'ok', stopReason: String(res?.stopReason ?? ''), used, text: at.textOut }
     } catch (e) {
@@ -1111,10 +1154,15 @@ export class Engine {
     if (provider !== 'deepseek-official' && !route) return { status: 'unknown' }
     const env = route ? route.apiKeyEnv : 'DEEPSEEK_API_KEY'
     if (!env) return { status: 'none' }
+    return { status: this.credRef(env) ? 'ok' : 'missing', env }
+  }
+
+  /** 凭据文件里某个键的值（像样的才返回，否则 null）。只给网关自己用，绝不写日志、不回给模型。 */
+  private credRef(name: string): string | null {
     let refs: Record<string, unknown> = {}
     try { refs = (Bun.YAML.parse(readFileSync(this.cfg.credentialsPath, 'utf8')) as { refs?: Record<string, unknown> })?.refs ?? {} } catch {}
-    const v = refs[env]
-    return { status: typeof v === 'string' && /^[\x21-\x7e]{8,}$/.test(v.trim()) ? 'ok' : 'missing', env }
+    const v = refs[name]
+    return typeof v === 'string' && /^[\x21-\x7e]{8,}$/.test(v.trim()) ? v.trim() : null
   }
 
   // ─── 通知主人 ───

@@ -229,6 +229,10 @@ export class Ledger {
 
   tgOffset(): number { return Number(this.getMeta('tg_offset') ?? 0) }
 
+  /** 语音转写、图片下载完成后更新这条消息的文字和附加信息 */
+  updateInbound(id: number, text: string, meta: Record<string, unknown>): void {
+    this.db.query('UPDATE inbound SET text = ?, meta = ? WHERE id = ?').run(text, JSON.stringify(meta), id)
+  }
   inbound(id: number): InboundRow | null {
     return this.db.query<InboundRow, [number]>('SELECT * FROM inbound WHERE id = ?').get(id)
   }

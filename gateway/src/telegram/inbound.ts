@@ -54,6 +54,9 @@ export function toInbound(msg: TgMessage, botId: number | null): NewInbound {
   const ph = placeholder(msg)
   const text = ph ? (body ? `${ph} ${body}` : ph) : body
   const meta: Record<string, unknown> = {}
+  // 语音、图片：先记一个占位，下载和转写放到处理这一轮之前（不卡收消息）
+  if (msg.voice?.file_id) meta.media = { kind: 'voice', file_id: msg.voice.file_id, duration: msg.voice.duration ?? null }
+  else if (msg.photo?.length) meta.media = { kind: 'photo', file_id: msg.photo[msg.photo.length - 1]!.file_id }
   const r = msg.reply_to_message
   if (r) {
     meta.reply_to = {

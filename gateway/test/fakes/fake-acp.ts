@@ -20,6 +20,7 @@
 //   !remember:文字     先调用 remember（文字里的下划线换成空格）
 //   !commit:事|时间    先调用 commitment_create（下划线换成空格）
 //   !say:文字          回复这句话（下划线换成空格），代替"收到：…"
+//   !voice             用语音回复两段（as_voice）
 // 程序发来的"⟦系统·承诺到期⟧"：回复一句；state 目录里 due-mode=mute 时改为 stay_silent（模拟没兑现），=cancel 时取消这件承诺
 // 程序发来的"⟦系统·整理记忆⟧"：先试着调一次 react（应被锁），再输出一份假摘要（state 目录里 summary-mode=empty 时输出空）
 // 没有指令时回复"收到：<对方最后一句>"；补救提示（⟦系统…）回复"接着刚才的说"。
@@ -102,16 +103,20 @@ function lastUserLine(text: string): string {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-async function prompt(id: number, sessionId: string, blocks: { type: string; text?: string }[]) {
+async function prompt(id: number, sessionId: string, all0: { type: string; text?: string }[]) {
   const s = sessions[sessionId]
   if (!s || !loadedHere.has(sessionId)) return send({ id, error: { code: -32602, message: 'unknown session' } })
+  // 图片块：state 目录里有 no-images 时，像看不了图的模型一样整条拒收（不进历史）
+  const images = all0.filter(b => b.type === 'image').length
+  if (images && existsSync(P('no-images'))) return send({ id, error: { code: -32602, message: 'UNSUPPORTED_CONTENT: route does not accept image input' } })
+  const blocks = all0.filter(b => b.type !== 'image')
   const texts = blocks.map(b => b.text ?? '')
   const all = texts.join('\n')
   const last = texts[texts.length - 1] ?? ''
   // 和真 dsh 一样：先把用户消息记进历史，之后无论成败都留着
   s.history.push(all)
   saveSessions()
-  log('prompts.jsonl', { sessionId, text: all, blocks: texts.length, model: s.model })
+  log('prompts.jsonl', { sessionId, text: all, blocks: texts.length, images, model: s.model })
   update(sessionId, { sessionUpdate: 'usage_update', used: s.history.join('').length, size: 1_000_000 })
 
   // 写交接摘要：先试着调一次工具（应该被锁住），再直接输出摘要文字。summary-mode 文件写 empty 时输出空摘要
@@ -166,6 +171,10 @@ async function prompt(id: number, sessionId: string, blocks: { type: string; tex
   const react = directive(last, 'react')
   if (react) await callTool(s, sessionId, 'react', { message_id: Number(react[0]), emoji: '❤️' })
   const parts = Number(directive(last, 'parts')?.[0] || 1)
+  if (directive(last, 'voice')) {
+    await callTool(s, sessionId, 'reply', { text: '语音第一段\n\n语音第二段', as_voice: true, voice_emotion: 'HAPPY' })
+    return send({ id, result: { stopReason: 'end_turn' } })
+  }
   const say = last.match(/!say:(\S+)/)
   const base = say ? say[1]!.replace(/_/g, ' ') : last.startsWith('⟦系统') ? '接着刚才的说' : `收到：${lastUserLine(last)}`
   const text = parts > 1 ? Array.from({ length: parts }, (_, i) => `${base}（第${i + 1}段）`).join('\n\n') : base

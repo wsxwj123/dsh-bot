@@ -55,6 +55,9 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("voice-bridge-http")
+# httpx 在 INFO 级会把请求地址写进日志，Telegram 的地址里带着 bot 令牌：只留警告以上
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def mask(s: str) -> str:
@@ -76,6 +79,7 @@ def _default_allowed_roots() -> list[str]:
         os.path.expanduser("~/resource/media"),           # 生图产物（bot 发图）
         os.path.expanduser("~/resource/workspace"),       # 生图中间稿
         tempfile.gettempdir(),                            # voicecall 录音 in.wav（mkdtemp 建的）
+        os.path.expanduser(os.environ.get("DSH_BOT_HOME") or "~/.dsh-bot"),  # 新网关收发的语音（bots/<bot>/media）
     ]
 
 

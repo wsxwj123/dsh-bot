@@ -28,6 +28,8 @@ export type SendRequest = {
   kind?: OutboundKind
   /** 这些文字（按 normText 比较）这一轮已经发过了，遇到就跳过不发 */
   skipTexts?: Set<string>
+  /** 发语音：把一段文字合成语音文件，返回路径；合成失败返回 null，这一段改发文字 */
+  voice?: (text: string) => Promise<string | null>
 }
 
 /** 比较"是不是同一句话"时用：去掉首尾空白，连续空白算一个 */
@@ -134,13 +136,17 @@ export class Sender {
       const outId = this.ledger.outboundIntent({ okey, chatId: req.chatId, turnId: req.turnId, part: i + 1, ofParts: items.length, kind: outKind, text: item.kind === 'text' ? item.text : null, file: filePath, replyTo: replyTo ?? null })
 
       let attempt = 0
+      let voiceFile: string | null | undefined
       let useReply = replyTo
       let triedWithoutReply = false
       for (;;) {
         attempt++
         try {
+          // 语音：账本里照样记文字（前情、摘要、记忆整理都要知道说了什么），只是用 sendVoice 发
+          const audio = item.kind === 'text' && req.voice ? (voiceFile ??= await req.voice(item.text)) : null
+          if (item.kind === 'text' && req.voice) this.log.info('send.voice', { chat: req.chatId, part: i + 1, ok: !!audio })
           const m = item.kind === 'text'
-            ? await this.api.sendMessage(req.chatId, item.text, { replyTo: useReply })
+            ? audio ? await this.api.sendFile('voice', req.chatId, audio, { replyTo: useReply }) : await this.api.sendMessage(req.chatId, item.text, { replyTo: useReply })
             : await this.api.sendFile(outKind === 'photo' ? 'photo' : 'document', req.chatId, filePath!, { replyTo: useReply })
           crashPoint('after_send_before_record')
           this.ledger.outboundResult(outId, 'sent', { tgMessageId: m.message_id })
