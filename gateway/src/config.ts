@@ -108,6 +108,10 @@ export type BotConfig = {
   workDir: string
   homeDir: string
   logsDir: string
+  /** 群聊记录（所有 bot 共用一份，导演也读它） */
+  groupsDir: string
+  /** 导演用的共享目录（各 bot 私聊的"刚聊过"标记等） */
+  directorDir: string
   mediaDir: string
   harnessDir: string
   credentialsPath: string
@@ -262,6 +266,8 @@ export function loadBotConfig(configPath: string, env: Record<string, string | u
     workDir: join(botDir, 'work'),
     homeDir: join(botDir, 'home'),
     logsDir: join(botDir, 'logs'),
+    groupsDir: join(root, 'groups'),
+    directorDir: join(root, 'director'),
     mediaDir: join(botDir, 'media'),
     harnessDir: resolve(expandHome(harnessRaw)),
     credentialsPath: join(root, 'credentials.yaml'),

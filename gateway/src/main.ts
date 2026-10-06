@@ -6,10 +6,12 @@ import { ApiServer } from './api/server'
 import { checkCredentialsFile, ConfigError, loadAccess, loadBotConfig, readTelegramToken, type BotConfig } from './config'
 import { DshProcess, isAlive, processCommandLine } from './dsh/process'
 import { Engine } from './engine/engine'
+import { GroupTranscript } from './group/transcript'
 import { Ledger } from './ledger'
 import { Logger, registerSecret, safeError } from './log'
 import { McpServer } from './mcp/server'
 import { TelegramApi } from './telegram/api'
+import { isGroupChat } from './telegram/inbound'
 import { Poller } from './telegram/poller'
 import { Sender } from './telegram/sender'
 import { ensureSecretFile, sleep, writeAtomic } from './util'
@@ -65,7 +67,13 @@ async function main(): Promise<void> {
   const api = new TelegramApi(token, cfg.gw.telegramApi)
   // 能发出去的文件：网关的媒体目录（收到的、合成的语音）+ 生图结果目录
   const allowDirs = () => [cfg.mediaDir, ...cfg.gw.imageDirs.map(d => d.startsWith('~') ? join(homedir(), d.slice(1)) : d)]
-  const sender = new Sender(api, ledger, log, { allowDirs, maxSendWaitMs: cfg.gw.maxSendWaitMs, access: () => loadAccess(cfg.channelDir) })
+  // 群聊记录：bot 自己在群里发出的话由自己记（Telegram 不把 bot 的消息投给别的 bot）
+  let me: { id: number; username?: string; first_name?: string } | null = null
+  const transcript = new GroupTranscript(cfg.groupsDir, () => ({ id: me?.id ?? 0, username: me?.username ?? '', name: me?.first_name ?? cfg.displayName }), log)
+  const sender = new Sender(api, ledger, log, {
+    allowDirs, maxSendWaitMs: cfg.gw.maxSendWaitMs, access: () => loadAccess(cfg.channelDir),
+    onSent: (chatId, messageId, text) => { if (isGroupChat(chatId)) transcript.sent(chatId, messageId, text) },
+  })
   const dsh = new DshProcess(log)
   let engine: Engine | null = null
   const mcp = new McpServer(Engine.tools(() => engine!), segId => {
@@ -75,7 +83,6 @@ async function main(): Promise<void> {
   mcp.start()
   engine = new Engine(cfg, ledger, log, api, sender, dsh, mcp)
 
-  let me: { id: number; username?: string } | null = null
   for (let i = 0; !me; i++) {
     try { me = await api.getMe() } catch (e) {
       log.warn('telegram.get_me_failed', { err: safeError(e) })
@@ -84,12 +91,24 @@ async function main(): Promise<void> {
     }
   }
   engine.botUsername = me.username ?? ''
+  engine.groups = transcript
+  // 导演按这个文件认出群里哪条是哪个 bot 说的
+  writeAtomic(join(cfg.stateDir, 'bot.json'), JSON.stringify({ id: me.id, username: me.username ?? '', name: cfg.displayName }))
   log.info('gateway.starting', { bot: cfg.id, telegram_bot: me.username ?? null, pid: process.pid })
 
   const poller = new Poller(api, ledger, log, {
     channelDir: cfg.channelDir, botId: me.id, pollTimeoutS: cfg.gw.pollTimeoutS,
     onInbound: chatId => engine!.onInbound(chatId),
     onFatal: why => { log.error('gateway.fatal', { why }); void shutdown(1) },
+    onHumanMessage: (msg, observed) => {
+      if (observed) { transcript.observe(msg); return }
+      // 私聊"刚聊过"标记：导演不点正在私聊的 bot 去群里说话（格式同旧系统：整数秒）
+      try {
+        const dir = join(cfg.directorDir, 'last-user')
+        mkdirSync(dir, { recursive: true, mode: 0o700 })
+        writeAtomic(join(dir, `${cfg.id}-${msg.chat.id}.last-user`), String(Math.floor(Date.now() / 1000)))
+      } catch (e) { log.warn('director.marker_failed', { err: safeError(e) }) }
+    },
   })
   engine.healthSource = () => ({ pollLastOkAt: poller.health.lastOkAt, pollConflict: poller.health.conflict, pollError: poller.health.lastError })
   const apiServer = new ApiServer({

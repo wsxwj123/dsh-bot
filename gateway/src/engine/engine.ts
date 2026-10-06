@@ -15,7 +15,8 @@ import type { InboundRow, Ledger, SegmentRow, TurnKind } from '../ledger'
 import { safeError, type Logger } from '../log'
 import type { McpServer, ToolDef } from '../mcp/server'
 import type { TelegramApi } from '../telegram/api'
-import { parseCommand } from '../telegram/inbound'
+import { isGroupChat, parseCommand } from '../telegram/inbound'
+import type { GroupTranscript, TranscriptLine } from '../group/transcript'
 import { describeResults, normText, planParts, type Sender } from '../telegram/sender'
 import { Backoff, randomToken, sleep } from '../util'
 import { MemoryStore } from '../memory'
@@ -25,6 +26,7 @@ import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
 import { LifeActions } from '../life/actions'
 import {
+  escapeUserText,
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, summaryPrompt,
 } from './format'
@@ -142,6 +144,8 @@ export class Engine {
   private unhealthySince: number | null = null
   brain: Brain
   botUsername = ''
+  /** 群聊记录（main 里设置）：私聊时取"群里近况" */
+  groups: GroupTranscript | null = null
   readonly memory: MemoryStore
   readonly situation: SituationBridge
   readonly commitments: Commitments
@@ -464,6 +468,22 @@ export class Engine {
    * 对方发来消息的这一轮，附带几行"生活状态"（旧系统每条私聊都带，这里只在变化时或新会话开头带，省 token）：
    * 关系数值的提示（relationship.json 的 prompt_snippet）、她此刻在干什么、被晾之后迟到的反应（带完即清）。
    */
+  /** 私聊时附带"群里近况"（M5）：这个 bot 在的群里，上次带过之后又有人说话了，就带最近几句（最多 8 句，只看 12 小时内）。
+   *  会话按聊天分开（群里的话不进私聊会话），只靠这一小段让它接得上话 */
+  private groupRecap(chatId: string): string | null {
+    if (!this.groups || isGroupChat(chatId)) return null
+    const key = `group_recap:${chatId}`
+    const after = Math.max(Number(this.ledger.getMeta(key) || 0), Date.now() - 12 * 3600_000)
+    const rows = Object.keys(this.access().groups).flatMap(g => this.groups!.since(g, after, 8))
+      .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts)).slice(-8)
+    if (rows.length === 0) return null
+    this.ledger.setMeta(key, String(Math.max(...rows.map(r => Date.parse(r.ts)))))
+    const who = (r: TranscriptLine) => r.is_bot && r.from_username === this.botUsername ? '你' : !r.is_bot && r.from_id === chatId ? '对方' : (r.from_name || r.from_username || '群友')
+    const lines = rows.map(r => `${escapeUserText(who(r))}：${escapeUserText(r.text.replace(/\s+/g, ' ').slice(0, 100))}`)
+    this.log.info('group.recap', { chat: chatId, lines: lines.length })
+    return `⟦群里近况：你在的群里，上次之后说了这些。只是让你知道，不用逐条回应⟧\n${lines.join('\n')}`
+  }
+
   private lifeLines(chatId: string, segmentId: number, fresh: boolean): string[] {
     const out: string[] = []
     try {
@@ -639,9 +659,12 @@ export class Engine {
     const since = Date.now()
     const delay = await this.runBatch(chatId, batch)
     // 这一轮说了"三点提醒你"却没登记：能换算时间的替它登记，下一轮告诉它；换算不了的下一轮提醒它自己登记
-    const hints = this.commitments.afterTurn(chatId, since, batch.some(r => r.kind === 'synthetic' && (safeMeta(r.meta)?.source === 'commitment')))
-    if (hints.length) this.ledger.setMeta(`hints:${chatId}`, JSON.stringify([...this.pendingHints(chatId), ...hints]))
-    if (this.ledger.sentTextsSince(chatId, since).length > 0) this.hang.onOutbound(chatId)
+    // 承诺、被晾追问只在私聊里（群里谁说话由导演决定）
+    if (!isGroupChat(chatId)) {
+      const hints = this.commitments.afterTurn(chatId, since, batch.some(r => r.kind === 'synthetic' && (safeMeta(r.meta)?.source === 'commitment')))
+      if (hints.length) this.ledger.setMeta(`hints:${chatId}`, JSON.stringify([...this.pendingHints(chatId), ...hints]))
+      if (this.ledger.sentTextsSince(chatId, since).length > 0) this.hang.onOutbound(chatId)
+    }
     // 这一轮之后用量到线了：趁这个聊天还占着，马上换段（下一条消息就不用等摘要了）
     if (delay === 0) await this.maybeRoll(chatId, [])
     return delay
@@ -668,6 +691,8 @@ export class Engine {
     const commitHints = this.pendingHints(chatId)
     if (commitHints.length) this.ledger.setMeta(`hints:${chatId}`, '')
     const life = batch.some(r => r.kind === 'user') ? this.lifeLines(chatId, seg.id, this.ledger.segmentTurnCount(seg.id) === 0) : []
+    const recap = batch.some(r => r.kind === 'user') ? this.groupRecap(chatId) : null
+    if (recap) life.push(recap)
     // 对方发来的图片：附在消息后面（模型看不了图时，runPrompt 里换成一句说明）
     const images: Block[] = batch.flatMap(r => { const m = rowMedia(r); return m?.kind === 'photo' && m.path ? [{ image: m.path }] : [] })
     let blocks: Block[] = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone }), ...images]

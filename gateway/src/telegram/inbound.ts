@@ -3,13 +3,25 @@ import type { Access } from '../config'
 import type { NewInbound } from '../ledger'
 import type { TgMessage } from './api'
 
-export type GateResult = { deliver: true } | { deliver: false; reason: string }
+/** deliver: 'observe' = 群消息，只记进群聊记录（谁说话由导演决定，见 director.py），不直接触发回复 */
+export type GateResult = { deliver: true } | { deliver: 'observe' } | { deliver: false; reason: string }
 
-/** 第一期只处理私聊。群聊在 M5 接入（届时按 access.json 的 groups 规则判断）。 */
+export const isGroupChat = (chatId: string | number) => String(chatId).startsWith('-')
+
 export function gate(msg: TgMessage, access: Access): GateResult {
   if (access.dmPolicy === 'disabled') return { deliver: false, reason: 'dm disabled' }
   if (!msg.from) return { deliver: false, reason: 'no sender' }
-  if (msg.chat.type !== 'private') return { deliver: false, reason: `chat type ${msg.chat.type} not handled yet` }
+  if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
+    const policy = access.groups[String(msg.chat.id)]
+    if (!policy) return { deliver: false, reason: 'group not in access.json' }
+    const allow = (policy.allowFrom ?? []).map(String)
+    if (allow.length > 0 && !allow.includes(String(msg.from.id))) return { deliver: false, reason: 'sender not in group allowFrom' }
+    // 群里只有点名本 bot 的命令（/clear@本bot 等）直接交给网关，其余都只记录
+    const cmd = parseCommand(msg.text)
+    if (cmd && cmd.target && GATEWAY_COMMANDS.has(cmd.name)) return { deliver: true }
+    return { deliver: 'observe' }
+  }
+  if (msg.chat.type !== 'private') return { deliver: false, reason: `chat type ${msg.chat.type} not handled` }
   if (!access.allowFrom.includes(String(msg.from.id))) return { deliver: false, reason: 'sender not in allowFrom' }
   return { deliver: true }
 }

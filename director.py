@@ -100,6 +100,79 @@ _GT_DIR = os.environ.get(
     "DIRECTOR_GT_DIR", os.path.expanduser("~/.claude/channels/group_transcripts"))
 
 
+# ── 新系统（dsh-bot 网关）的 bot（M5）：名单从注册表读，不再写死 bot1–3 ──
+# 注册表 = HUB_CONFIGS_DIR 下的配置 + 网关启动时写的 state/bot.json（Telegram 用户名）+ 频道 access.json 的 groups。
+# 点名改走网关的本机接口（带口令）；群聊记录、"刚聊过"标记、导演状态都放在 DSH_BOT_HOME 下。
+BOT_CHANNEL: dict = {}  # bot_id → 频道目录（只有新系统的 bot 有）
+
+
+def _dsh_home() -> str:
+    return os.path.expanduser(os.environ.get("DSH_BOT_HOME") or "~/.dsh-bot")
+
+
+def load_dsh_roster(chat_id: str = CHAT_ID) -> bool:
+    """读注册表里在 chat_id 这个群的新系统 bot，换掉写死的名单和目录。读到至少一个返回 True。"""
+    global BOTS, BOT_BY_USERNAME, BOT_DIR_NAME, BOT_CHANNEL, _GT_DIR, MARKER_DIR, STATE_DIR, MODE_DIR, HUMAN_ID
+    if _config_loader is None:
+        return False
+    bots, by_user, dirs, chans, owners = {}, {}, {}, {}, []
+    for cfg in _config_loader.list_enabled_bots(include_disabled=True):
+        ch = cfg.get("bot_channel_path")
+        if not ch:
+            continue
+        ch = os.path.abspath(os.path.expanduser(ch))
+        try:
+            with open(os.path.join(os.path.dirname(ch), "state", "bot.json"), encoding="utf-8") as f:
+                me = json.load(f)
+            with open(os.path.join(ch, "access.json"), encoding="utf-8") as f:
+                access = json.load(f)
+            groups = access.get("groups") or {}
+        except Exception:
+            continue  # 不是新系统的 bot，或者网关还没起来过
+        if chat_id and str(chat_id) not in groups:
+            continue
+        bid = cfg["_bot_id"]
+        bots[bid] = cfg.get("display_name") or me.get("name") or bid
+        if me.get("username"):  # 群聊记录里的用户名不带 @，旧配置的写法带 @：两种都认
+            by_user[me["username"]] = bid
+            by_user["@" + me["username"]] = bid
+        dirs[bid] = bid
+        chans[bid] = ch
+        owners += [str(x) for x in (access.get("allowFrom") or [])[:1]]
+    if not bots:
+        return False
+    if not HUMAN_ID and owners:  # 没设 DIRECTOR_HUMAN_ID：主人就是 bot 私聊白名单的第一个人（和网关认主人的规则一样）
+        HUMAN_ID = owners[0]
+    BOTS, BOT_BY_USERNAME, BOT_DIR_NAME, BOT_CHANNEL = bots, by_user, dirs, chans
+    home = _dsh_home()
+    _GT_DIR = os.environ.get("DIRECTOR_GT_DIR") or os.path.join(home, "groups")
+    MARKER_DIR = os.environ.get("DIRECTOR_MARKER_DIR") or os.path.join(home, "director", "last-user")
+    STATE_DIR = os.environ.get("DIRECTOR_STATE_DIR") or os.path.join(home, "director", "state")
+    MODE_DIR = os.environ.get("DIRECTOR_MODE_DIR") or os.path.join(home, "director", "mode")
+    return True
+
+
+# ── 调模型失败要退避（旧版失败后每 2 秒再试一次，没有尽头）：5 秒起翻倍，最多 10 分钟。退避期间主循环不做决策 ──
+_LLM_FAILS = 0
+_LLM_RETRY_AT = 0.0
+
+
+def _ask(prompt: str, timeout: int = 30) -> dict:
+    global _LLM_FAILS, _LLM_RETRY_AT
+    try:
+        r = call_claude_json(prompt, timeout=timeout)
+    except Exception:
+        r = None
+    if r is None:
+        _LLM_FAILS += 1
+        wait = min(600, 5 * 2 ** (_LLM_FAILS - 1))
+        _LLM_RETRY_AT = time.time() + wait
+        print(f"[director] llm_failed fails={_LLM_FAILS} retry_in={wait}s", flush=True)
+        return {}
+    _LLM_FAILS = 0
+    return r
+
+
 def _parse_ts(s: str) -> float:
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
@@ -174,7 +247,7 @@ def _fmt_msg(m: dict) -> str:
         rn = BOTS.get(m.get("reply_to_speaker"), m.get("reply_to_speaker") or "")
         who = f"{rn}的" if rn else ""
         q = f"（回复{who}「{rt[:40]}」）"
-    return f"{m['speaker']}{q}：{m['text'][:120]}"
+    return f"{BOTS.get(m['speaker'], m['speaker'])}{q}：{m['text'][:120]}"  # bot 用显示名（新系统的 bot id 只是编号）
 
 
 def _build_prompt(history: list[dict], heat: int, exclude: str | None = None, avail=None) -> str:
@@ -229,7 +302,7 @@ def decide(chat_id: str = CHAT_ID, history: list[dict] | None = None,
     avail = [b for b in BOTS if b not in excl]
     if not avail:
         return {"speak": False, "reason": "可用bot不足"}  # INTERFACE §9.2 形状（无 heat 键）
-    r = call_claude_json(_build_prompt(history, heat, exclude=exclude if isinstance(exclude, str) else None,
+    r = _ask(_build_prompt(history, heat, exclude=exclude if isinstance(exclude, str) else None,
                                        avail=avail), timeout=30) or {}
     who = (r.get("who") or "").strip()
     if not r.get("speak") or who not in BOTS:
@@ -262,7 +335,7 @@ def decide_scene(history: list[dict], budget: int, exclude: str | None = None, b
         "- dangling：最后一句是不是抛了个问题或话头、还没人接（需要有人回应一下才不突兀）。\n"
         "- who：若还要继续(done=false)，谁最适合接下一句；最后一句是问题就让最该接的人接。done=true 且不 dangling 时 who 可省略。\n"
     )
-    r = call_claude_json(prompt, timeout=30) or {}
+    r = _ask(prompt, timeout=30) or {}
     who = (r.get("who") or "").strip()
     if who not in BOTS:
         who = None
@@ -316,6 +389,8 @@ def _ensure_worker_alive(bot: str, chat_id: str) -> None:
         _log_stopped("ensure", bot)
         return
     if os.environ.get("DIRECTOR_NO_SPAWN"):  # 测试模式：不真拉 worker
+        return
+    if bot in BOT_CHANNEL:  # 新系统的 bot：网关常驻，不需要拉起
         return
     import urllib.request
     try:
@@ -401,6 +476,17 @@ def inject(bot: str, chat_id: str, history: list[dict],
         "（表情包按 CLAUDE.md 规则用空 text 的 reply 发，别配字）；"
         "自拍/生图这类重的想发再发、别每句都发，自然点。"
     )
+    if bot in BOT_CHANNEL:  # 新系统的 bot：投给它的网关（带口令），由网关写进账本、开一轮
+        import gateway_client
+        body = text.replace("⟦", "〚").replace("⟧", "〛")  # 群里的话原样嵌在里面，不能伪造程序说明
+        if body.startswith("[director]"):
+            body = "⟦群聊·导演点到你了⟧" + body[len("[director]"):]
+        try:
+            gateway_client.inject(BOT_CHANNEL[bot], chat_id, body, "director", f"director-{int(time.time() * 1000)}")
+        except Exception as e:
+            print(f"[director] inject_failed bot={bot} err={type(e).__name__}", flush=True)
+            return ""
+        return f"gateway:{bot}"
     # unified inbox：写 <channel>/inbox（不再 per-chat），payload 带 chat_id + scene。
     inbox = os.path.join(CHANNELS_ROOT, BOT_DIR_NAME[bot], "inbox")
     os.makedirs(inbox, exist_ok=True)
@@ -442,7 +528,7 @@ def decide_initiate(history: list[dict], exclude=()) -> dict:
         f"{busy_line}"
         f'只输出 JSON：{{"speak": true或false, "who": {who_enum}}}'
     )
-    r = call_claude_json(prompt, timeout=30) or {}
+    r = _ask(prompt, timeout=30) or {}
     who = (r.get("who") or "").strip()
     if not r.get("speak") or who not in BOTS:
         return {"speak": False, "reason": "导演选择继续安静"}
@@ -923,8 +1009,13 @@ def tick(chat_id: str = CHAT_ID, now: float | None = None) -> dict:
 
 def run(chat_id: str = CHAT_ID) -> None:
     """常驻主循环。launchd KeepAlive 拉活。"""
-    print(f"[director] 启动，chat={chat_id}，开关={'开' if switch_on(chat_id) else '关'}", flush=True)
+    dsh = load_dsh_roster(chat_id)
+    print(f"[director] 启动，chat={chat_id}，开关={'开' if switch_on(chat_id) else '关'}，"
+          f"{'新系统 bot：' + '、'.join(BOTS) if dsh else '旧系统写死的名单'}", flush=True)
     while True:
+        if time.time() < _LLM_RETRY_AT:  # 调模型失败后的退避期：先不决策
+            time.sleep(POLL_SEC)
+            continue
         try:
             r = tick(chat_id)
             if r["action"] not in ("idle", "off", "debounce", "locked",
@@ -940,6 +1031,7 @@ if __name__ == "__main__":
     if "--run" in sys.argv:
         run()
     else:  # 默认只看一步决策，不写任何东西之外的副作用
+        load_dsh_roster()
         hist = read_group_history()
         print(f"读到 {len(hist)} 条去重后群历史，当前 heat={compute_heat(hist)}")
         print(json.dumps(decide(history=hist), ensure_ascii=False, indent=2))

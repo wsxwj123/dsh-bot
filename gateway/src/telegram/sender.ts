@@ -123,7 +123,11 @@ export class Sender {
     private readonly api: TelegramApi,
     private readonly ledger: Ledger,
     private readonly log: Logger,
-    private readonly o: { allowDirs: () => string[]; maxSendWaitMs: number; access: () => Access },
+    private readonly o: {
+      allowDirs: () => string[]; maxSendWaitMs: number; access: () => Access
+      /** 每段发出后（群聊记录用：bot 自己在群里说的话由自己记） */
+      onSent?: (chatId: string, messageId: number, text: string) => void
+    },
   ) {}
 
   async send(req: SendRequest): Promise<PartResult[]> {
@@ -182,6 +186,7 @@ export class Sender {
           this.ledger.outboundResult(outId, 'sent', { tgMessageId: m.message_id })
           results.push({ index: i + 1, kind: item.kind, state: 'sent', messageId: m.message_id })
           if (item.kind === 'text') this.log.chatLine('bot', req.chatId, item.text)
+          this.o.onSent?.(req.chatId, m.message_id, item.kind === 'text' ? item.text : outKind === 'photo' ? '[图片]' : '[文件]')
           if (item.kind === 'text' && req.voice) await this.sendVoice(req, i + 1, req.voiceTexts ? (req.voiceTexts[ti] ?? '') : item.text)
           if (i === 0 && items.length > 1) crashPoint('mid_reply')
           break
