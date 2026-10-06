@@ -16,10 +16,11 @@ afterEach(async () => {
   tg = null; b = null; gw = null
 })
 
-async function setup(gwOpts: Record<string, unknown> = {}) {
+async function setup(gwOpts: Record<string, unknown> = {}, before?: (b: BotEnv) => void) {
   tg = new FakeTelegram()
   b = makeBot(tg, { gw: { burst_window_ms: 0, ...gwOpts } })
   mkdirSync(b.acpState, { recursive: true })
+  before?.(b)
   gw = new Gateway(b)
   await gw.start()
   return { tg, b, gw }
@@ -64,8 +65,8 @@ test('兜底：说了"半小时后提醒你"却没登记 → 自动登记并告�
 })
 
 test('到点时在睡觉：顺延到起床，提示里写明迟了多久', async () => {
-  const { b, gw } = await setup()
-  situation(b, { name: '睡觉中', state: 'sleeping', wakes: [Math.floor(Date.now() / 1000) + 3] })
+  // 作息先写好再启动网关（查不到的结果会缓存一会儿）
+  const { b, gw } = await setup({}, b => situation(b, { name: '睡觉中', state: 'sleeping', wakes: [Math.floor(Date.now() / 1000) + 4] }))
   const l = gw.ledger()
   l.addCommitment({ chatId: String(OWNER), text: '叫对方起床', dueAt: Date.now() - 20 * 60_000, source: 'tool' })
   l.close()
