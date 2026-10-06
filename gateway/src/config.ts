@@ -61,6 +61,14 @@ export type GatewayOpts = {
   pollTimeoutS: number
   /** 高级：自定义 dsh 的启动命令（测试用假 ACP 服务） */
   dshCommand?: string[]
+  /** 承诺到点检查的间隔（默认 30 秒） */
+  commitPollMs: number
+  /** 承诺到点没兑现时，第 1、2 次重试前等多久（默认 5、15 分钟） */
+  commitRetryMs: number[]
+  /** 被晾追问的检查间隔（默认 60 秒） */
+  hangTickMs: number
+  /** 测试用：换掉作息查询命令（默认 python3 hang_situation.py <bot> --plan） */
+  situationCmd?: string[]
   logLevel: 'debug' | 'info' | 'warn' | 'error'
   logMaxBytes: number
   logKeep: number
@@ -184,6 +192,10 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     telegramApi: str(g.telegram_api, 'https://api.telegram.org').replace(/\/+$/, ''),
     pollTimeoutS: num(g.poll_timeout_s, 25, 'gateway.poll_timeout_s'),
     dshCommand: cmd,
+    commitPollMs: num(g.commit_poll_ms, 30_000, 'gateway.commit_poll_ms'),
+    commitRetryMs: Array.isArray(g.commit_retry_ms) ? g.commit_retry_ms.map((v, i) => num(v, 0, `gateway.commit_retry_ms[${i}]`)) : [5 * 60_000, 15 * 60_000],
+    hangTickMs: num(g.hang_tick_ms, 60_000, 'gateway.hang_tick_ms'),
+    situationCmd: Array.isArray(g.situation_cmd) && g.situation_cmd.length > 0 ? g.situation_cmd.map(String) : undefined,
     logLevel: level as GatewayOpts['logLevel'],
     logMaxBytes: num(g.log_max_bytes, 10 * 1024 * 1024, 'gateway.log_max_bytes'),
     logKeep: num(g.log_keep, 5, 'gateway.log_keep'),

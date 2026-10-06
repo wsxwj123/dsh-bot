@@ -6,7 +6,9 @@
 不写库、不发消息、不回显配置内容（configs 里有 token 和 chat_id，出错时只报异常类名，
 绝不带配置值）。
 
-用法：python3 hang_situation.py <bot>   （cwd 需为本仓根目录）
+用法：python3 hang_situation.py <bot> [--plan]   （cwd 需为本仓根目录）
+--plan 另外给出 wakes（接下来 3 天每次起床的 unix 秒）和 free_at（手上的事做完的 unix 秒，没在忙为 null），
+新网关的承诺顺延（"起床后""下班后"、睡着时到期顺延到醒来）用。
 """
 import json
 import os
@@ -63,6 +65,31 @@ def query(bot: str) -> dict:
             "term_label": _term_label(act)}
 
 
+def plan(bot: str, step_min: int = 15, horizon_h: int = 72) -> dict:
+    """往后按 step_min 分钟一格扫作息表：每次从"睡觉"变成"不睡"的时刻算一次起床；
+    此刻在忙（上课、上班、其它不空闲）时，第一次变成"空闲"的时刻算忙完。"""
+    sys.path.insert(0, REPO_DIR)
+    import config_loader
+    from datetime import timedelta
+    from generators import situation
+    cfg = config_loader.load_bot(bot)
+    now = datetime.now()
+    state = lambda t: situation.get_current_recurring(cfg, t).state  # noqa: E731
+    cur = state(now)
+    wakes, free_at = [], None
+    prev = cur
+    t = now
+    for _ in range(horizon_h * 60 // step_min):
+        t = t + timedelta(minutes=step_min)
+        s = state(t)
+        if prev == "sleeping" and s != "sleeping":
+            wakes.append(int(t.timestamp()))
+        if free_at is None and cur not in ("free", "sleeping") and s == "free":
+            free_at = int(t.timestamp())
+        prev = s
+    return {"wakes": wakes, "free_at": free_at}
+
+
 def main() -> int:
     bot = sys.argv[1] if len(sys.argv) > 1 else ""
     if not bot:
@@ -70,6 +97,12 @@ def main() -> int:
         return 2
     try:
         out = query(bot)
+        if "--plan" in sys.argv[2:]:
+            try:
+                out.update(plan(bot))
+            except Exception as e:
+                sys.stderr.write("hang_situation: plan failed (%s)\n" % type(e).__name__)
+                out.update({"wakes": [], "free_at": None})
     except Exception as e:
         # 只报类名：异常正文可能带配置路径/内容
         sys.stderr.write("hang_situation: %s failed (%s)\n" % (bot, type(e).__name__))

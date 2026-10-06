@@ -63,6 +63,8 @@ export function makeBot(tg: FakeTelegram, o: { name?: string; root?: string; gw?
       turn_stall_warn_ms: 30_000,
       max_send_wait_ms: 500,
       config_poll_ms: 100,
+      commit_poll_ms: 200,
+      situation_cmd: ['bun', join(import.meta.dir, 'fakes', 'fake-situation.ts'), join(acpState, 'situation.json')],
       heartbeat_ms: 500,
       probe_ms: 60_000,
       log_level: 'debug',

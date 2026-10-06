@@ -50,6 +50,24 @@ export type SegmentRow = {
   prompt_key: string | null
 }
 
+export type CommitmentState = 'pending' | 'firing' | 'done' | 'failed' | 'cancelled'
+export type CommitmentRow = {
+  id: number
+  chat_id: string
+  text: string
+  quote: string | null
+  when_text: string | null
+  due_at: number
+  next_at: number
+  state: CommitmentState
+  source: 'tool' | 'auto' | 'call'
+  attempts: number
+  inbound_id: number | null
+  created_at: number
+  closed_at: number | null
+  note: string | null
+}
+
 export type TurnRow = {
   id: number
   root_id: number
@@ -92,7 +110,7 @@ export type TranscriptEntry = { who: 'user' | 'bot'; ts: number; text: string; s
 /** 表结构放在单独的 .sql 文件里，Python 周边的测试也读同一份 */
 const SCHEMA = readFileSync(join(import.meta.dir, 'ledger-schema.sql'), 'utf8')
 
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 export type NewInbound = {
   ukey: string
@@ -125,6 +143,45 @@ export class Ledger {
   }
 
   close(): void { this.db.close() }
+
+  // ─── 承诺 ───
+
+  addCommitment(c: { chatId: string; text: string; quote?: string | null; whenText?: string | null; dueAt: number; source: CommitmentRow['source'] }): CommitmentRow {
+    const r = this.db.query(`INSERT INTO commitments (chat_id, text, quote, when_text, due_at, next_at, state, source, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
+      .run(c.chatId, c.text, c.quote ?? null, c.whenText ?? null, c.dueAt, c.dueAt, c.source, this.now())
+    return this.commitment(Number(r.lastInsertRowid))!
+  }
+  commitment(id: number): CommitmentRow | null {
+    return this.db.query<CommitmentRow, [number]>('SELECT * FROM commitments WHERE id = ?').get(id)
+  }
+  openCommitments(chatId: string): CommitmentRow[] {
+    return this.db.query<CommitmentRow, [string]>(`SELECT * FROM commitments WHERE chat_id = ? AND state IN ('pending', 'firing') ORDER BY due_at`).all(chatId)
+  }
+  commitmentsInState(state: CommitmentState, nextBefore = Number.MAX_SAFE_INTEGER): CommitmentRow[] {
+    return this.db.query<CommitmentRow, [string, number]>('SELECT * FROM commitments WHERE state = ? AND next_at <= ? ORDER BY next_at').all(state, nextBefore)
+  }
+  updateCommitment(id: number, f: Partial<Pick<CommitmentRow, 'state' | 'next_at' | 'attempts' | 'inbound_id' | 'note'>>): void {
+    const keys = Object.keys(f) as (keyof typeof f)[]
+    if (keys.length === 0) return
+    const closing = f.state && ['done', 'failed', 'cancelled'].includes(f.state)
+    this.db.query(`UPDATE commitments SET ${keys.map(k => `${k} = ?`).join(', ')}${closing ? ', closed_at = ?' : ''} WHERE id = ?`)
+      .run(...keys.map(k => f[k] ?? null), ...(closing ? [this.now()] : []), id)
+  }
+  commitmentsCreatedSince(chatId: string, since: number, source: CommitmentRow['source']): number {
+    return (this.db.query<{ n: number }, [string, number, string]>('SELECT COUNT(*) AS n FROM commitments WHERE chat_id = ? AND created_at >= ? AND source = ?').get(chatId, since, source))?.n ?? 0
+  }
+  hasCommitmentQuote(chatId: string, quote: string, since: number): boolean {
+    return !!this.db.query('SELECT 1 FROM commitments WHERE chat_id = ? AND (quote = ? OR text = ?) AND created_at >= ? LIMIT 1').get(chatId, quote, quote, since)
+  }
+  /** 这条消息所在的那一轮（含补救）有没有真正送达的回复 */
+  deliveredForInbound(inboundId: number): number {
+    return (this.db.query<{ n: number }, [number]>(`SELECT COUNT(*) AS n FROM outbound WHERE state IN ('sent', 'ambiguous') AND turn_id IN (
+      SELECT id FROM turns WHERE root_id IN (SELECT root_id FROM turns WHERE id = (SELECT turn_id FROM inbound WHERE id = ?)))`).get(inboundId))?.n ?? 0
+  }
+  /** 这个聊天 since 之后 bot 真正发出去的文字（兜底识别许诺用） */
+  sentTextsSince(chatId: string, since: number): string[] {
+    return this.db.query<{ text: string }, [string, number]>(`SELECT text FROM outbound WHERE chat_id = ? AND kind = 'text' AND state IN ('sent', 'ambiguous') AND turn_id IS NOT NULL AND created_at >= ? ORDER BY id`).all(chatId, since).map(r => r.text)
+  }
 
   /** 老账本补列（只加不删） */
   private migrate(): void {
