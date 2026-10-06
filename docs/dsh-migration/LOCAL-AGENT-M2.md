@@ -117,3 +117,45 @@ HUB_CONFIGS_DIR=~/.dsh-bot/configs python3 memory/memory_compactor.py
    - 系统用户名
 3. 从 `claude/nice-brahmagupta-dtjsma` 拉出新分支 `local/m2-check`，推到这个分支。
 4. 向用户汇报时用平实的中文，先说结论。最后一句写："M2 实测已推到 local/m2-check"。
+
+## 复测：真机报告里的问题修好之后（约 15 分钟）
+
+铁律同上。这次只复测两件事，报告写到 `docs/dsh-migration/local/reports/m2-recheck.md`，推到新分支 `local/m2-recheck`。
+
+### 1. 拉代码、跑测试
+
+和第 1 步一样，再跑一遍三条测试命令。预期：网关 85 项（通过 80，跳过 5），真 dsh 5 项通过，Python 22 项通过。
+
+### 2. 停旧 bot5（先问用户），启动新网关
+
+```bash
+DSH_BOT_LOG_CONSOLE=1 bun gateway/src/main.ts --config ~/.dsh-bot/configs/bot5.yml
+```
+
+### 3. 系统提示词变了以后自动换段（问题 2）
+
+新代码会给每个会话记下开会话时系统提示词的指纹。bot5 现有的会话是旧代码开的，没有指纹，所以应该在下一条消息时自动换一次段。
+
+- 请用户随便发一条消息。
+- 预期 `gateway.log` 里依次出现：
+  - `segment.prompt_changed`
+  - `segment.roll_start` 和 `segment.rolled`，`reason` 都是 `prompt-changed`，`summary` 是 `in-session`
+  - `segment.created`、`segment.seed`
+- 用户正常收到回复，没有多余的消息。
+- 记下 `segment.seed` 的 `chars`、`recent_cap`，以及 `report.ts --hours 1` 里"每轮上下文大小"的最大值，作为参考。
+- 再发一条消息：这次不应该再出现 `segment.prompt_changed`。
+- 按 Ctrl+C 停网关再启动，再发一条：也不应该出现 `segment.prompt_changed`（没改人设，接着用会话）。
+
+### 4. 记忆整理（问题 1，会调一次 DeepSeek，先问用户）
+
+```bash
+HUB_CONFIGS_DIR=~/.dsh-bot/configs python3 memory/memory_compactor.py
+```
+
+- 预期输出"[bot5] memory.md 已更新（备份至 .bak）"和"完成：1/1 成功"。
+- 记下整理前后 `MEMORY.md` 的行数，以及有没有生成 `MEMORY.md.bak`。不看内容。
+- 如果输出的是"校验失败：……"，原样记下这一行（这是整理结果没通过长度检查，不是程序出错）。
+
+### 5. 收尾
+
+和第 7 步一样：跑 `check`、`health`、`report.ts --hours 2` 放进报告，Ctrl+C 停网关，问用户要不要恢复旧 bot5。最后一句写："M2 复测已推到 local/m2-recheck"。

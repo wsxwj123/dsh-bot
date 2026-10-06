@@ -152,3 +152,47 @@ def test_DeepSeek密钥可以从新系统的共用密钥文件读(tmp_path, monk
         deepseek_client._delta_cfg()
     (tmp_path / "credentials.yaml").write_text("version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-test-only-0000000000\n", encoding="utf-8")
     assert deepseek_client._delta_cfg()["api_key"] == "sk-test-only-0000000000"
+
+
+def test_记忆整理_新系统的bot不记Claude配额_整理结果照样写回(bot, monkeypatch):
+    """真机发现：仓库里的 state.db 没建表时，记配额出错，整理好的结果被丢掉。"""
+    channel, db = bot
+    import quota
+    from memory import memory_compactor as mc
+    mem = channel / "memory"
+    mem.mkdir()
+    (mem / "MEMORY.md").write_text("# Memory\n\n## 关于对方\n- 养猫\n", encoding="utf-8")
+    add_user(db, "100", "今天去看了医生", time.time() - 60)
+    add_bot(db, "100", "医生怎么说", time.time() - 50)
+
+    def boom(*a, **k):
+        raise RuntimeError("no such table: call_log")
+    monkeypatch.setattr(quota, "record_call", boom)
+    monkeypatch.setattr(mc, "_call_llm", lambda prompt, dsh_bot: "# Memory\n\n## 关于对方\n- 养猫，最近去看过医生\n")
+    assert mc.compact_one({"_bot_id": "bot5", "bot_channel_path": str(channel)}) is True
+    assert "看过医生" in (mem / "MEMORY.md").read_text(encoding="utf-8")
+    assert (mem / "MEMORY.md.bak").exists()
+
+
+def test_记忆整理_旧系统的bot记配额失败也不丢结果(tmp_path, monkeypatch):
+    import quota
+    import chat_history as ch
+    from memory import memory_compactor as mc
+    channel = tmp_path / "old-bot"
+    channel.mkdir()
+    monkeypatch.setattr(mc, "memory_path", lambda d: str(channel / "MEMORY.md"))
+    monkeypatch.setattr(mc, "ensure_memory_exists", lambda *a: None)
+    (channel / "MEMORY.md").write_text("# Memory\n\n- 养猫\n", encoding="utf-8")
+    monkeypatch.setattr(ch, "is_dsh_bot", lambda d: False)
+    monkeypatch.setattr(ch, "get_recent_dialog", lambda *a, **k: "对方：今天去看了医生")
+    monkeypatch.setattr(ch, "get_recent_voice_log", lambda *a, **k: "")
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(a)
+        raise RuntimeError("no such table: call_log")
+    monkeypatch.setattr(quota, "record_call", boom)
+    monkeypatch.setattr(mc, "_call_llm", lambda prompt, dsh_bot: "# Memory\n\n- 养猫，最近去看过医生\n")
+    assert mc.compact_one({"_bot_id": "old", "bot_channel_path": str(channel)}) is True
+    assert len(calls) == 1
+    assert "看过医生" in (channel / "MEMORY.md").read_text(encoding="utf-8")

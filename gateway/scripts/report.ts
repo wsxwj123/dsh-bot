@@ -39,7 +39,7 @@ const dup = q<{ n: number }>(`SELECT COUNT(*) AS n FROM (SELECT chat_id, text FR
 w(`- 同一轮里同一句话发了不止一次：${dup}`)
 w()
 w('## 会话（段）')
-w(`- 按状态：${rows(q(`SELECT state || COALESCE('/' || close_reason, '') AS k, COUNT(*) AS n FROM segments WHERE created_at > ? GROUP BY state, close_reason`, since))}（closed/budget = 用量到线换段，closed/pre-budget = 新消息太长先换段，closed/clear = /clear）`)
+w(`- 按状态：${rows(q(`SELECT state || COALESCE('/' || close_reason, '') AS k, COUNT(*) AS n FROM segments WHERE created_at > ? GROUP BY state, close_reason`, since))}（closed/budget = 用量到线换段，closed/pre-budget = 新消息太长先换段，closed/clear = /clear，closed/prompt-changed = 人设、运行规则或 dsh 版本变了）`)
 const rolled = q<{ data: string }>(`SELECT data FROM events WHERE kind = 'segment_rolled' AND at > ?`, since).map(r => JSON.parse(r.data) as { summary: string; summary_chars: number })
 if (rolled.length) {
   const by = (k: string) => rolled.filter(r => r.summary === k).length

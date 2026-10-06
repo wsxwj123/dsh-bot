@@ -134,20 +134,27 @@ def compact_one(bot_cfg: dict) -> bool:
 
     prompt = COMPACTOR_PROMPT.format(current_memory=current, recent_dialog=recent)
 
+    dsh_bot = chat_history.is_dsh_bot(bot_dir)
     try:
-        new_memory = _call_llm(prompt, dsh_bot=chat_history.is_dsh_bot(bot_dir))
-        quota.record_call("memory_compact", quota.MEMORY_COMPACT_WEIGHT)
-        # 剥掉 LLM 可能加的 ```markdown … ``` 包裹：否则 Claude Code auto-memory
-        # 解析器会把整个 MEMORY.md 当成一个代码块 → 记忆条目全部失效（bot3 已中招）。
-        _nm = new_memory.strip()
-        if _nm.startswith("```"):
-            _lines = _nm.split("\n")[1:]
-            if _lines and _lines[-1].strip().startswith("```"):
-                _lines = _lines[:-1]
-            new_memory = "\n".join(_lines).strip()
+        new_memory = _call_llm(prompt, dsh_bot=dsh_bot)
     except Exception as e:
-        sys.stderr.write(f"[{bot_id}] LLM 调用失败：{e}\n")
+        sys.stderr.write(f"[{bot_id}] 模型调用失败：{e}\n")
         return False
+    # 配额记的是 Claude 订阅的调用次数；新系统的 bot 走 DeepSeek，不记。
+    # 记账失败不影响整理结果（这次调用已经花出去了）。
+    if not dsh_bot:
+        try:
+            quota.record_call("memory_compact", quota.MEMORY_COMPACT_WEIGHT)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[{bot_id}] 记调用次数失败（不影响整理结果）：{e}\n")
+    # 剥掉 LLM 可能加的 ```markdown … ``` 包裹：否则 Claude Code auto-memory
+    # 解析器会把整个 MEMORY.md 当成一个代码块 → 记忆条目全部失效（bot3 已中招）。
+    _nm = new_memory.strip()
+    if _nm.startswith("```"):
+        _lines = _nm.split("\n")[1:]
+        if _lines and _lines[-1].strip().startswith("```"):
+            _lines = _lines[:-1]
+        new_memory = "\n".join(_lines).strip()
 
     # 校验：放宽——保留 bot 自己的格式，不强求章节
     # 仅检查长度合理 + 没被改成空文件

@@ -139,6 +139,8 @@ function importMemory(oldChannel: string, destDir: string): boolean {
   if (files.length === 0) return false
   mkdirSync(destDir, { recursive: true })
   let bytes = 0
+  let copied = 0
+  let backedUp = 0
   const stamp = new Date().toISOString().slice(0, 10)
   for (const f of files) {
     const from = join(srcDir, f)
@@ -147,12 +149,18 @@ function importMemory(oldChannel: string, destDir: string): boolean {
     if (existsSync(to)) {
       if (readFileSync(to).equals(data)) continue
       renameSync(to, `${to}.before-import-${stamp}`)
+      backedUp++
     }
     writeFileSync(to, data)
+    copied++
     bytes += data.length
   }
-  if (bytes === 0) ok(`Claude Code 的长期记忆（${files.length} 个文件）和新目录里的一样，没有改动`)
-  else ok(`已导入 Claude Code 的长期记忆：${files.length} 个文件，共 ${bytes} 字节（旧文件不动；新目录里原有的同名文件已改名备份）`)
+  if (copied === 0) ok(`Claude Code 的长期记忆（${files.length} 个文件）和新目录里的一样，没有改动`)
+  else {
+    const same = files.length - copied
+    const notes = ['旧文件不动', ...(same ? [`${same} 个和新目录里的一样，跳过`] : []), backedUp ? `新目录里原有的 ${backedUp} 个同名文件已改名备份（.before-import-${stamp}）` : '新目录里没有同名文件，不用备份']
+    ok(`已导入 Claude Code 的长期记忆：${copied} 个文件，共 ${bytes} 字节（${notes.join('；')}）`)
+  }
   return true
 }
 

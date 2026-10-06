@@ -46,6 +46,8 @@ export type SegmentRow = {
   summary: string | null
   close_reason: string | null
   memory_seen: number
+  /** 开这个会话时系统提示词（人设 + 运行规则 + dsh 版本）的指纹 */
+  prompt_key: string | null
 }
 
 export type TurnRow = {
@@ -90,7 +92,7 @@ export type TranscriptEntry = { who: 'user' | 'bot'; ts: number; text: string; s
 /** 表结构放在单独的 .sql 文件里，Python 周边的测试也读同一份 */
 const SCHEMA = readFileSync(join(import.meta.dir, 'ledger-schema.sql'), 'utf8')
 
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export type NewInbound = {
   ukey: string
@@ -130,6 +132,7 @@ export class Ledger {
     if (!cols.has('of_parts')) this.db.exec('ALTER TABLE outbound ADD COLUMN of_parts INTEGER')
     const segCols = new Set(this.db.query<{ name: string }, []>('PRAGMA table_info(segments)').all().map(c => c.name))
     if (!segCols.has('memory_seen')) this.db.exec('ALTER TABLE segments ADD COLUMN memory_seen INTEGER NOT NULL DEFAULT 0')
+    if (!segCols.has('prompt_key')) this.db.exec('ALTER TABLE segments ADD COLUMN prompt_key TEXT')
     this.setMeta('schema_version', String(SCHEMA_VERSION))
   }
 
@@ -216,8 +219,8 @@ export class Ledger {
       return this.segment(Number(r.lastInsertRowid))!
     })
   }
-  setSegmentSession(id: number, sessionId: string, model: string): void {
-    this.db.query('UPDATE segments SET session_id = ?, model = ? WHERE id = ?').run(sessionId, model, id)
+  setSegmentSession(id: number, sessionId: string, model: string, promptKey: string | null = null): void {
+    this.db.query('UPDATE segments SET session_id = ?, model = ?, prompt_key = ? WHERE id = ?').run(sessionId, model, promptKey, id)
   }
   setSegmentModel(id: number, model: string): void {
     this.db.query('UPDATE segments SET model = ? WHERE id = ?').run(model, id)

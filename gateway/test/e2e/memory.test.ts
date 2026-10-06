@@ -1,9 +1,9 @@
 // M2 验收：预算与换段、写摘要时工具锁住、新段开头（长期记忆 + 摘要 + 最近原话）、空摘要不覆盖、私聊之间互不串、长期记忆
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { FakeTelegram } from '../fakes/fake-telegram'
-import { cleanup, FRIEND, Gateway, makeBot, OWNER, prompts, readJsonl, sessionsState, sleep, toolResults, until, type BotEnv } from '../harness'
+import { cleanup, FRIEND, Gateway, makeBot, OWNER, prompts, readJsonl, sessionsState, sleep, toolResults, until, writeConfig, type BotEnv } from '../harness'
 
 let tg: FakeTelegram | null = null
 let b: BotEnv | null = null
@@ -30,6 +30,7 @@ async function setup(o: { gw?: Record<string, unknown>; brain?: Record<string, u
 }
 
 const summaries = (b: BotEnv) => readJsonl<{ sessionId: string; n: number; mode: string; withTools: boolean }>(join(b.acpState, 'summaries.jsonl'))
+const logEvents = (b: BotEnv, event: string) => readJsonl<Record<string, any>>(join(b.botDir, 'logs', 'gateway.log')).filter(r => r.event === event)
 
 /** 发一条，等它的回复到了、这一轮也结束了（包括可能紧跟着的换段） */
 async function say(tg: FakeTelegram, gw: Gateway, chat: number, text: string): Promise<void> {
@@ -102,8 +103,10 @@ test('换段那一轮：工具锁住；摘要和最近原话（含 bot 真正发
   led.close()
   const tr: typeof all = []
   let used = 0
+  const cap = Math.min(600, Math.floor(BUDGET * 0.1)) // 预算小：原话收紧到预算的一成
+  expect(logEvents(b, 'segment.seed').at(-1)!.recent_cap).toBe(cap)
   for (const e of [...all].reverse()) {
-    if (used + e.text.length > 600 && tr.length > 0) break
+    if (used + e.text.length > cap && tr.length > 0) break
     tr.unshift(e)
     used += e.text.length
   }
@@ -193,4 +196,61 @@ test('预算比新段开头还小：不会每轮都换段', async () => {
   // 每段至少聊两轮才换：6 轮最多换 3 次
   expect(summaries(b).length).toBeLessThanOrEqual(3)
   expect(tg.sentTo(OWNER).length).toBe(6)
+})
+
+test('人设改了（网关重启）：旧会话写完交接摘要就换新会话，不接着用；没改就接着用', async () => {
+  const { tg, b } = await setup({ brain: { max_input_tokens: 100_000 } })
+  await say(tg, gw!, OWNER, '改人设之前第一句')
+  await say(tg, gw!, OWNER, '改人设之前第二句')
+  const oldSession = prompts(b).find(p => p.text.includes('改人设之前第二句'))!.sessionId
+  // 没改人设，重启：接着用原来的会话
+  await gw!.stop()
+  gw = new Gateway(b)
+  await gw.start()
+  await say(tg, gw, OWNER, '重启之后没改人设')
+  expect(prompts(b).find(p => p.text.includes('重启之后没改人设'))!.sessionId).toBe(oldSession)
+  expect(summaries(b).length).toBe(0)
+  // 改了人设，重启：先在旧会话里写摘要（工具锁住），再开新会话，开头带着摘要
+  await gw.stop()
+  appendFileSync(join(b.channelDir, 'CLAUDE.md'), '补一句设定。\n')
+  gw = new Gateway(b)
+  await gw.start()
+  await say(tg, gw, OWNER, '改人设之后第一句')
+  const sums = summaries(b)
+  expect(sums.length).toBe(1)
+  expect(sums[0]!.sessionId).toBe(oldSession) // 在旧会话里写的（缓存都在）
+  const locked = toolResults(b).find(r => r.sessionId === oldSession && r.name === 'react')!
+  expect(locked.isError).toBe(true) // 写摘要时工具锁住
+  const p = prompts(b).find(x => x.text.includes('改人设之后第一句'))!
+  expect(p.sessionId).not.toBe(oldSession)
+  expect(p.text).toContain(`假摘要#${sums[0]!.n}`)
+  const led = gw.ledger()
+  const segs = led.db.query(`SELECT state, close_reason FROM segments ORDER BY id`).all() as { state: string; close_reason: string | null }[]
+  led.close()
+  expect(segs.map(s => `${s.state}/${s.close_reason}`)).toEqual(['closed/prompt-changed', 'active/null'])
+  expect(tg.sentTo(OWNER).length).toBe(4) // 换段那一轮没多发任何东西
+})
+
+test('人设改了（网关在跑）：等空闲重启 dsh 后，下一条消息先换段', async () => {
+  const { tg, b, gw } = await setup({ brain: { max_input_tokens: 100_000 } })
+  await say(tg, gw, OWNER, '热改之前第一句')
+  await say(tg, gw, OWNER, '热改之前第二句')
+  const oldSession = prompts(b).find(p => p.text.includes('热改之前第二句'))!.sessionId
+  appendFileSync(join(b.channelDir, 'CLAUDE.md'), '热改的设定。\n')
+  await until(() => logEvents(b, 'dsh.restart_idle').length > 0, 'dsh restarted')
+  await say(tg, gw, OWNER, '热改之后第一句')
+  expect(summaries(b).map(s => s.sessionId)).toEqual([oldSession])
+  expect(prompts(b).find(x => x.text.includes('热改之后第一句'))!.sessionId).not.toBe(oldSession)
+  expect(logEvents(b, 'segment.prompt_changed').length).toBe(1)
+})
+
+test('改了 max_input_tokens：日志里记下新的预算', async () => {
+  const { tg, b, gw } = await setup({ brain: { max_input_tokens: 100_000 } })
+  await say(tg, gw, OWNER, '改预算之前')
+  b.brain = { ...b.brain, max_input_tokens: 40_000 }
+  writeConfig(b)
+  await until(() => logEvents(b, 'config.brain_changed').some(r => r.max_input_tokens === 40_000), 'budget change logged')
+  delete b.brain.max_input_tokens
+  writeConfig(b)
+  await until(() => logEvents(b, 'config.brain_changed').some(r => r.max_input_tokens === null), 'budget removal logged')
 })

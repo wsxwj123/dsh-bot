@@ -84,6 +84,15 @@ export function restartFingerprint(p: PatchInput): string {
   return createHash('sha256').update(JSON.stringify([p.persona, b.routes, p.credentialsPath, b.emergencyCompaction, p.sessionsRoot])).digest('hex').slice(0, 16)
 }
 
+/**
+ * 系统提示词的指纹：人设、运行规则、dsh 版本。指纹变了，旧会话就不再接着用：
+ * dsh 对 deepseek 这类模型（systemPromptUpdate: in-history）会把新的系统提示词整份追加进历史，
+ * 旧的那份还留着，以后每轮都要再付一遍（M2 真机报告问题 2）。
+ */
+export function promptFingerprint(p: PatchInput, harnessVersion: string): string {
+  return createHash('sha256').update(JSON.stringify([p.persona, runtimeRules(), harnessVersion])).digest('hex').slice(0, 16)
+}
+
 export function modelValue(b: Pick<Brain, 'provider' | 'model'>): string {
   return JSON.stringify([b.provider, b.model])
 }

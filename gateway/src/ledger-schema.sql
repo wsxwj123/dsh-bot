@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS segments (
   needs_seed INTEGER NOT NULL DEFAULT 0,
   summary TEXT,
   close_reason TEXT,
-  memory_seen INTEGER NOT NULL DEFAULT 0
+  memory_seen INTEGER NOT NULL DEFAULT 0,
+  prompt_key TEXT
 );
 CREATE INDEX IF NOT EXISTS segments_chat ON segments(chat_id, state);
 CREATE TABLE IF NOT EXISTS turns (

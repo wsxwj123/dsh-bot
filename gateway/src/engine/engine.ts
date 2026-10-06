@@ -10,7 +10,7 @@ import { join } from 'path'
 import { loadAccess, reloadBrain, type Access, type Brain, type BotConfig } from '../config'
 import { AcpError, AcpExited, AcpTimeout, type SessionUpdate } from '../dsh/acp'
 import { buildDshEnv, defaultDshCommand, type DshProcess, type DshSpec } from '../dsh/process'
-import { buildPatchRows, modelValue, patchText, restartFingerprint, type PatchInput } from '../dsh/profile'
+import { buildPatchRows, modelValue, patchText, promptFingerprint, restartFingerprint, type PatchInput } from '../dsh/profile'
 import type { InboundRow, Ledger, SegmentRow, TurnKind } from '../ledger'
 import { safeError, type Logger } from '../log'
 import type { McpServer, ToolDef } from '../mcp/server'
@@ -23,6 +23,9 @@ import {
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, SUMMARY_PROMPT,
 } from './format'
+
+/** 预算小的时候，新段开头的原话最多占预算的这个比例（按一个字一个 token 算，宁可少带） */
+const SEED_RECENT_RATIO = 0.1
 
 type ActiveTurn = {
   turnId: number
@@ -72,6 +75,8 @@ export class Engine {
   private dshNextTryAt = 0
   private dshFailures = 0
   private fingerprint = ''
+  /** 正在跑的 dsh 用的系统提示词的指纹（dsh 启动时算） */
+  private promptKey = ''
   private restartPending = false
   private stopping = false
   private noticeAt = new Map<string, number>()
@@ -269,6 +274,12 @@ export class Engine {
     return { persona, brain: this.brain, credentialsPath: this.cfg.credentialsPath, sessionsRoot: join(this.cfg.dshHome, 'sessions') }
   }
 
+  private harnessVersion(): string {
+    try {
+      return String(JSON.parse(readFileSync(join(this.cfg.harnessDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8')).version ?? '')
+    } catch { return '' }
+  }
+
   dshSpec(): DshSpec {
     const input = this.patchInput()
     return {
@@ -294,6 +305,7 @@ export class Engine {
         const input = this.patchInput()
         await this.dsh.start(this.dshSpec())
         this.fingerprint = restartFingerprint(input)
+        this.promptKey = promptFingerprint(input, this.harnessVersion())
         this.loaded.clear()
         this.lastProbeOkAt = Date.now()
         this.dshBackoff.reset()
@@ -552,12 +564,32 @@ export class Engine {
         seg = null
       }
     }
+    // 人设、运行规则或 dsh 版本变了：旧会话不再接着用，写一份交接摘要后换新会话。
+    // 接着用的话，dsh 会把新的系统提示词整份追加进历史，新旧两份都在，以后每轮都要多付一份的钱。
+    if (seg?.session_id && seg.prompt_key !== this.promptKey) {
+      this.log.info('segment.prompt_changed', { chat: chatId, segment: seg.id })
+      if (this.ledger.segmentTurnsOfKind(seg.id, 'message') === 0) {
+        this.ledger.closeSegment(seg.id, 'closed', 'prompt-changed')
+        this.loaded.delete(seg.session_id)
+        void conn.request('session/close', { sessionId: seg.session_id }, 15_000).catch(() => {})
+      } else {
+        try {
+          await this.rollSegment(chatId, seg, 'prompt-changed')
+        } catch (e) {
+          if (e instanceof AcpExited) throw e
+          this.log.error('segment.roll_failed', { chat: chatId, segment: seg.id, err: safeError(e) })
+          this.ledger.closeSegment(seg.id, 'closed', 'prompt-changed (summary failed)')
+          this.loaded.delete(seg.session_id)
+        }
+      }
+      seg = this.ledger.activeSegment(chatId)
+    }
     if (!seg || !seg.session_id) {
       // 上一段是崩溃作废的、还没有摘要：先用账本流水补写一份（旧会话已经用不了）
       if (!seg) await this.summarizeAbandoned(chatId)
       if (!seg) seg = this.ledger.createSegment(chatId, randomToken(), true)
       const s = await conn.request<{ sessionId: string; configOptions?: any[] }>('session/new', { cwd: this.cfg.workDir, mcpServers: this.mcp.serverSpec(seg.id, seg.mcp_token) }, 60_000)
-      this.ledger.setSegmentSession(seg.id, s.sessionId, '')
+      this.ledger.setSegmentSession(seg.id, s.sessionId, '', this.promptKey)
       this.loaded.set(s.sessionId, gen)
       this.log.info('segment.created', { chat: chatId, segment: seg.id, needs_seed: seg.needs_seed === 1 })
       seg = this.ledger.segment(seg.id)!
@@ -566,17 +598,29 @@ export class Engine {
     let seed: string | null = null
     if (seg.needs_seed) {
       const clearAt = Number(this.ledger.getMeta(`clear_at:${chatId}`) ?? 0)
-      const entries = this.ledger.recentTranscript(chatId, { maxChars: this.cfg.gw.seedRecentChars, sinceMs: clearAt, excludeInboundIds: batchIds })
+      const recentCap = this.seedRecentChars(chatId)
+      const entries = this.ledger.recentTranscript(chatId, { maxChars: recentCap, sinceMs: clearAt, excludeInboundIds: batchIds })
       const intr = this.ledger.interruptedReply(chatId)
       const mem = this.memory.readForSeed(this.cfg.gw.memoryMaxChars)
       const summary = this.ledger.latestSummary(chatId)
       seed = formatSeedParts({ memory: mem.text, summary: summary?.summary ?? null, entries, interrupted: intr }, { timeZone: this.cfg.gw.timezone })
       this.log.info('segment.seed', {
-        chat: chatId, segment: seg.id, entries: entries.length, interrupted: intr !== null,
+        chat: chatId, segment: seg.id, entries: entries.length, recent_cap: recentCap, interrupted: intr !== null,
         memory_chars: mem.text.length, memory_truncated: mem.truncated, summary_from_segment: summary?.segmentId ?? null, chars: seed?.length ?? 0,
       })
     }
     return { seg: this.ledger.segment(seg.id)!, seed }
+  }
+
+  /**
+   * 新段开头带多少字原话：配置的上限；预算小的时候再收紧到预算的一成。
+   * 不收紧的话，预算 3 万时一整段的原话都会原样带进新会话，摘要等于白写，新会话一开头就占掉一大半预算（M2 真机报告问题 4）。
+   */
+  private seedRecentChars(chatId: string): number {
+    const prev = this.ledger.lastClosedSegment(chatId)
+    const budget = prev ? this.budgetFor(prev) : this.brain.maxInputTokens ?? null
+    const n = this.cfg.gw.seedRecentChars
+    return budget ? Math.min(n, Math.floor(budget * SEED_RECENT_RATIO)) : n
   }
 
   /** 给一个会话设模型和思考强度。返回是否成功。 */
@@ -796,8 +840,11 @@ export class Engine {
     const nb = reloadBrain(this.cfg.configPath)
     if (!nb) { this.log.warn('config.reload_failed', { path: 'configs/<bot>.yml' }); return }
     const before = brainKey(this.brain)
+    const beforeCap = this.brain.maxInputTokens ?? null
     this.brain = nb
-    if (brainKey(nb) !== before) this.log.info('config.brain_changed', { provider: nb.provider, model: nb.model, effort: nb.reasoningEffort ?? null })
+    if (brainKey(nb) !== before || (nb.maxInputTokens ?? null) !== beforeCap) {
+      this.log.info('config.brain_changed', { provider: nb.provider, model: nb.model, effort: nb.reasoningEffort ?? null, max_input_tokens: nb.maxInputTokens ?? null })
+    }
     const fp = restartFingerprint(this.patchInput())
     if (fp !== this.fingerprint && this.dsh.running) {
       this.log.info('config.restart_needed', { reason: 'persona or routes changed' })
