@@ -28,6 +28,25 @@ import {
 } from './format'
 import { formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, type KeyStatus, type ModelChoice } from './commands'
 
+/**
+ * 被晾追问等多久的倍数：按关系数值（好感 + 信任）调，越亲近追得越快（用户在 M3 真机验收后定的）。
+ * 很亲近（两项都 100）0.5 倍，一般（两项都 50）1 倍，生疏（两项都 0）1.5 倍。读不到关系数值就按 1 倍。
+ */
+export function hangPace(channelDir: string): number {
+  try {
+    const r = JSON.parse(readFileSync(join(channelDir, 'relationship.json'), 'utf8'))
+    const a = Number(r?.affection)
+    const t = Number(r?.trust)
+    if (!Number.isFinite(a) || !Number.isFinite(t)) return 1
+    const close = Math.max(0, Math.min(1, (a + t) / 200))
+    return 1.5 - close
+  } catch { return 1 }
+}
+
+function safeMeta(m: string | null): Record<string, unknown> | null {
+  try { return m ? JSON.parse(m) as Record<string, unknown> : null } catch { return null }
+}
+
 /** 旧调度器的被晾提示以 [hang-check] 开头；新系统统一用 ⟦系统…⟧ 标记程序说明 */
 function hangText(t: string): string {
   return t.replace(/^\[hang-check\]\s*/, '⟦系统·被晾⟧ ')
@@ -136,6 +155,7 @@ export class Engine {
       inject: (chatId, text) => { this.injectSynthetic(chatId, hangText(text), `hang:${chatId}:${Date.now()}`, { source: 'hang' }) },
       probe: () => this.situation.current(),
       log: line => this.log.info('hang', { detail: line }),
+      pace: () => hangPace(this.cfg.channelDir),
     })
     this.dsh.onUnexpectedExit = () => { this.loaded.clear() }
   }
@@ -291,7 +311,15 @@ export class Engine {
     if (!at) return { text: '这一轮已经结束。', isError: true }
     if (at.mode === 'summary') return LOCKED
     if (op === 'list') return this.commitments.list(at.chatId)
-    return op === 'create' ? this.commitments.create(at.chatId, args) : this.commitments.cancel(at.chatId, args)
+    if (op === 'create') return this.commitments.create(at.chatId, args)
+    const r = this.commitments.cancel(at.chatId, args)
+    // 到点提醒的这一轮里取消了这件事：等于选择这次不开口，不再追一句"你还没回复"
+    const c = this.ledger.commitment(Number(String(args.id ?? '').replace(/^#/, '')))
+    if (!r.isError && c?.inbound_id && this.ledger.inbound(c.inbound_id)?.turn_id === at.turnId && this.ledger.deliveredInChain(at.rootId) === 0) {
+      this.ledger.markSilent(at.turnId, 'commitment cancelled')
+      at.silent = true
+    }
+    return r
   }
 
   async toolSilent(args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
@@ -502,7 +530,7 @@ export class Engine {
     const since = Date.now()
     const delay = await this.runBatch(chatId, batch)
     // 这一轮说了"三点提醒你"却没登记：能换算时间的替它登记，下一轮告诉它；换算不了的下一轮提醒它自己登记
-    const hints = this.commitments.afterTurn(chatId, since)
+    const hints = this.commitments.afterTurn(chatId, since, batch.some(r => r.kind === 'synthetic' && (safeMeta(r.meta)?.source === 'commitment')))
     if (hints.length) this.ledger.setMeta(`hints:${chatId}`, JSON.stringify([...this.pendingHints(chatId), ...hints]))
     if (this.ledger.sentTextsSince(chatId, since).length > 0) this.hang.onOutbound(chatId)
     // 这一轮之后用量到线了：趁这个聊天还占着，马上换段（下一条消息就不用等摘要了）

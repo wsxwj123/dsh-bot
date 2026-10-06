@@ -441,8 +441,8 @@ def _write_back_activity(bot_id: str, chat_id: str, state, activity_type: str,
         if new_state is state:
             return  # 冷却拒绝
         # 写回
-        state_dir = global_cfg.get("jiwen", {}).get("state_dir") or \
-            os.path.expanduser("~/.claude/dispatcher/.jiwen-state")
+        from jiwen import reader as _reader
+        state_dir = _reader.resolve(bot_id, global_cfg.get("jiwen", {}) or {})[1]
         path = _tick.state_path(state_dir, bot_id, chat_id)
         # 读最新看是否被 tick 覆盖过
         try:

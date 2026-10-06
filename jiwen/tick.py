@@ -382,12 +382,15 @@ def tick_one_bot(bot_id: str, jiwen_cfg: dict, state_dir: str, dry_run: bool = F
     try:
         import relationship as _rel
         from datetime import datetime as _dt3
-        _bot_dir = bot_id  # bot_id 即 channels 下的目录名
+        _bot_dir = bot_id  # 旧系统：bot_id 即 ~/.claude/channels 下的目录名
+        # 新系统的 bot：关系数值就在它自己的频道目录里（网关从那里读），不碰旧系统目录
+        from jiwen import reader as _reader
+        _rel_dir = os.path.abspath(os.path.expanduser(channel_dir)) if _reader.dsh_state_dir(bot_cfg) else _bot_dir
         # profile 只在 relationship.json 还不存在时决定初始值(陌生 or 已确立)；
         # 示例 bot 出厂已带 relationship.json，所以这里默认 established 即可。
         # ponytail: 想让某 bot 从陌生起步，出厂 relationship.json 用 stranger 默认值即可
         _prof = "established"
-        _rstats = _rel.load(_bot_dir, _prof)
+        _rstats = _rel.load(_rel_dir, _prof)
         # 当前活动/事件(上面 M1/M2 已取，取不到则 None)——喂给 energy/desire 让"当日行为"驱动
         _astate = getattr(_act, "state", None) if "_act" in dir() and _act else None
         _event = _ev if "_ev" in dir() else None
@@ -410,7 +413,7 @@ def tick_one_bot(bot_id: str, jiwen_cfg: dict, state_dir: str, dry_run: bool = F
                 "desire": (_dd * 10 if _vd >= 0 else 0) if not _ev_suppress else 0,
             })
         if not dry_run:
-            _rel.save(_bot_dir, _rstats)
+            _rel.save(_rel_dir, _rstats)
         summary["actions"].append(
             f"关系 好感{_rstats['affection']:.0f}/信任{_rstats['trust']:.0f}/nsfw{_rstats['desire']:.0f}/精力{_rstats['energy']:.0f}")
     except Exception as e:
@@ -447,34 +450,38 @@ def main():
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
 
-    jiwen_cfg = load_jiwen_config()
-    if not jiwen_cfg:
-        print("[jiwen.tick] _global.yml.jiwen 未配置，跳过", file=sys.stderr)
-        return
+    from jiwen import reader as _reader
+    jiwen_cfg = load_jiwen_config() or {}
+    # 新系统（dsh-bot 网关）的 bot：不需要 _global.yml，默认启用，状态放在 bot 自己的 state 目录
+    dsh_bots = []
+    for _c in config_loader.list_enabled_bots():
+        if _reader.dsh_state_dir(_c):
+            dsh_bots.append(_c.get("_bot_id"))
+    if not jiwen_cfg and not dsh_bots and not args.bot:
+        print("[jiwen.tick] _global.yml.jiwen 未配置，也没找到新系统的 bot，什么都没做", file=sys.stderr)
+        sys.exit(2)
 
-    # enabled=false 时不烧 DeepSeek API（仍允许 --dry-run 强跑测试）
-    if not jiwen_cfg.get("enabled") and not args.dry_run:
-        print("[jiwen.tick] enabled=false，跳过（用 --dry-run 可强跑测试）", file=sys.stderr)
-        return
-
-    state_dir = jiwen_cfg.get("state_dir", DEFAULT_STATE_DIR)
-    os.makedirs(state_dir, exist_ok=True)
-
-    # 默认扫 channels 下所有带 access.json 的目录当 bot 列表；也可用 --bot 指定单个
+    # 默认：新系统的 bot；没有就扫旧系统 channels 下所有带 access.json 的目录。也可用 --bot 指定单个
     if args.bot:
         bots = [args.bot]
     else:
-        bots = jiwen_cfg.get("bots") or []
+        bots = jiwen_cfg.get("bots") or dsh_bots
         if not bots:
             _chdir = os.path.expanduser("~/.claude/channels")
             if os.path.isdir(_chdir):
                 bots = sorted(d for d in os.listdir(_chdir)
                               if os.path.isfile(os.path.join(_chdir, d, "access.json")))
-    print(f"[jiwen.tick] 开始 ts={int(time.time())} bots={bots} state_dir={state_dir}", file=sys.stderr)
+    print(f"[jiwen.tick] 开始 ts={int(time.time())} bots={bots}", file=sys.stderr)
 
     for bot_id in bots:
+        enabled, bot_state_dir = _reader.resolve(bot_id, jiwen_cfg)
+        # enabled=false 时不烧 DeepSeek API（仍允许 --dry-run 强跑测试）
+        if not enabled and not args.dry_run:
+            print(f"[jiwen.tick] {bot_id}: enabled=false，跳过（用 --dry-run 可强跑测试）", file=sys.stderr)
+            continue
+        os.makedirs(bot_state_dir, exist_ok=True)
         try:
-            summary = tick_one_bot(bot_id, jiwen_cfg, state_dir, dry_run=args.dry_run)
+            summary = tick_one_bot(bot_id, jiwen_cfg, bot_state_dir, dry_run=args.dry_run)
             print(f"[jiwen.tick] {bot_id}:", file=sys.stderr)
             for action in summary.get("actions", []):
                 print(f"    {action}", file=sys.stderr)

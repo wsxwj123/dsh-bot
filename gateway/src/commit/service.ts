@@ -35,7 +35,21 @@ function humanMin(m: number): string {
   return m < 60 ? `${m} 分钟` : m % 60 === 0 || m >= 180 ? `${Math.round(m / 60)} 个小时` : `${Math.floor(m / 60)} 小时 ${m % 60} 分钟`
 }
 
+/** 两句话像不像：按相邻两个字的组合算重合比例（复述旧承诺时措辞往往差不多） */
+export function similar(a: string, b: string): number {
+  const grams = (s: string) => { const t = s.replace(/[\s，。！？!?,.~～…]/g, ''); const g = new Set<string>(); for (let i = 0; i < t.length - 1; i++) g.add(t.slice(i, i + 2)); return g }
+  const x = grams(a)
+  const y = grams(b)
+  if (x.size === 0 || y.size === 0) return 0
+  let n = 0
+  for (const g of x) if (y.has(g)) n++
+  return n / Math.min(x.size, y.size)
+}
+
 export class Commitments {
+  /** 每个聊天最近一次 commitment_list 的时刻：查过列表的那一轮，bot 复述旧承诺很正常，不做兜底识别 */
+  private listedAt = new Map<string, number>()
+
   constructor(private readonly d: CommitDeps) {}
 
   whenCtx(now = Date.now()): WhenCtx {
@@ -60,6 +74,7 @@ export class Commitments {
   }
 
   list(chatId: string): { text: string } {
+    this.listedAt.set(chatId, Date.now())
     const rows = this.d.ledger.openCommitments(chatId)
     if (rows.length === 0) return { text: '现在没有还没兑现的承诺。' }
     const tz = this.d.timeZone()
@@ -78,16 +93,21 @@ export class Commitments {
 
   // ─── 兜底：这一轮 bot 说了"三点提醒你"却没登记 ───
 
-  /** 一轮结束后调用。返回要在下一轮告诉模型的话（没有就是空数组）。 */
-  afterTurn(chatId: string, since: number): string[] {
+  /** 一轮结束后调用。返回要在下一轮告诉模型的话（没有就是空数组）。dueTurn：这一轮是承诺到期的提醒（bot 会复述那件事）。 */
+  afterTurn(chatId: string, since: number, dueTurn = false): string[] {
     const L = this.d.ledger
+    if (dueTurn || (this.listedAt.get(chatId) ?? 0) >= since) return []
     if (L.commitmentsCreatedSince(chatId, since, 'tool') > 0) return []
     const texts = L.sentTextsSince(chatId, since)
     if (texts.length === 0) return []
     const now = Date.now()
     const hints: string[] = []
+    const open = L.openCommitments(chatId)
     for (const p of detectPromises(texts.join('\n'), this.whenCtx(now))) {
       if (L.hasCommitmentQuote(chatId, p.sentence, now - 24 * 60 * MIN)) continue
+      // 复述还没兑现的承诺（真机：问"你答应过我什么"时 bot 把"1 分钟后提醒你"又说了一遍）：时间接近或说法相近就不再登记
+      const dup = open.find(c => (p.when && Math.abs(c.due_at - p.when.at) <= 30 * MIN) || similar(c.quote ?? c.text, p.sentence) >= 0.6 || similar(c.text, p.sentence) >= 0.6)
+      if (dup) { this.d.log.info('commitment.restated', { chat: chatId, id: dup.id }); continue }
       if (p.when && p.when.at > now) {
         const c = L.addCommitment({ chatId, text: p.sentence, quote: p.sentence, dueAt: p.when.at, source: 'auto' })
         this.d.log.info('commitment.created', { chat: chatId, id: c.id, source: 'auto', how: p.when.how, due_in_min: Math.round((c.due_at - now) / MIN) })

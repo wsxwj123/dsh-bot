@@ -86,7 +86,7 @@ def _inject(cfg: dict, chat: str, text: str, key: str) -> bool:
         return bool(json.loads(r.read().decode("utf-8")).get("ok"))
 
 
-def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False) -> int:
+def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_judge: bool = False) -> int:
     state_dir = os.path.join(os.path.dirname(os.path.abspath(os.path.expanduser(cfg["bot_channel_path"]))), "state", "self-initiate")
     os.makedirs(state_dir, exist_ok=True)
     next_f = os.path.join(state_dir, f"{chat}.next")
@@ -106,6 +106,14 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False) -> in
 
     hour = datetime.now().hour
     text = f"⟦系统·主动开口⟧ 现在 {hour} 点，你可以按自己的心情主动找对方说点什么，也可以不说（用 stay_silent）。"
+    if skip_judge:  # 只给手动测试用：不问 life-context，直接把默认文本投给网关
+        try:
+            ok = _inject(cfg, chat, text, f"{chat}:{now}:test")
+        except Exception as e:
+            print(f"投递失败（网关没在跑？）：{type(e).__name__}", file=sys.stderr)
+            return 1
+        print("已投递给网关（测试，跳过了判断，不改下次机会的时间）" if ok else "投递被拒", file=sys.stderr)
+        return 0 if ok else 1
     try:
         r = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "life-context.py"), bot, chat],
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, cwd=REPO_ROOT)
@@ -132,7 +140,7 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False) -> in
 
 def main() -> int:
     if len(sys.argv) < 3:
-        print("usage: self_initiate.py <bot> <chat_id> [--force]", file=sys.stderr)
+        print("usage: self_initiate.py <bot> <chat_id> [--force] [--skip-judge]", file=sys.stderr)
         return 2
     bot, chat = sys.argv[1], sys.argv[2]
     now = int(os.environ.get("SELF_INITIATE_NOW") or time.time())  # 时钟注入（测试用）
@@ -147,7 +155,7 @@ def main() -> int:
     # 先刷 .last（不动 .interval）：启用后随机间隔从最后一轮停用 tick 重新计，不会一启用就补发主动消息。
     dsh = _dsh_cfg(bot)
     if dsh is not None and bot not in disabled_ids_safe():
-        return run_dsh(bot, chat, dsh, now, force="--force" in sys.argv[3:])
+        return run_dsh(bot, chat, dsh, now, force="--force" in sys.argv[3:], skip_judge="--skip-judge" in sys.argv[3:])
     if bot in disabled_ids_safe():
         print(f"skip: {bot} disabled (configs/{bot}.yml enabled:false)", file=sys.stderr)
         with open(marker, "w", encoding="utf-8") as f:

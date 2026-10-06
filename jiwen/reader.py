@@ -14,6 +14,32 @@ from . import engine
 DEFAULT_STATE_DIR = os.path.expanduser("~/.claude/dispatcher/.jiwen-state")
 
 
+def dsh_state_dir(bot_cfg: dict) -> Optional[str]:
+    """新系统（dsh-bot 网关）的 bot：情绪状态放在 bot 自己的 state 目录，绝不碰旧系统的目录。不是新系统的 bot 返回 None。"""
+    ch = (bot_cfg or {}).get("bot_channel_path")
+    try:
+        import chat_history
+        if ch and chat_history.is_dsh_bot(ch):
+            return os.path.join(os.path.dirname(os.path.abspath(os.path.expanduser(ch))), "state", "jiwen")
+    except Exception:
+        pass
+    return None
+
+
+def resolve(bot_id: str, jcfg: dict) -> tuple[bool, str]:
+    """(启用没有, 状态目录)。新系统的 bot 默认启用（除非写了 enabled: false），状态放在自己的 state 目录；
+    旧系统的 bot 照旧：看 _global.yml 的 jiwen.enabled 和 jiwen.state_dir。"""
+    jcfg = jcfg or {}
+    try:
+        import config_loader
+        d = dsh_state_dir(config_loader.load_bot(bot_id))
+    except Exception:
+        d = None
+    if d:
+        return jcfg.get("enabled") is not False, d
+    return bool(jcfg.get("enabled")), jcfg.get("state_dir") or DEFAULT_STATE_DIR
+
+
 def _state_path(state_dir: str, bot_id: str, chat_id: str) -> str:
     return os.path.join(state_dir, f"{bot_id}-{chat_id}.json")
 
@@ -31,10 +57,9 @@ def read(bot_id: str, chat_id: str, global_cfg: dict) -> Optional[dict]:
     若 jiwen 未启用 / 文件不存在 / 解析失败 → None。
     """
     jcfg = (global_cfg or {}).get("jiwen") or {}
-    if not jcfg.get("enabled"):
+    enabled, state_dir = resolve(bot_id, jcfg)
+    if not enabled:
         return None
-
-    state_dir = jcfg.get("state_dir") or DEFAULT_STATE_DIR
     path = _state_path(state_dir, bot_id, chat_id)
     if not os.path.exists(path):
         return None

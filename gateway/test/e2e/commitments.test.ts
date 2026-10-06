@@ -109,3 +109,22 @@ test('生活状态：关系提示、"此刻在干什么"只在新会话开头和
   await say(tg, '第五句')
   expect(at('第五句')).not.toContain('⟦系统·被晾⟧')
 })
+
+test('复述还没兑现的承诺不会被当成新许诺再登记一次；到点时取消了就不再追问', async () => {
+  const { tg, b, gw } = await setup()
+  await say(tg, `好呀 !commit:提醒对方喝水|${new Date(Date.now() + 10 * 60_000).toISOString()}`)
+  await say(tg, '!say:我答应过你，10分钟后提醒你喝水', '我答应过你，10分钟后提醒你喝水')
+  expect(commitments(gw).length).toBe(1)
+  expect(events(b, 'commitment.restated').length).toBe(1)
+  // 到点：模型觉得不需要了，取消（没回复，也没调 stay_silent）→ 不追一句"你还没回复"
+  writeFileSync(join(b.acpState, 'due-mode'), 'cancel')
+  const l = gw.ledger()
+  l.addCommitment({ chatId: String(OWNER), text: '提醒对方收快递', dueAt: Date.now(), source: 'tool' })
+  l.close()
+  await until(() => commitments(gw)[1]?.state === 'cancelled', 'cancelled at due', 20_000)
+  await new Promise(r => setTimeout(r, 800))
+  const led = gw.ledger()
+  const nudges = (led.db.query(`SELECT COUNT(*) AS n FROM turns WHERE kind = 'nudge'`).get() as { n: number }).n
+  led.close()
+  expect(nudges).toBe(0)
+})

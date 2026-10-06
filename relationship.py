@@ -37,6 +37,9 @@ def _clamp(v: float) -> float:
 
 
 def _path(bot_dir: str) -> str:
+    """bot_dir：旧系统是 ~/.claude/channels 下的目录名；新系统传频道目录的绝对路径。"""
+    if os.path.isabs(bot_dir):
+        return os.path.join(bot_dir, "relationship.json")
     return os.path.join(os.path.expanduser("~/.claude/channels"), bot_dir, "relationship.json")
 
 

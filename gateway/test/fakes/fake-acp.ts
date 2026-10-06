@@ -20,7 +20,7 @@
 //   !remember:文字     先调用 remember（文字里的下划线换成空格）
 //   !commit:事|时间    先调用 commitment_create（下划线换成空格）
 //   !say:文字          回复这句话（下划线换成空格），代替"收到：…"
-// 程序发来的"⟦系统·承诺到期⟧"：回复一句；state 目录里 due-mode=mute 时改为 stay_silent（模拟没兑现）
+// 程序发来的"⟦系统·承诺到期⟧"：回复一句；state 目录里 due-mode=mute 时改为 stay_silent（模拟没兑现），=cancel 时取消这件承诺
 // 程序发来的"⟦系统·整理记忆⟧"：先试着调一次 react（应被锁），再输出一份假摘要（state 目录里 summary-mode=empty 时输出空）
 // 没有指令时回复"收到：<对方最后一句>"；补救提示（⟦系统…）回复"接着刚才的说"。
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
@@ -150,8 +150,13 @@ async function prompt(id: number, sessionId: string, blocks: { type: string; tex
     await callTool(s, sessionId, 'stay_silent', { reason: 'test' })
     return send({ id, result: { stopReason: 'end_turn' } })
   }
-  if (last.includes('⟦系统·承诺到期⟧') && existsSync(P('due-mode')) && readFileSync(P('due-mode'), 'utf8').includes('mute')) {
+  const dueMode = last.includes('⟦系统·承诺到期⟧') && existsSync(P('due-mode')) ? readFileSync(P('due-mode'), 'utf8') : ''
+  if (dueMode.includes('mute')) {
     await callTool(s, sessionId, 'stay_silent', { reason: 'test mute' })
+    return send({ id, result: { stopReason: 'end_turn' } })
+  }
+  if (dueMode.includes('cancel')) { // 到点时觉得不需要了：取消，不回复也不调 stay_silent
+    await callTool(s, sessionId, 'commitment_cancel', { id: Number(last.match(/取消 #(\d+)/)?.[1]), reason: 'test cancel' })
     return send({ id, result: { stopReason: 'end_turn' } })
   }
   const cm = last.match(/!commit:([^|\s]+)\|(\S+)/)

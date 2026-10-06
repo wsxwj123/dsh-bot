@@ -24,6 +24,8 @@ export type HangDeps = {
   now?: () => number
   rand?: () => number                              // 抖动源，测试可固定
   log?: (line: string) => void
+  /** 等待时长的倍数（新网关加的：按关系数值调，越亲近越小、追得越快）；不给就是 1，和旧版一样 */
+  pace?: () => number
 }
 
 export type HangRuntime = {
@@ -89,6 +91,14 @@ export function createHangRuntime(deps: HangDeps): HangRuntime {
   const now = deps.now ?? Date.now
   const rand = deps.rand ?? Math.random
   const log = deps.log ?? (() => {})
+  const pace = deps.pace ?? (() => 1)
+  /** 决策给出的下一档时刻按倍数伸缩（只伸缩"从现在到下一档"这段等待） */
+  function paced(prev: HangState | null | undefined, next: HangState | null, t: number): HangState | null {
+    if (!next || next.stage >= 3 || (prev && prev.nextAt === next.nextAt)) return next
+    const k = pace()
+    if (!(k > 0) || k === 1) return next
+    return { ...next, nextAt: t + Math.round((next.nextAt - t) * k) }
+  }
   const statePath = join(channelDir, STATE_FILE)
   const archivePath = join(channelDir, ARCHIVE_FILE)
 
@@ -182,6 +192,7 @@ export function createHangRuntime(deps: HangDeps): HangRuntime {
     const hadRecentInbound = t - (lastInbound[id] ?? 0) <= RECENT_INBOUND_MS
     const r = decideHang(seed(id, t),
       { kind: 'outboundReply', chatId: id, nowMs: t, hadRecentInbound }, rand())
+    r.state = paced(states[id], r.state, t)
     const armed = r.state !== null && r.state.stage === 0 && r.state.armedAt === t
     absorb(r.state, t)
     if (store(id, r.state)) {
@@ -253,6 +264,7 @@ export function createHangRuntime(deps: HangDeps): HangRuntime {
       const minutes = Math.max(0, Math.round((t - cur.armedAt) / MIN))
       const r = decideHang(seed(chatId, t),
         { kind: 'tick', nowMs: t, activityInterruptible: sit.interruptible !== false, asleep }, rand())
+      r.state = paced(cur, r.state, t)
       absorb(r.state, t)
       if (store(chatId, r.state)) changed = true
       if (r.action.kind !== 'none') runAction(chatId, r.action, minutes, sit)

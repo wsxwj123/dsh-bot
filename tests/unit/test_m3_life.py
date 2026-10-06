@@ -34,7 +34,7 @@ def dsh_bot(tmp_path, monkeypatch):
     db.commit()
     cfgs = tmp_path / "configs"
     cfgs.mkdir()
-    (tmp_path / "old.yml").write_text("id: oldbot\nbot_channel_path: /old/channel\nsleep_hours: '00:00-07:30'\npersona_summary: 旧配置里的设定\n", encoding="utf-8")
+    (tmp_path / "old.yml").write_text("id: oldbot\nchat_id: '1'\nbot_channel_path: /old/channel\nsleep_hours: '00:00-07:30'\npersona_summary: 旧配置里的设定\n", encoding="utf-8")
     (cfgs / "bot5.yml").write_text(f"id: bot5\nbot_channel_path: {json.dumps(str(root / 'channel'))}\ndispatcher_port: 0\nlife_config: {json.dumps(str(tmp_path / 'old.yml'))}\n", encoding="utf-8")
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(cfgs))
     return root, db
@@ -112,6 +112,11 @@ def test_主动消息_投递到网关的本机接口_真正投出去才重抽间
     assert body["chat_id"] == "42" and body["source"] == "self_initiate"
     assert body["text"].startswith("⟦系统·主动开口⟧") and "想她了" in body["text"]
     assert si.COOLDOWN_MIN <= int(nf.read_text()) - (now + 4000) <= si.COOLDOWN_MAX
+    # 4. 手动测试用的 --skip-judge：不问 life-context，直接投默认文本，也不改下次机会的时间
+    before = nf.read_text()
+    monkeypatch.setattr(si.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该调")))
+    assert si.run_dsh("bot5", "42", cfg, now + 5000, skip_judge=True) == 0
+    assert _Gw.got[-1][2]["text"].startswith("⟦系统·主动开口⟧") and nf.read_text() == before
     srv.shutdown()
 
 
@@ -138,3 +143,43 @@ def test_作息计划_接下来几次起床的时刻(monkeypatch):
     assert len(p["wakes"]) >= 2
     assert p["wakes"] == sorted(p["wakes"]) and all(isinstance(w, int) for w in p["wakes"])
     assert 20 * 3600 <= p["wakes"][1] - p["wakes"][0] <= 28 * 3600
+
+
+def test_情绪_新系统的bot不用全局配置也能跑_关系数值写在自己的频道目录_不碰旧系统目录(dsh_bot, tmp_path, monkeypatch):
+    """真机发现：读不到 _global.yml 就悄悄跳过；补上之后关系数值又写进了 ~/.claude/channels/<bot>/。"""
+    import sys
+    root, db = dsh_bot
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("DSH_BOT_HOME", str(tmp_path))
+    (tmp_path / "credentials.yaml").write_text("version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-test-only-0000000000\n", encoding="utf-8")
+    (root / "channel" / "relationship.json").write_text(json.dumps({"affection": 50, "trust": 50, "desire": 0, "energy": 80}), encoding="utf-8")
+    t = int(time.time()) - 60
+    db.execute("INSERT INTO inbound (ukey, chat_id, kind, text, ts, received_at, state) VALUES ('j1', '1', 'user', '今天考试过了', ?, ?, 'done')", (t * 1000, t * 1000))
+    db.commit()
+    tick = _load("jiwen_tick_main", ROOT / "jiwen" / "tick.py")
+    monkeypatch.setattr(tick.config_loader, "load_global", lambda: {})
+    calls = []
+    monkeypatch.setattr(tick.deepseek_delta, "compute_delta", lambda **k: calls.append(k) or {"connection": 0.1, "valence": 0.3, "arousal": 0.1})
+    monkeypatch.setattr(sys, "argv", ["tick.py"])
+    tick.main()
+    assert len(calls) == 1
+    rel = json.loads((root / "channel" / "relationship.json").read_text(encoding="utf-8"))
+    assert "updated_ts" in rel and "prompt_snippet" in rel
+    assert (root / "state" / "jiwen").is_dir()
+    assert not (home / ".claude").exists()
+
+
+def test_情绪_什么都没配置时退出码不是0(tmp_path, monkeypatch):
+    import sys
+    cfgs = tmp_path / "empty-configs"
+    cfgs.mkdir()
+    monkeypatch.setenv("HUB_CONFIGS_DIR", str(cfgs))
+    tick = _load("jiwen_tick_empty", ROOT / "jiwen" / "tick.py")
+    monkeypatch.setattr(tick.config_loader, "load_global", lambda: {})
+    monkeypatch.setattr(sys, "argv", ["tick.py"])
+    with pytest.raises(SystemExit) as e:
+        tick.main()
+    assert e.value.code == 2

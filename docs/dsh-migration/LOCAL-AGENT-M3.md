@@ -40,9 +40,9 @@ cd ../tests && python3 -m pytest -q unit/test_chat_history_ledger.py unit/test_c
 ```
 
 预期：
-- 网关 198 项（通过 193，跳过 5）；
+- 网关 201 项（通过 196，跳过 5）；
 - 真 dsh 5 项通过；
-- Python 27 项通过。
+- Python 29 项通过。
 
 ### 2. 停旧 bot5（先问用户）
 
@@ -93,6 +93,7 @@ HUB_CONFIGS_DIR=~/.dsh-bot/configs python3 scripts/self_initiate.py bot5 "$CHAT"
 
 - 输出的跳过原因里如果带活动名（比如"专注时段(…)无突发"），只记类别"专注时段"。
 - 不加 `--force` 再跑一次，预期是"skip: 还没到下次机会（还有 N 分钟）"。
+- 测投递这条路：加 `--skip-judge` 再跑一次（不问模型要不要说，直接投默认文本）。预期输出"已投递给网关（测试…）"，`gateway.log` 出现一轮来源为 `self_initiate` 的合成消息，用户一两分钟内收到 bot 主动发来的消息。
 
 **第 e 项命令**：
 
@@ -102,7 +103,11 @@ HUB_CONFIGS_DIR=~/.dsh-bot/configs python3 jiwen/tick.py > /dev/null 2>&1; echo 
 stat -f %Sm ~/.dsh-bot/bots/bot5/channel/relationship.json
 ```
 
-tick 的输出里有关系数值，所以丢掉不看，只记退出码和两次修改时间。
+tick 的输出里有关系数值，所以丢掉不看，只记退出码和两次修改时间。不需要建 `_global.yml`。
+
+- 预期退出码 0，第二次的修改时间比第一次新（前提是上次 tick 之后有新对话）。
+- 跑完后确认 `~/.claude/channels/` 下没有多出 bot5 目录：`ls ~/.claude/channels | grep -c '^bot5$'`，预期是 0。
+- 新的情绪状态文件在 `~/.dsh-bot/bots/bot5/state/jiwen/` 下：`ls ~/.dsh-bot/bots/bot5/state/jiwen | wc -l`，预期是 1。
 
 ### 6. 收尾
 
