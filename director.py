@@ -1029,6 +1029,10 @@ def run(chat_id: str = CHAT_ID) -> None:
 if __name__ == "__main__":
     import sys
     if "--run" in sys.argv:
+        if os.environ.get("DIRECTOR_LOG_FILE"):  # 开机自启时：导演的输出写进按大小轮转的日志
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
+            from run_logged import RotatingLog
+            sys.stdout = sys.stderr = RotatingLog(os.environ["DIRECTOR_LOG_FILE"])
         run()
     else:  # 默认只看一步决策，不写任何东西之外的副作用
         load_dsh_roster()

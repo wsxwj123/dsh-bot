@@ -5,9 +5,9 @@ name: gateway
 
 on:
   push:
-    paths: ['gateway/**', 'harness/**', 'lab/dsh/lib/**', 'chat_history.py', 'deepseek_client.py', 'memory/**', 'config_loader.py', 'hang_situation.py', 'life-context.py', 'scripts/self_initiate.py', 'jiwen/**', 'tests/unit/test_chat_history*', 'tests/unit/test_m3_life.py', 'gateway_client.py', 'db.py', 'moments/**', 'voicecall/**', 'scripts/recent_moments.py', 'tests/unit/test_m4_dsh.py', 'director.py', 'claude_cli.py', 'tests/unit/test_m5_director.py', '.github/workflows/gateway.yml']
+    paths: ['gateway/**', 'harness/**', 'lab/dsh/lib/**', 'chat_history.py', 'deepseek_client.py', 'memory/**', 'config_loader.py', 'hang_situation.py', 'life-context.py', 'scripts/self_initiate.py', 'jiwen/**', 'tests/unit/test_chat_history*', 'tests/unit/test_m3_life.py', 'gateway_client.py', 'db.py', 'moments/**', 'voicecall/**', 'scripts/recent_moments.py', 'tests/unit/test_m4_dsh.py', 'director.py', 'claude_cli.py', 'tests/unit/test_m5_director.py', 'scripts/import_history.py', 'scripts/run_logged.py', 'tests/unit/test_m6_import.py', '.github/workflows/gateway.yml']
   pull_request:
-    paths: ['gateway/**', 'harness/**', 'lab/dsh/lib/**', 'chat_history.py', 'deepseek_client.py', 'memory/**', 'config_loader.py', 'hang_situation.py', 'life-context.py', 'scripts/self_initiate.py', 'jiwen/**', 'tests/unit/test_chat_history*', 'tests/unit/test_m3_life.py', 'gateway_client.py', 'db.py', 'moments/**', 'voicecall/**', 'scripts/recent_moments.py', 'tests/unit/test_m4_dsh.py', 'director.py', 'claude_cli.py', 'tests/unit/test_m5_director.py', '.github/workflows/gateway.yml']
+    paths: ['gateway/**', 'harness/**', 'lab/dsh/lib/**', 'chat_history.py', 'deepseek_client.py', 'memory/**', 'config_loader.py', 'hang_situation.py', 'life-context.py', 'scripts/self_initiate.py', 'jiwen/**', 'tests/unit/test_chat_history*', 'tests/unit/test_m3_life.py', 'gateway_client.py', 'db.py', 'moments/**', 'voicecall/**', 'scripts/recent_moments.py', 'tests/unit/test_m4_dsh.py', 'director.py', 'claude_cli.py', 'tests/unit/test_m5_director.py', 'scripts/import_history.py', 'scripts/run_logged.py', 'tests/unit/test_m6_import.py', '.github/workflows/gateway.yml']
   workflow_dispatch:
 
 permissions:
@@ -64,10 +64,10 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            tests: unit/test_chat_history_ledger.py unit/test_chat_history_namespace.py unit/test_project_slug.py unit/test_m3_life.py unit/test_m4_dsh.py unit/test_m5_director.py
+            tests: unit/test_chat_history_ledger.py unit/test_chat_history_namespace.py unit/test_project_slug.py unit/test_m3_life.py unit/test_m4_dsh.py unit/test_m5_director.py unit/test_m6_import.py
           # test_project_slug.py 是旧系统原有的测试，按 Mac/Linux 的路径写的，Windows 上不跑
           - os: windows-latest
-            tests: unit/test_chat_history_ledger.py unit/test_chat_history_namespace.py unit/test_m3_life.py unit/test_m4_dsh.py unit/test_m5_director.py
+            tests: unit/test_chat_history_ledger.py unit/test_chat_history_namespace.py unit/test_m3_life.py unit/test_m4_dsh.py unit/test_m5_director.py unit/test_m6_import.py
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

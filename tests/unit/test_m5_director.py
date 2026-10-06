@@ -129,3 +129,14 @@ def test_调模型失败_退避_越来越久_有上限(d):
     d.call_claude_json = lambda prompt, **kw: {"speak": False}
     d._ask("x")
     assert d._LLM_FAILS == 0
+
+
+def test_开机自启时的日志_按大小轮转(tmp_path):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from run_logged import RotatingLog
+    log = RotatingLog(str(tmp_path / "director.log"), max_bytes=100, keep=3)
+    for i in range(20):
+        log.write(f"[director] 第 {i} 行 ........\n")
+    files = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("director.log"))
+    assert files == ["director.log", "director.log.1", "director.log.2", "director.log.3"]
+    assert all(p.stat().st_size <= 100 for p in tmp_path.iterdir() if p.name.startswith("director.log"))
