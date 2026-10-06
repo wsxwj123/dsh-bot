@@ -350,6 +350,7 @@ export class Engine {
     if (situ && (fresh || this.ledger.getMeta(`situ_seen:${chatId}`) !== situ)) { out.push(situ); this.ledger.setMeta(`situ_seen:${chatId}`, situ) }
     const late = takeHangArchive(this.cfg.stateDir, chatId)
     if (late) out.push(hangText(late))
+    if (out.length) this.log.info('life.lines', { chat: chatId, relationship: out.some(l => l.startsWith('⟦关系状态')), situation: !!situ && out.includes(situ), late: !!late })
     return out
   }
 

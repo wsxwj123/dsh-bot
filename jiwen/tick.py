@@ -131,6 +131,19 @@ def find_recent_messages(channel_dir: str, since_ts: int, limit: int = 12) -> tu
       messages: [{"role":"user"|"assistant", "content":str}] 最近 N 条
       max_ts: 最新一条 user 消息的 unix ts（用于下次 since_ts）
     """
+    # 新系统（dsh-bot 网关）的 bot：对话在账本里（对方说的 + bot 真正发出去的）
+    import chat_history
+    ledger = chat_history._ledger_path(channel_dir)
+    if ledger:
+        start_ms = int(((since_ts or time.time()) - 7 * 86400) * 1000)  # 只看最近一周，不每次读全部历史
+        users = [(ts // 1000, "user", t) for ts, t in chat_history._ledger_user_rows(ledger, start_ms)]
+        bots = [(ts // 1000, "assistant", t) for ts, t in chat_history._ledger_bot_rows(ledger, start_ms)]
+        rows = sorted(users[-limit * 2:] + bots[-limit * 2:])[-limit:]
+        max_user_ts = max([since_ts] + [ts for ts, role, _ in rows if role == "user"])
+        if since_ts > 0:
+            rows = rows[-min(limit, max(6, len(rows))):]
+        return [{"role": role, "content": t[:300]} for _, role, t in rows], max_user_ts
+
     # bot session jsonl 在 ~/.claude/projects/<slug>/<uuid>.jsonl，slug = 绝对路径里非字母数字全换 '-'
     # （旧写法只换 / 和 .，Windows 的反斜杠与盘符冒号原样留下 → 目录永远找不到 → 情绪数值永不更新）
     project_root = os.path.expanduser("~/.claude/projects")
@@ -305,10 +318,25 @@ def tick_one_bot(bot_id: str, jiwen_cfg: dict, state_dir: str, dry_run: bool = F
     _jiwen_delta = None  # 捕获本 tick 的 jiwen delta，下面映射到关系数值
     msgs, max_user_ts = find_recent_messages(channel_dir, state.last_user_msg_ts, limit=12)
     if msgs and has_new_user_msg(msgs, state.last_user_msg_ts, max_user_ts):
-        delta_cfg = (jiwen_cfg or {}).get("delta_llm", {})
+        delta_cfg = dict((jiwen_cfg or {}).get("delta_llm", {}) or {})
+        if not delta_cfg.get("api_key"):
+            # 新系统：密钥在 ~/.dsh-bot/credentials.yaml（deepseek_client 里统一处理）
+            try:
+                import deepseek_client
+                delta_cfg = {**deepseek_client._delta_cfg(), **{k: v for k, v in delta_cfg.items() if v}}
+            except Exception:
+                pass
         api_key = delta_cfg.get("api_key", "")
+        backoff_f = os.path.join(state_dir, f"{bot_id}.delta-backoff.json")
+        try:
+            bo = json.load(open(backoff_f, encoding="utf-8"))
+        except Exception:
+            bo = {"fails": 0, "next_at": 0}
         if not api_key:
             summary["actions"].append("skip delta: api_key 未配置")
+        elif time.time() < bo.get("next_at", 0):
+            # 连续失败后退避：不再每个 tick 都去打一次（旧版每 5 分钟无限重试）
+            summary["actions"].append(f"delta 退避中（连续失败 {bo.get('fails')} 次）")
         else:
             # DeepSeek-V4 1M 上下文，传完整 persona（不截断）
             persona = bot_cfg.get("persona_summary", "") or ""
@@ -325,12 +353,24 @@ def tick_one_bot(bot_id: str, jiwen_cfg: dict, state_dir: str, dry_run: bool = F
                 timeout=delta_cfg.get("timeout", deepseek_delta.DEFAULT_TIMEOUT),
             )
             if delta is None:
-                # API 失败：不 apply、不推进游标 → 下 tick 自动重试，这段对话不丢
-                summary["actions"].append("delta 调用失败(None)→不推进游标，下tick重试")
+                # API 失败：不 apply、不推进游标 → 退避后重试，这段对话不丢。退避 10 分钟起，翻倍，最长 6 小时
+                bo = {"fails": bo.get("fails", 0) + 1}
+                bo["next_at"] = time.time() + min(6 * 3600, 600 * 2 ** (bo["fails"] - 1))
+                try:
+                    with open(backoff_f, "w", encoding="utf-8") as f:
+                        json.dump(bo, f)
+                except Exception:
+                    pass
+                summary["actions"].append(f"delta 调用失败(None)→不推进游标，退避后重试（连续失败 {bo['fails']} 次）")
             else:
                 old = (state.connection, state.pride, state.valence, state.arousal)
                 state = engine.apply_delta(state, delta)
                 _jiwen_delta = delta
+                if bo.get("fails"):
+                    try:
+                        os.remove(backoff_f)
+                    except OSError:
+                        pass
                 new = (state.connection, state.pride, state.valence, state.arousal)
                 summary["actions"].append(
                     f"delta applied {delta} → C{old[0]:.3f}->{new[0]:.3f} "
