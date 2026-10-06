@@ -138,3 +138,23 @@ test('/compact 在网关重启之后：先续接旧会话，摘要照样在旧�
   expect(await cmd(tg, '/compact')).toContain('已把这段对话压缩成一份摘要')
   expect(prompts(b).find(p => p.text.startsWith('⟦系统·整理记忆⟧'))!.sessionId).toBe(old)
 })
+
+test('本机接口 /v1/model（管理台用）：看模型、换模型、换回；要口令', async () => {
+  const { tg, b, gw } = await setup()
+  const auth = { authorization: `Bearer ${gw.apiToken()}`, 'content-type': 'application/json' }
+  expect((await gw.api('/v1/model')).status).toBe(401)
+  const info = await (await gw.api('/v1/model', { headers: auth })).json() as any
+  expect(info.current).toEqual({ provider: 'deepseek-official', model: 'deepseek-flash' })
+  expect(info.config).toEqual(info.current)
+  expect(info.choices.some((c: any) => c.provider === 'proxy' && c.model === 'gemini-y')).toBe(true)
+  const bad = await gw.api('/v1/model', { method: 'POST', headers: auth, body: JSON.stringify({ spec: 'nope' }) })
+  expect(bad.status).toBe(400)
+  expect(((await bad.json()) as any).text).toContain('没有 nope 这个模型')
+  const ok = await (await gw.api('/v1/model', { method: 'POST', headers: auth, body: JSON.stringify({ spec: 'deepseek-v4-pro' }) })).json() as any
+  expect(ok.ok).toBe(true)
+  expect(ok.current.model).toBe('deepseek-v4-pro')
+  await say(tg, '管理台换了之后')
+  expect(modelOf(b, '管理台换了之后')).toBe(JSON.stringify(['deepseek-official', 'deepseek-v4-pro']))
+  const back = await (await gw.api('/v1/model', { method: 'POST', headers: auth, body: JSON.stringify({ spec: 'default' }) })).json() as any
+  expect(back.current).toEqual({ provider: 'deepseek-official', model: 'deepseek-flash' })
+})

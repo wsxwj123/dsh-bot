@@ -130,3 +130,16 @@ test('复述还没兑现的承诺不会被当成新许诺再登记一次；到�
   led.close()
   expect(nudges).toBe(0)
 })
+
+test('电话里说的许诺（/v1/inject 带 bot_lines）登记成承诺，来源记为 call；同一条回顾重复投递不会再登记', async () => {
+  const { b, gw } = await setup()
+  const post = () => gw.api('/v1/inject', {
+    method: 'POST', headers: { authorization: `Bearer ${gw.apiToken()}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ chat_id: OWNER, source: 'call', key: 'call-1', text: '⟦系统·电话⟧ 刚才通了电话', bot_lines: ['嗯嗯', '半小时后我提醒你喝水'] }),
+  })
+  expect((await post()).status).toBe(200)
+  await until(() => prompts(b).some(p => p.text.includes('电话里你说了「半小时后我提醒你喝水」')), 'call hint reached the model')
+  expect(commitments(gw).map(c => c.source)).toEqual(['call'])
+  expect(((await (await post()).json()) as any).duplicate).toBe(true)
+  expect(commitments(gw)).toHaveLength(1)
+})

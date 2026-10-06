@@ -36,6 +36,12 @@ test('配置：目录约定、端口、主人默认取 allowFrom 第一个', () 
   expect(c.gw.owners).toEqual(['42'])
   expect(c.gw.timezone).toBe('Europe/Berlin')
   expect(c.brain.model).toBe('deepseek-v4-pro')
+  expect(c.lifeId).toBe('bot5')
+  // 朋友圈、画风里用旧名字：life_id，没写就取 life_config 的文件名
+  writeFileSync(p, `id: bot5\nbot_channel_path: ${ch}\nlife_config: ~/old/configs/chen.yml\n`)
+  expect(loadBotConfig(p, { DSH_BOT_HOME: join(root, 'home') }).lifeId).toBe('chen')
+  writeFileSync(p, `id: bot5\nbot_channel_path: ${ch}\nlife_config: ~/old/configs/chen.yml\nlife_id: lulu\n`)
+  expect(loadBotConfig(p, { DSH_BOT_HOME: join(root, 'home') }).lifeId).toBe('lulu')
   rmSync(root, { recursive: true, force: true })
 })
 

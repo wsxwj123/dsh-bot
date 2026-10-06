@@ -1,5 +1,6 @@
 // 网关入口：bun src/main.ts --config configs/<bot>.yml
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'fs'
+import { homedir } from 'os'
 import { join } from 'path'
 import { ApiServer } from './api/server'
 import { checkCredentialsFile, ConfigError, loadAccess, loadBotConfig, readTelegramToken, type BotConfig } from './config'
@@ -62,7 +63,8 @@ async function main(): Promise<void> {
   const releaseLock = await takeGatewayLock(cfg)
   const ledger = new Ledger(join(cfg.stateDir, 'ledger.sqlite'))
   const api = new TelegramApi(token, cfg.gw.telegramApi)
-  const allowDirs = () => [cfg.mediaDir]
+  // 能发出去的文件：网关的媒体目录（收到的、合成的语音）+ 生图结果目录
+  const allowDirs = () => [cfg.mediaDir, ...cfg.gw.imageDirs.map(d => d.startsWith('~') ? join(homedir(), d.slice(1)) : d)]
   const sender = new Sender(api, ledger, log, { allowDirs, maxSendWaitMs: cfg.gw.maxSendWaitMs, access: () => loadAccess(cfg.channelDir) })
   const dsh = new DshProcess(log)
   let engine: Engine | null = null
@@ -94,6 +96,8 @@ async function main(): Promise<void> {
     token: apiToken, port: cfg.apiPort, ledger, log, sender, channelDir: cfg.channelDir, allowDirs,
     health: () => engine!.health(engine!.healthSource!()),
     onInbound: chatId => engine!.onInbound(chatId),
+    callPromises: (chatId, lines) => engine!.commitments.fromCall(chatId, lines),
+    model: { info: () => engine!.modelInfo(), set: spec => engine!.modelSet(spec) },
   })
   apiServer.start()
   engine.start()
@@ -122,6 +126,8 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown(0))
   process.on('SIGTERM', () => void shutdown(0))
   log.info('gateway.ready', { api_port: apiServer.port, mcp_port: mcp.port })
+  // Python 周边（主动消息、朋友圈通知、电话回顾）从这里找网关的端口；口令在同目录的 api.key
+  writeAtomic(join(cfg.stateDir, 'api.port'), String(apiServer.port))
   if (process.env.DSH_BOT_READY_FILE) writeAtomic(process.env.DSH_BOT_READY_FILE, JSON.stringify({ api_port: apiServer.port, pid: process.pid }))
 }
 

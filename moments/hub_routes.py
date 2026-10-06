@@ -1432,3 +1432,63 @@ def bots_set_enabled(bot_id):
         value = hub_addbot.set_enabled(bot_id, enabled)
     return jsonify({"ok": True, "enabled": value,
                     "restart_hint": hub_addbot.RESTART_FLAGS})
+
+
+# ======================================================================
+# 第 9 段 · 新系统（dsh-bot 网关）bot 的模型切换（/hub/dsh-model）
+#
+# 新系统的 bot 不走 cliproxy，模型由网关管：这里只是转发到该 bot 网关的本机接口
+# （/v1/model，口令在 bot 的 state/api.key），和 Telegram 里的 /model 命令同一套逻辑。
+# 旧系统的 bot 不在这个页面上出现。段内辅助一律 `_dm` 前缀。
+# ======================================================================
+
+import re as _dm_re                                     # noqa: E402
+
+import config_loader                                    # noqa: E402
+import gateway_client                                   # noqa: E402
+
+_DM_BOT_RE = _dm_re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _dm_bots():
+    """[(bot_id, 显示名, 频道目录)]：网关在跑（state 里有口令和端口）的新系统 bot"""
+    out = []
+    for cfg in config_loader.list_enabled_bots(include_disabled=True):
+        ch = cfg.get("bot_channel_path")
+        if ch and gateway_client.available(ch):
+            out.append((cfg["_bot_id"], cfg.get("display_name") or cfg["_bot_id"], ch))
+    return out
+
+
+@hub_bp.get("/hub/dsh-model")
+def hub_dsh_model_page():
+    return render_template("hub_dsh_model.html", nav_active="dsh-model")
+
+
+@hub_bp.get("/hub/api/dsh-model")
+def dsh_model_list():
+    bots = []
+    for bot_id, name, ch in _dm_bots():
+        row = {"id": bot_id, "name": name}
+        try:
+            row.update(gateway_client.model_info(ch))
+        except Exception as e:                          # 网关没起来：页面照样出，这一行报错
+            row["error"] = redact.scrub_text(str(e))[:200] or "网关没响应"
+        bots.append(row)
+    return jsonify({"bots": bots})
+
+
+@hub_bp.post("/hub/api/dsh-model/<bot_id>")
+@_api
+def dsh_model_set(bot_id):
+    body = _require_json_object(request.get_json(silent=True))
+    spec = body.get("spec")
+    if not isinstance(spec, str) or not spec.strip() or len(spec) > 200:
+        raise HubError(400, "bad_body", "spec 必须是模型名（或 default）")
+    if not _DM_BOT_RE.match(bot_id):
+        raise HubError(400, "bad_bot_id", "bot id 不合法")
+    hit = [b for b in _dm_bots() if b[0] == bot_id]
+    if not hit:
+        raise HubError(404, "bot_not_found", "没有这个新系统的 bot（或它的网关没在跑）")
+    ok, r = gateway_client.model_set(hit[0][2], spec.strip())
+    return jsonify({"ok": ok, "text": r.get("text") or r.get("error") or "", "current": r.get("current")}), (200 if ok else 400)

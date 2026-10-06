@@ -100,24 +100,34 @@ export class Commitments {
     if (L.commitmentsCreatedSince(chatId, since, 'tool') > 0) return []
     const texts = L.sentTextsSince(chatId, since)
     if (texts.length === 0) return []
+    return this.register(chatId, texts.join('\n'), 'auto', '你刚才说了')
+  }
+
+  /** 电话里 bot 说过的话（voicecall 挂断后投来）：同样找许诺登记成承诺 */
+  fromCall(chatId: string, lines: string[]): string[] {
+    return this.register(chatId, lines.join('\n'), 'call', '电话里你说了')
+  }
+
+  private register(chatId: string, text: string, source: 'auto' | 'call', said: string): string[] {
+    const L = this.d.ledger
     const now = Date.now()
     const hints: string[] = []
     const open = L.openCommitments(chatId)
-    for (const p of detectPromises(texts.join('\n'), this.whenCtx(now))) {
+    for (const p of detectPromises(text, this.whenCtx(now))) {
       if (L.hasCommitmentQuote(chatId, p.sentence, now - 24 * 60 * MIN)) continue
       // 复述还没兑现的承诺（真机：问"你答应过我什么"时 bot 把"1 分钟后提醒你"又说了一遍）：时间接近或说法相近就不再登记
       const dup = open.find(c => (p.when && Math.abs(c.due_at - p.when.at) <= 30 * MIN) || similar(c.quote ?? c.text, p.sentence) >= 0.6 || similar(c.text, p.sentence) >= 0.6)
       if (dup) { this.d.log.info('commitment.restated', { chat: chatId, id: dup.id }); continue }
       if (p.when && p.when.at > now) {
-        const c = L.addCommitment({ chatId, text: p.sentence, quote: p.sentence, dueAt: p.when.at, source: 'auto' })
-        this.d.log.info('commitment.created', { chat: chatId, id: c.id, source: 'auto', how: p.when.how, due_in_min: Math.round((c.due_at - now) / MIN) })
-        hints.push(`⟦系统·承诺⟧ 你刚才说了「${escapeUserText(p.sentence)}」，程序已替你登记成承诺 #${c.id}（${fmtTime(c.due_at, this.d.timeZone(), now)}）。如果这不是承诺，用 commitment_cancel 取消。`)
+        const c = L.addCommitment({ chatId, text: p.sentence, quote: p.sentence, dueAt: p.when.at, source })
+        this.d.log.info('commitment.created', { chat: chatId, id: c.id, source, how: p.when.how, due_in_min: Math.round((c.due_at - now) / MIN) })
+        hints.push(`⟦系统·承诺⟧ ${said}「${escapeUserText(p.sentence)}」，程序已替你登记成承诺 #${c.id}（${fmtTime(c.due_at, this.d.timeZone(), now)}）。如果这不是承诺，用 commitment_cancel 取消。`)
       } else {
         // 时间说得含糊，换算不了：记一条空的占位，免得每轮都提醒同一句
-        const v = L.addCommitment({ chatId, text: p.sentence, quote: p.sentence, dueAt: now, source: 'auto' })
+        const v = L.addCommitment({ chatId, text: p.sentence, quote: p.sentence, dueAt: now, source })
         L.updateCommitment(v.id, { state: 'cancelled', note: 'vague: hinted' })
         this.d.log.info('commitment.vague', { chat: chatId })
-        hints.push(`⟦系统·承诺⟧ 你刚才说了「${escapeUserText(p.sentence)}」，像是答应了对方什么。如果是，用 commitment_create 登记一个具体时间；不是就不用管。`)
+        hints.push(`⟦系统·承诺⟧ ${said}「${escapeUserText(p.sentence)}」，像是答应了对方什么。如果是，用 commitment_create 登记一个具体时间；不是就不用管。`)
       }
     }
     return hints

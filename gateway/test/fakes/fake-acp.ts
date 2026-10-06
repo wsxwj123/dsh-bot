@@ -21,6 +21,7 @@
 //   !commit:事|时间    先调用 commitment_create（下划线换成空格）
 //   !say:文字          回复这句话（下划线换成空格），代替"收到：…"
 //   !voice             用语音回复两段（as_voice）
+//   !tool:名字|JSON     先调用这个工具（JSON 里不能有空白）
 // 程序发来的"⟦系统·承诺到期⟧"：回复一句；state 目录里 due-mode=mute 时改为 stay_silent（模拟没兑现），=cancel 时取消这件承诺
 // 程序发来的"⟦系统·整理记忆⟧"：先试着调一次 react（应被锁），再输出一份假摘要（state 目录里 summary-mode=empty 时输出空）
 // 没有指令时回复"收到：<对方最后一句>"；补救提示（⟦系统…）回复"接着刚才的说"。
@@ -166,6 +167,8 @@ async function prompt(id: number, sessionId: string, all0: { type: string; text?
   }
   const cm = last.match(/!commit:([^|\s]+)\|(\S+)/)
   if (cm) await callTool(s, sessionId, 'commitment_create', { content: cm[1]!.replace(/_/g, ' '), when: cm[2]!.replace(/_/g, ' ') })
+  const tl = last.match(/!tool:(\w+)\|(\S+)/)
+  if (tl) await callTool(s, sessionId, tl[1]!, JSON.parse(tl[2]!))
   const rem = last.match(/!remember:(\S+)/)
   if (rem) await callTool(s, sessionId, 'remember', { text: rem[1]!.replace(/_/g, ' ') })
   const react = directive(last, 'react')

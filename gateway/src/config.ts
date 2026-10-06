@@ -6,7 +6,7 @@
 // 根目录默认 ~/.dsh-bot，可用环境变量 DSH_BOT_HOME 改。
 import { existsSync, readFileSync, statSync } from 'fs'
 import { homedir } from 'os'
-import { isAbsolute, join, resolve } from 'path'
+import { basename, isAbsolute, join, resolve } from 'path'
 
 export type Effort = 'off' | 'low' | 'high' | 'max'
 
@@ -73,6 +73,14 @@ export type GatewayOpts = {
   situationTtlMs: number
   /** 语音服务（仓库里的 voice-bridge）地址，只用本机 */
   voiceBridgeUrl: string
+  /** 生图：novelai | comfyui | off */
+  imageProvider: string
+  /** 生图技能目录（SKILL.md 是写法说明）；默认仓库里的 skills/<provider>-skill */
+  imageSkillDir?: string
+  /** 生图结果所在目录（允许 reply 发出去），默认 ~/resource/media */
+  imageDirs: string[]
+  /** 朋友圈数据库；不设就用仓库里的 state.db */
+  botlifeDb?: string
   logLevel: 'debug' | 'info' | 'warn' | 'error'
   logMaxBytes: number
   logKeep: number
@@ -84,6 +92,8 @@ export type GatewayOpts = {
 
 export type BotConfig = {
   id: string
+  /** 在朋友圈、画风里用的名字（旧系统里的 bot 名）：life_id，没写就取 life_config 的文件名，再没有就是 id */
+  lifeId: string
   displayName: string
   configPath: string
   root: string
@@ -200,6 +210,10 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     commitRetryMs: Array.isArray(g.commit_retry_ms) ? g.commit_retry_ms.map((v, i) => num(v, 0, `gateway.commit_retry_ms[${i}]`)) : [5 * 60_000, 15 * 60_000],
     hangTickMs: num(g.hang_tick_ms, 60_000, 'gateway.hang_tick_ms'),
     voiceBridgeUrl: str(g.voice_bridge_url, 'http://127.0.0.1:7788'),
+    imageProvider: str(g.image_provider, 'novelai'),
+    imageSkillDir: typeof g.image_skill_dir === 'string' && g.image_skill_dir ? g.image_skill_dir : undefined,
+    imageDirs: Array.isArray(g.image_dirs) ? g.image_dirs.map(String) : ['~/resource/media'],
+    botlifeDb: typeof g.botlife_db === 'string' && g.botlife_db ? g.botlife_db : undefined,
     situationTtlMs: num(g.situation_ttl_ms, 5 * 60_000, 'gateway.situation_ttl_ms'),
     situationCmd: Array.isArray(g.situation_cmd) && g.situation_cmd.length > 0 ? g.situation_cmd.map(String) : undefined,
     logLevel: level as GatewayOpts['logLevel'],
@@ -233,6 +247,7 @@ export function loadBotConfig(configPath: string, env: Record<string, string | u
   const harnessRaw = env.DSH_BOT_HARNESS || join(root, 'harness')
   const cfg: BotConfig = {
     id,
+    lifeId: str(y.life_id, '') || (typeof y.life_config === 'string' && y.life_config.trim() ? basename(y.life_config.trim()).replace(/\.ya?ml$/i, '') : id),
     displayName: str(y.display_name, id),
     configPath: abs,
     root,

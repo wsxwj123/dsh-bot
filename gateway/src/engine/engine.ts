@@ -23,6 +23,7 @@ import { imageBlock, Media, rowMedia } from '../media/media'
 import { Commitments } from '../commit/service'
 import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
+import { LifeActions } from '../life/actions'
 import {
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, summaryPrompt,
@@ -146,6 +147,7 @@ export class Engine {
   readonly commitments: Commitments
   readonly hang: HangRuntime
   readonly media: Media
+  readonly actions: LifeActions
   /** 发过图片但被 dsh 拒了的模型（看不了图）：之后对这个模型只说"有一张图"，不再附图 */
   private noImages = new Set<string>()
 
@@ -164,6 +166,14 @@ export class Engine {
     this.media = new Media({
       api, ledger, log, mediaDir: cfg.mediaDir, bridgeUrl: cfg.gw.voiceBridgeUrl,
       bridgeToken: () => this.credRef('VOICE_BRIDGE_TOKEN'),
+    })
+    this.actions = new LifeActions({
+      botId: cfg.lifeId, configPath: cfg.configPath, log, mediaDir: cfg.mediaDir,
+      imageProvider: () => this.cfg.gw.imageProvider,
+      imageSkillDir: () => this.cfg.gw.imageSkillDir ?? join(import.meta.dir, '..', '..', '..', 'skills', `${this.cfg.gw.imageProvider}-skill`),
+      stateDb: () => this.cfg.gw.botlifeDb,
+      credRef: name => this.credRef(name),
+      notify: (chatId, text, key) => { this.injectSynthetic(chatId, text, key, { source: 'image' }) },
     })
     this.situation = new SituationBridge(cfg.id, cfg.configPath, log, cfg.gw.situationCmd, cfg.gw.situationTtlMs)
     this.commitments = new Commitments({
@@ -221,6 +231,41 @@ export class Engine {
         description: '把值得长期记住的事记下来（对方的喜好、重要的日子、你们的约定、你们之间发生的事）。一次一条，写清楚是什么。不要记密码、证件号这类敏感信息。',
         inputSchema: { type: 'object', properties: { text: { type: 'string', description: '要记住的一件事，一两句话' } }, required: ['text'] },
         call: (args, ctx) => engine().toolRemember(args, ctx),
+      },
+      {
+        name: 'image_guide',
+        description: '生图的写法说明（第一次生图前看一遍；同一段对话里看过就不用再看）。',
+        inputSchema: { type: 'object', properties: {} },
+        call: (args, ctx) => engine().toolLife('guide', args, ctx),
+      },
+      {
+        name: 'generate_image',
+        description: '生成一张图片（自拍、给对方看的照片、朋友圈配图）。按 image_guide 的规则写好描述再调用。返回图片路径；生成得慢时先返回"还在生成"，好了程序会告诉你。',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            intermediate: { type: 'object', description: 'NovelAI：按 image_guide 写好的结构化描述（intermediate.json 的内容）' },
+            prompt: { type: 'string', description: 'ComfyUI：英文描述' },
+            ratio: { type: 'string', enum: ['portrait', 'landscape', 'square', 'wide'], description: '画幅' },
+            reuse_seed: { type: 'boolean', description: '同一场景再来一张时为 true' },
+          },
+        },
+        call: (args, ctx) => engine().toolLife('image', args, ctx),
+      },
+      {
+        name: 'moments',
+        description: '朋友圈：recent 看最近的圈（whose=self/user/别的 bot 名，days 默认 7）；like 点赞或取消（moment_id）；reply 评论或回复评论（moment_id、parent_comment_id（评论圈本身填 0）、text、可选 image）；post 发一条圈（可选 topic、visibility=public/private）；set_image 给圈配图（moment_id、images）；delete_comment 删自己的评论（comment_id）。',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['recent', 'like', 'reply', 'post', 'set_image', 'delete_comment'] },
+            whose: { type: 'string' }, days: { type: 'number' }, moment_id: { type: 'number' }, parent_comment_id: { type: 'number' },
+            comment_id: { type: 'number' }, text: { type: 'string' }, image: { type: 'string' }, topic: { type: 'string' },
+            visibility: { type: 'string', enum: ['public', 'private'] }, images: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['action'],
+        },
+        call: (args, ctx) => engine().toolLife('moments', args, ctx),
       },
       {
         name: 'commitment_create',
@@ -334,6 +379,21 @@ export class Engine {
     } catch (e) {
       this.log.error('tool.remember_failed', { err: safeError(e) })
       return { text: '这次没记上（写文件出错）。', isError: true }
+    }
+  }
+
+  async toolLife(op: 'guide' | 'image' | 'moments', args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
+    const at = this.activeFor(ctx.chatId, ctx.segmentId)
+    if (!at) return { text: '这一轮已经结束。', isError: true }
+    if (at.mode === 'summary') return LOCKED
+    at.lastProgressAt = Date.now()
+    if (op === 'guide') return this.actions.imageGuide()
+    at.toolsInFlight++
+    try {
+      return op === 'image' ? await this.actions.generateImage(at.chatId, args) : await this.actions.moments(args)
+    } finally {
+      at.toolsInFlight--
+      at.lastProgressAt = Date.now()
     }
   }
 
@@ -1107,6 +1167,23 @@ export class Engine {
     if (k.status === 'missing') return `【系统】${c.provider} 还没配密钥（凭据文件里填 ${k.env}），先不换。`
     this.setOverride(c)
     return `【系统】已换成 ${c.provider} / ${c.model}，下一条消息起生效。这个 bot 的所有聊天都换，重启后保持；/model default 换回配置文件里的。`
+  }
+
+  // ─── 管理台换模型（本机接口 /v1/model）：和 /model 命令同一套逻辑 ───
+
+  async modelInfo(): Promise<{ current: ModelChoice; config: ModelChoice; choices: ModelChoice[] }> {
+    const file = this.configBrain
+    let choices: ModelChoice[] = []
+    try { choices = await this.modelChoicesNow() } catch (e) { this.log.warn('api.model_choices_failed', { err: safeError(e) }) }
+    return { current: { provider: this.brain.provider, model: this.brain.model }, config: { provider: file.provider, model: file.model }, choices }
+  }
+
+  async modelSet(spec: string): Promise<{ ok: boolean; text: string; current: ModelChoice }> {
+    const before = brainKey(this.brain)
+    const s = spec.trim()
+    const text = s === 'default' ? await this.cmdModel('', 'default') : s ? await this.cmdModel('', s) : '【系统】没给模型名。'
+    const ok = brainKey(this.brain) !== before || /现在用的就是/.test(text)
+    return { ok, text: text.replace(/^【系统】/, ''), current: { provider: this.brain.provider, model: this.brain.model } }
   }
 
   // ─── /model、/provider 换的模型：记在账本里，重启后保持；配置文件里的模型改了就作废（以后改的为准） ───

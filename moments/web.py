@@ -379,6 +379,18 @@ def api_comment():
     })
 
 
+def _deliver_dsh(bot_dir: str, chat_id: str, text: str, source: str, key: str) -> bool:
+    """新系统（dsh-bot 网关）的 bot：通知投给网关（命令换成工具用法），返回 True；旧系统的 bot 返回 False，照旧写 inbox。"""
+    import gateway_client
+    if not gateway_client.available(bot_dir):
+        return False
+    try:
+        return gateway_client.inject(bot_dir, chat_id, gateway_client.for_dsh(text), source, key)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"[moments.web] 投给网关失败：{type(e).__name__}\n")
+        return True  # 新系统的 bot 不再写 inbox（没有人读）
+
+
 def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
                               comment_id: int, user_display: str):
     """写 inbox JSON 让 dispatcher 唤起 worker；worker 通过 Bash 调脚本回写朋友圈。"""
@@ -448,6 +460,8 @@ def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
     _ = user_display
 
     ms = int(time.time() * 1000)
+    if _deliver_dsh(bot_dir, chat_id, text, "moment_reply", f"moment-reply:{moment['id']}:{comment_id}"):
+        return "gateway"
     fname = os.path.join(inbox, f"moment-reply-{ms}.json")
     iso_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     payload = {
@@ -631,6 +645,8 @@ def _trigger_bot_see_user_moment(bot_cfg: dict, moment_id: int, text: str,
     )
 
     ms = int(time.time() * 1000)
+    if _deliver_dsh(bot_dir, chat_id, inbox_text, "user_moment", f"user-moment:{moment_id}"):
+        return
     fname = os.path.join(inbox, f"user-moment-{ms}-{moment_id}.json")
     iso_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     payload = {

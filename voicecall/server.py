@@ -209,7 +209,7 @@ def _ensure_worker_alive(bot: str) -> None:
         print(f"[ensure_worker] {bot} 失败(dispatcher 未起?): {e}", flush=True)
 
 
-def _write_inbox(bot: str, text: str, prefix: str) -> bool:
+def _write_inbox(bot: str, text: str, prefix: str, bot_lines: list[str] | None = None) -> bool:
     """往 bot inbox 写一条消息（复用新架构 inbox 机制：dispatcher/director/moments 同款，worker 自动 drain）。
     停用的 bot（需求⑤）→ 不写、返回 False（停用期间不积压，启用后也就不会补发）。"""
     if bot in disabled_ids_safe():
@@ -220,6 +220,11 @@ def _write_inbox(bot: str, text: str, prefix: str) -> bool:
         print(f"[inbox] {prefix} 跳过：bot {bot} 未配 chat_id（先 enable-bot）", flush=True)
         return False
     try:
+        # 新系统（dsh-bot 网关）的 bot：投给网关（命令换成工具用法），bot 自己说的话交给网关找许诺登记承诺
+        import gateway_client
+        if gateway_client.available(BOTS[bot]["bot_dir"]):
+            return gateway_client.inject(BOTS[bot]["bot_dir"], cid, gateway_client.for_dsh(text), prefix.replace("-", "_"),
+                                         f"{prefix}:{int(time.time() * 1000)}", bot_lines=bot_lines)
         # unified inbox：写 <channel>/inbox，payload 带 chat_id + scene。
         inbox = os.path.join(BOTS[bot]["bot_dir"], "inbox")
         os.makedirs(inbox, exist_ok=True)
@@ -297,20 +302,22 @@ def _recap_call_to_inbox(bot: str) -> bool:
     cid = BOTS[bot]["chat_id"]
     if not str(cid or "").strip():
         return False  # chat_id 空：voice_log 本就跳过，无内容可 recap（/end_call 据此回 {"ok": false}）
-    rows = _read_voice_log(bot, n=40)
+    rows = _read_voice_log(bot, n=400)  # 整通电话都要（旧版只取最后 40 条，长电话前半段会丢）
     state = os.path.join(BOTS[bot]["bot_dir"], "chats", cid, ".voice-recap-ts")
     last = 0
     try:
         last = int(open(state, encoding="utf-8").read().strip())
     except Exception:
         pass
-    fresh = [r for r in rows if r.get("ts", 0) > last]
-    user_turns = [r["text"] for r in fresh if r.get("role") == "user" and r.get("text")]
-    if not user_turns:
+    fresh = [r for r in rows if r.get("ts", 0) > last and r.get("text")]
+    if not any(r.get("role") == "user" for r in fresh):
         return False
-    text = (f"[voice-recap]（这是刚才{uname}和你打电话说的内容，记住即可，不用回复他）\n"
-            f"{uname}在电话里说了：\n" + "\n".join("· " + t for t in user_turns))
-    ok = _write_inbox(bot, text, "voice-recap")
+    # 两边的话都要：只有对方说的，就不知道自己在电话里答应过什么
+    lines = [f"· {'你' if r.get('role') == 'assistant' else uname}：{r['text']}" for r in fresh]
+    bot_lines = [r["text"] for r in fresh if r.get("role") == "assistant"]
+    text = (f"[voice-recap]（这是刚才{uname}和你打电话的内容，记住即可，不用回复他）\n"
+            f"电话里的对话：\n" + "\n".join(lines))
+    ok = _write_inbox(bot, text, "voice-recap", bot_lines=bot_lines)
     if ok and rows:
         try:
             with open(state, "w", encoding="utf-8") as f:

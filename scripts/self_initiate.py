@@ -77,13 +77,8 @@ def retry_after(reason: str, now: int, wake: int | None = None) -> int:
 
 
 def _inject(cfg: dict, chat: str, text: str, key: str) -> bool:
-    state = os.path.join(os.path.dirname(os.path.abspath(os.path.expanduser(cfg["bot_channel_path"]))), "state")
-    token = open(os.path.join(state, "api.key"), encoding="utf-8").read().strip()
-    body = json.dumps({"chat_id": chat, "source": "self_initiate", "text": text, "key": key}).encode("utf-8")
-    req = urllib.request.Request(f"http://127.0.0.1:{int(cfg.get('dispatcher_port') or 17950)}/v1/inject", data=body, method="POST",
-                                 headers={"content-type": "application/json", "authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return bool(json.loads(r.read().decode("utf-8")).get("ok"))
+    import gateway_client
+    return gateway_client.inject(cfg["bot_channel_path"], chat, text, "self_initiate", key, port=cfg.get("dispatcher_port") or None)
 
 
 def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_judge: bool = False) -> int:
