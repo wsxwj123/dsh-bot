@@ -184,6 +184,9 @@ export class DshProcess {
     }
   }
 
+  /** 网关要停了：接下来 dsh 退出不算意外（Ctrl+C 时它和网关同时收到信号，会先自己退出） */
+  expectExit(): void { this.stopping = true }
+
   /** 逐级停止：关闭标准输入等它自己退出 → SIGTERM（Windows 用 taskkill）→ 强杀。确认退出后才返回。 */
   async stop(graceMs = 5_000): Promise<void> {
     const proc = this.proc

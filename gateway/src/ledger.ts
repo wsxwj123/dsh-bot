@@ -393,6 +393,11 @@ export class Ledger {
     return this.db.query<{ text: string }, [number]>(
       `SELECT o.text FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind = 'text' AND o.state IN ('sent','ambiguous','pending') AND o.text IS NOT NULL`).all(rootId).map(r => r.text)
   }
+  /** 这一轮（含重试、提醒）已经发出、可能发出或正在发的文件 */
+  sentFilesInChain(rootId: number): string[] {
+    return this.db.query<{ file: string }, [number]>(
+      `SELECT o.file FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind IN ('photo','document') AND o.state IN ('sent','ambiguous','pending') AND o.file IS NOT NULL`).all(rootId).map(r => r.file)
+  }
   clearSilent(rootId: number): void {
     this.db.query('UPDATE turns SET silent = 0 WHERE root_id = ?').run(rootId)
   }

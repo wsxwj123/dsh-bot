@@ -1,7 +1,7 @@
 // 生图和朋友圈（M4）：旧系统里模型用 Bash 跑仓库里的脚本，新系统的模型没有 Bash，
 // 改成网关替它跑同一批脚本（不重写），结果交回给模型。
 //   generate_image：novelai-skill 的生图脚本（模型按 image_guide 写好结构化描述）或 ComfyUI 脚本；
-//                   45 秒内生成好就直接返回路径，没好就先返回"还在生成"，好了以后程序再告诉它
+//                   10 秒内生成好就直接返回路径，没好就先返回"还在生成"，好了以后程序再告诉它
 //   moments：查最近的朋友圈、点赞、回评论、发圈、给圈配图、删自己的评论
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
@@ -9,7 +9,8 @@ import { dirname, join, resolve } from 'path'
 import { safeError, type Logger } from '../log'
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..', '..')
-const SYNC_WAIT_MS = 45_000 // dsh 等一次工具调用最多 60 秒
+// 生图一般要一分钟左右（真机 M4：7 次都超过 45 秒），久等只是让这一轮干等。短等一下，没好就先让模型回话，好了再通知它
+const SYNC_WAIT_MS = 10_000
 
 export type ActionsDeps = {
   /** 朋友圈、画风里用的名字（旧系统里的 bot 名） */
@@ -25,7 +26,7 @@ export type ActionsDeps = {
   stateDb: () => string | undefined
   /** 凭据文件里的值（NOVELAI_BEARER_TOKEN 等），只传给对应脚本 */
   credRef: (name: string) => string | null
-  /** 生图超过 45 秒才好：把结果作为系统消息塞回这个聊天 */
+  /** 生图超过 10 秒才好：把结果作为系统消息塞回这个聊天 */
   notify: (chatId: string, text: string, key: string) => void
 }
 
@@ -110,7 +111,7 @@ export class LifeActions {
     const timeout = new Promise<'wait'>(r => setTimeout(() => r('wait'), SYNC_WAIT_MS))
     const first = await Promise.race([run, timeout])
     if (first !== 'wait') return done(first)
-    // 没在 45 秒内好：先回"还在生成"，好了以后塞一条系统消息
+    // 没在 10 秒内好：先回"还在生成"，好了以后塞一条系统消息
     void run.then(r => {
       const res = done(r)
       this.d.notify(chatId, `⟦系统·生图⟧ ${res.text}`, `image:${stamp}`)
@@ -158,10 +159,14 @@ export class LifeActions {
     }
     try {
       const r = await this.py(argv, {}, 50_000)
-      this.d.log.info('tool.moments', { action: s('action'), code: r.code })
+      // 发圈被挡住时脚本先打一行"moment skip: 原因"，最后一行是笼统的"没生成"：把真实原因带上（真机 M4 问题 6）
+      const errLines = r.err.trim().split('\n').filter(Boolean)
+      const skip = errLines.find(l => l.includes('moment skip:'))?.replace(/^.*moment skip:\s*/, '')
+      this.d.log.info('tool.moments', { action: s('action'), code: r.code, ...(skip ? { skip: skip.slice(0, 60) } : {}) })
       const out = (r.out.trim() || (r.code === 0 ? '完成。' : '')).slice(0, 3000)
       if (r.code === 0) return { text: out }
-      return { text: `没做成：${(r.err.trim().split('\n').pop() ?? '').slice(0, 300) || `退出码 ${r.code}`}`, isError: true }
+      const why = (errLines.pop() ?? '').slice(0, 300) || `退出码 ${r.code}`
+      return { text: `没做成：${skip ? `被挡住了（${skip}），马上再试也一样。` : ''}${why}`, isError: true }
     } catch (e) {
       return { text: `没做成：${safeError(e)}`, isError: true }
     }

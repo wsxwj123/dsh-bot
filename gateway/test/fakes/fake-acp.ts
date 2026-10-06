@@ -21,6 +21,7 @@
 //   !commit:事|时间    先调用 commitment_create（下划线换成空格）
 //   !say:文字          回复这句话（下划线换成空格），代替"收到：…"
 //   !voice             用语音回复两段（as_voice）
+//   !voicetext         回复两段中文，带两段朗读稿（voice_text）
 //   !tool:名字|JSON     先调用这个工具（JSON 里不能有空白）
 // 程序发来的"⟦系统·承诺到期⟧"：回复一句；state 目录里 due-mode=mute 时改为 stay_silent（模拟没兑现），=cancel 时取消这件承诺
 // 程序发来的"⟦系统·整理记忆⟧"：先试着调一次 react（应被锁），再输出一份假摘要（state 目录里 summary-mode=empty 时输出空）
@@ -174,6 +175,10 @@ async function prompt(id: number, sessionId: string, all0: { type: string; text?
   const react = directive(last, 'react')
   if (react) await callTool(s, sessionId, 'react', { message_id: Number(react[0]), emoji: '❤️' })
   const parts = Number(directive(last, 'parts')?.[0] || 1)
+  if (directive(last, 'voicetext')) {
+    await callTool(s, sessionId, 'reply', { text: '中文第一段\n\n中文第二段', as_voice: true, voice_text: 'にほんご いち\n\nにほんご に' })
+    return send({ id, result: { stopReason: 'end_turn' } })
+  }
   if (directive(last, 'voice')) {
     await callTool(s, sessionId, 'reply', { text: '语音第一段\n\n语音第二段', as_voice: true, voice_emotion: 'HAPPY' })
     return send({ id, result: { stopReason: 'end_turn' } })

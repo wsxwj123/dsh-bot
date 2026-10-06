@@ -71,6 +71,8 @@ export type GatewayOpts = {
   situationCmd?: string[]
   /** 作息查询结果（含"查不到"）缓存多久（默认 5 分钟） */
   situationTtlMs: number
+  /** reply 发得慢（大图）时最多等多久就先告诉模型"还在发"：dsh 等一次工具调用最多 60 秒，超时模型会以为没发出去而重发 */
+  replyReturnMs: number
   /** 语音服务（仓库里的 voice-bridge）地址，只用本机 */
   voiceBridgeUrl: string
   /** 生图：novelai | comfyui | off */
@@ -215,6 +217,7 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     imageDirs: Array.isArray(g.image_dirs) ? g.image_dirs.map(String) : ['~/resource/media'],
     botlifeDb: typeof g.botlife_db === 'string' && g.botlife_db ? g.botlife_db : undefined,
     situationTtlMs: num(g.situation_ttl_ms, 5 * 60_000, 'gateway.situation_ttl_ms'),
+    replyReturnMs: num(g.reply_return_ms, 45_000, 'gateway.reply_return_ms'),
     situationCmd: Array.isArray(g.situation_cmd) && g.situation_cmd.length > 0 ? g.situation_cmd.map(String) : undefined,
     logLevel: level as GatewayOpts['logLevel'],
     logMaxBytes: num(g.log_max_bytes, 10 * 1024 * 1024, 'gateway.log_max_bytes'),

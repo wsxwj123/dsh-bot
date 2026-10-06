@@ -18,8 +18,9 @@ export type Fault = {
   status?: number
   description?: string
   retryAfter?: number
-  /** 'garbled'：先当作已投递记下来，再回一个读不出来的响应（模拟"发出去了但回包丢了"） */
-  mode?: 'error' | 'garbled'
+  /** 'garbled'：先当作已投递记下来，再回一个读不出来的响应（模拟"发出去了但回包丢了"）；'slow'：等 delayMs 再正常处理（模拟大文件上传慢） */
+  mode?: 'error' | 'garbled' | 'slow'
+  delayMs?: number
 }
 
 type Update = { update_id: number; message: any }
@@ -113,7 +114,8 @@ export class FakeTelegram {
     }
     this.calls.push({ method, at: Date.now(), params })
     const fault = this.takeFault(method, params)
-    if (fault && fault.mode !== 'garbled') {
+    if (fault?.mode === 'slow') await new Promise(r => setTimeout(r, fault.delayMs ?? 1000))
+    else if (fault && fault.mode !== 'garbled') {
       return Response.json({ ok: false, error_code: fault.status ?? 400, description: fault.description ?? 'Bad Request: injected fault', ...(fault.retryAfter ? { parameters: { retry_after: fault.retryAfter } } : {}) }, { status: fault.status ?? 400 })
     }
     switch (method) {

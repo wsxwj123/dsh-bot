@@ -3,7 +3,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { FakeTelegram } from '../fakes/fake-telegram'
-import { cleanup, Gateway, makeBot, OWNER, prompts, until, type BotEnv } from '../harness'
+import { cleanup, Gateway, makeBot, OWNER, prompts, until, writeConfig, type BotEnv } from '../harness'
 
 let tg: FakeTelegram | null = null
 let b: BotEnv | null = null
@@ -19,16 +19,20 @@ afterEach(async () => {
   tg = null; b = null; gw = null; bridge = null; bridgeCalls = []
 })
 
-/** 假 voice-bridge：转写固定返回一句话，合成返回几个字节 */
-function startBridge(o: { transcript?: string; fail?: boolean } = {}) {
+/** 假 voice-bridge：转写固定返回一句话，合成返回几个字节。onlyUnder：只读这个目录下的文件，别的返回 403（旧 voice-bridge 的白名单） */
+function startBridge(o: { transcript?: string; fail?: boolean; onlyUnder?: () => string } = {}) {
   bridge = Bun.serve({
     hostname: '127.0.0.1', port: 0,
     async fetch(req) {
       const url = new URL(req.url)
-      const body = await req.json().catch(() => ({}))
+      const body = await req.json().catch(() => ({})) as any
       bridgeCalls.push({ path: url.pathname, body, auth: req.headers.get('authorization') })
       if (o.fail) return new Response('down', { status: 503 })
-      if (url.pathname === '/transcribe_file') return Response.json({ text: o.transcript ?? '今天好累啊' })
+      if (url.pathname === '/transcribe_file') {
+        if (o.onlyUnder && !String(body.path).startsWith(o.onlyUnder())) return new Response('forbidden', { status: 403 })
+        if (o.onlyUnder && !existsSync(String(body.path))) return new Response('missing', { status: 404 })
+        return Response.json({ text: o.transcript ?? '今天好累啊' })
+      }
       if (url.pathname === '/synthesize_voice') return new Response(new Uint8Array([79, 103, 103, 83]), { headers: { 'content-type': 'audio/ogg' } })
       return new Response('nf', { status: 404 })
     },
@@ -56,16 +60,32 @@ test('语音进：下载后交给 voice-bridge 转写（只给媒体目录里的
   expect(existsSync(call.body.path)).toBe(true)
 })
 
-test('语音进：voice-bridge 没起来也不挡聊天，模型看到"没转成文字"', async () => {
+test('语音进：voice-bridge 没起来也不挡聊天，模型看到"没转成文字"，并被要求照实说没听清', async () => {
   const { tg, b } = await setup({ bridge: startBridge({ fail: true }) })
   tg.pushVoice(OWNER)
-  await until(() => prompts(b).some(p => p.text.includes('[语音消息，没转成文字]')), 'placeholder reached the model')
+  await until(() => prompts(b).some(p => p.text.includes('[语音消息，没转成文字：你没听清这条语音，照实告诉对方]')), 'placeholder reached the model')
 })
 
-test('语音出：as_voice 的每一段合成语音、网关用 sendVoice 发；账本里照样记文字。没配音色就改发文字', async () => {
+test('语音进：旧 voice-bridge 不认新网关的目录（403）时，临时复制到共用目录再转一次，转完删掉', async () => {
+  let shared = ''
+  const { tg, b } = await setup({
+    bridge: startBridge({ onlyUnder: () => shared }),
+    before: b => { shared = join(b.root, 'shared-media'); mkdirSync(shared, { recursive: true }); b.gw.image_dirs = [shared]; writeConfig(b) },
+  })
+  tg.pushVoice(OWNER)
+  await until(() => prompts(b).some(p => p.text.includes('[语音] 今天好累啊')), 'transcript via shared dir')
+  const calls = bridgeCalls.filter(c => c.path === '/transcribe_file')
+  expect(calls).toHaveLength(2)
+  expect(calls[1]!.body.path.startsWith(shared)).toBe(true)
+  expect(readdirSync(join(shared, 'dsh-bot-voice'))).toEqual([])
+})
+
+test('语音出：和旧系统一样，每段先发文字、再发这段的语音；账本里记文字', async () => {
   const { tg, gw } = await setup({ access: { voiceId: 'test-voice' } })
   tg.pushText(OWNER, '发语音给我 !voice')
   await until(() => tg.sentTo(OWNER).filter(s => s.method === 'sendVoice').length === 2, 'two voice messages')
+  const sent = tg.sentTo(OWNER).filter(s => s.method === 'sendVoice' || s.text?.startsWith('语音第'))
+  expect(sent.map(s => s.method)).toEqual(['sendMessage', 'sendVoice', 'sendMessage', 'sendVoice'])
   const synth = bridgeCalls.filter(c => c.path === '/synthesize_voice')
   expect(synth.map(c => c.body.text)).toEqual(['语音第一段', '语音第二段'])
   expect(synth[0]!.body.voice_id).toBe('test-voice')
@@ -74,6 +94,14 @@ test('语音出：as_voice 的每一段合成语音、网关用 sendVoice 发；
   const out = l.db.query(`SELECT text FROM outbound WHERE state = 'sent' ORDER BY id`).all() as { text: string }[]
   l.close()
   expect(out.map(o => o.text)).toEqual(['语音第一段', '语音第二段'])
+})
+
+test('语音出：给了朗读稿（voice_text）就读朗读稿，文字照发 text（中文文字配日语语音）', async () => {
+  const { tg } = await setup({ access: { voiceId: 'test-voice' } })
+  tg.pushText(OWNER, '用日语说 !voicetext')
+  await until(() => tg.sentTo(OWNER).filter(s => s.method === 'sendVoice').length === 2, 'two voice messages')
+  expect(tg.sentTo(OWNER).filter(s => s.text?.startsWith('中文第')).map(s => s.text)).toEqual(['中文第一段', '中文第二段'])
+  expect(bridgeCalls.filter(c => c.path === '/synthesize_voice').map(c => c.body.text)).toEqual(['にほんご いち', 'にほんご に'])
 })
 
 test('语音出：access.json 没配音色时改发文字，内容不丢', async () => {

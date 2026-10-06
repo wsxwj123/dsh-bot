@@ -113,6 +113,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return
     shuttingDown = true
     log.info('gateway.stopping')
+    engine!.beginStop()
     clearInterval(hb)
     await poller.stop()
     await engine!.stop()

@@ -7,7 +7,7 @@
 //   卡住 → session/cancel；取消不掉就重启 dsh，按"进程死了"处理
 import { existsSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
-import { loadAccess, reloadBrain, type Access, type Brain, type BotConfig } from '../config'
+import { expandHome, loadAccess, reloadBrain, type Access, type Brain, type BotConfig } from '../config'
 import { AcpError, AcpExited, AcpTimeout, type SessionUpdate } from '../dsh/acp'
 import { buildDshEnv, defaultDshCommand, type DshProcess, type DshSpec } from '../dsh/process'
 import { buildPatchRows, modelValue, patchText, promptFingerprint, restartFingerprint, type PatchInput } from '../dsh/profile'
@@ -166,6 +166,7 @@ export class Engine {
     this.media = new Media({
       api, ledger, log, mediaDir: cfg.mediaDir, bridgeUrl: cfg.gw.voiceBridgeUrl,
       bridgeToken: () => this.credRef('VOICE_BRIDGE_TOKEN'),
+      sharedDirs: () => this.cfg.gw.imageDirs.map(expandHome),
     })
     this.actions = new LifeActions({
       botId: cfg.lifeId, configPath: cfg.configPath, log, mediaDir: cfg.mediaDir,
@@ -208,7 +209,8 @@ export class Engine {
             text: { type: 'string', description: '要发的文字' },
             reply_to: { type: 'number', description: '可选：要引用回复的消息编号（⟦…⟧ 里 # 后面的数字）' },
             files: { type: 'array', items: { type: 'string' }, description: '可选：要一起发的图片或文件的绝对路径' },
-            as_voice: { type: 'boolean', description: '可选：用语音发（每一段文字合成一条语音）' },
+            as_voice: { type: 'boolean', description: '可选：同时发语音。每段先发文字，再发这一段的语音' },
+            voice_text: { type: 'string', description: '可选：语音朗读稿（as_voice 时用）。用空行分段，和 text 的段一一对应；不写就读 text 本身' },
             voice_emotion: { type: 'string', description: '可选：语音的情绪，比如 HAPPY、SAD、ANGRY、NEUTRAL' },
             voice_instruct: { type: 'string', description: '可选：语气提示，十个字以内，比如"小声""撒娇"' },
           },
@@ -329,20 +331,26 @@ export class Engine {
     at.toolsInFlight++
     at.replyCalls++
     at.lastProgressAt = Date.now()
-    try {
-      const voiceId = args.as_voice === true || args.as_voice === 'true' ? this.access().voiceId : undefined
-      if ((args.as_voice === true || args.as_voice === 'true') && !voiceId) this.log.warn('tool.reply_voice_unconfigured', { turn: at.turnId })
-      const voice = voiceId ? (t: string) => this.media.synthesize(t, voiceId, str(args.voice_emotion), str(args.voice_instruct)) : undefined
-      const results = await this.sender.send({ chatId: at.chatId, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo: Number.isInteger(replyTo) && replyTo > 0 ? replyTo : undefined, skipTexts: already, voice })
-      const d = describeResults(results)
-      at.delivered += d.delivered
-      if (d.delivered > 0 && at.silent) { this.ledger.clearSilent(at.rootId); at.silent = false }
-      this.log.info('tool.reply', { turn: at.turnId, parts: results.length, delivered: d.delivered, duplicates: results.filter(r => r.state === 'duplicate').length, ...(voice ? { voice: true } : {}) })
-      return { text: d.text, isError: d.isError }
-    } finally {
-      at.toolsInFlight--
-      at.lastProgressAt = Date.now()
-    }
+    const asVoice = args.as_voice === true || args.as_voice === 'true'
+    const voiceId = asVoice ? this.access().voiceId : undefined
+    if (asVoice && !voiceId) this.log.warn('tool.reply_voice_unconfigured', { turn: at.turnId })
+    const voice = voiceId ? (t: string) => this.media.synthesize(t, voiceId, str(args.voice_emotion), str(args.voice_instruct)) : undefined
+    const voiceTexts = voice && typeof args.voice_text === 'string' && args.voice_text.trim() ? args.voice_text.split(/\n\s*\n/).map(x => x.trim()) : undefined
+    const skipFiles = new Set(this.ledger.sentFilesInChain(at.rootId))
+    const sending = this.sender.send({ chatId: at.chatId, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo: Number.isInteger(replyTo) && replyTo > 0 ? replyTo : undefined, skipTexts: already, skipFiles, voice, voiceTexts })
+      .then(results => {
+        const d = describeResults(results)
+        at.delivered += d.delivered
+        if (d.delivered > 0 && at.silent) { this.ledger.clearSilent(at.rootId); at.silent = false }
+        this.log.info('tool.reply', { turn: at.turnId, parts: results.length, delivered: d.delivered, duplicates: results.filter(r => r.state === 'duplicate').length, ...(voice ? { voice: true } : {}) })
+        return d
+      })
+      .finally(() => { at.toolsInFlight--; at.lastProgressAt = Date.now() })
+    // dsh 等一次工具调用最多 60 秒，超时模型会以为没发出去、再发一遍（真机 M4 问题 3）。发得慢就先告诉它"在发了"，后台接着发
+    const first = await Promise.race([sending, sleep(this.cfg.gw.replyReturnMs).then(() => null)])
+    if (first) return { text: first.text, isError: first.isError }
+    this.log.info('tool.reply_slow', { turn: at.turnId })
+    return { text: '正在发送（图片或语音比较大，需要一点时间），对方会陆续收到。不要再用 reply 重发这些内容；说完了就结束这一轮。' }
   }
 
   async toolReact(args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
@@ -481,8 +489,15 @@ export class Engine {
     return r.id
   }
 
-  async stop(waitMs = 60_000): Promise<void> {
+  /** 开始停止（Ctrl+C 时 dsh 和网关同时收到信号）：dsh 退出算正常，没开始发的段不再发 */
+  beginStop(): void {
     this.stopping = true
+    this.dsh.expectExit()
+    this.sender.halt()
+  }
+
+  async stop(waitMs = 60_000): Promise<void> {
+    this.beginStop()
     for (const t of this.timers) clearInterval(t)
     for (const st of this.chats.values()) if (st.timer) clearTimeout(st.timer)
     // 不打断正在生成的回复：等它们结束（有上限）
@@ -782,6 +797,9 @@ export class Engine {
         this.log.warn('prompt.images_unsupported', { model: this.brain.model })
         res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: promptItems(blocks, true) }, 0)
       }
+      // reply 先回了"在发了"、后台还在发：等发完再收尾，不然这一轮会被当成"没回"去提醒，又发一遍
+      const sendDeadline = Date.now() + 5 * 60_000
+      while (at.toolsInFlight > 0 && Date.now() < sendDeadline) await sleep(200)
       if (at.cancelledAt !== null || res?.stopReason === 'cancelled') return { type: 'cancelled', used }
       return { type: 'ok', stopReason: String(res?.stopReason ?? ''), used, text: at.textOut }
     } catch (e) {
