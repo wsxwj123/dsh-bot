@@ -18,6 +18,9 @@
 //   !dupsome          第二次回复里只有一段和第一次相同
 //   !silentafter      回复之后又调用 stay_silent
 //   !remember:文字     先调用 remember（文字里的下划线换成空格）
+//   !commit:事|时间    先调用 commitment_create（下划线换成空格）
+//   !say:文字          回复这句话（下划线换成空格），代替"收到：…"
+// 程序发来的"⟦系统·承诺到期⟧"：回复一句；state 目录里 due-mode=mute 时改为 stay_silent（模拟没兑现），=cancel 时取消这件承诺
 // 程序发来的"⟦系统·整理记忆⟧"：先试着调一次 react（应被锁），再输出一份假摘要（state 目录里 summary-mode=empty 时输出空）
 // 没有指令时回复"收到：<对方最后一句>"；补救提示（⟦系统…）回复"接着刚才的说"。
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
@@ -147,12 +150,24 @@ async function prompt(id: number, sessionId: string, blocks: { type: string; tex
     await callTool(s, sessionId, 'stay_silent', { reason: 'test' })
     return send({ id, result: { stopReason: 'end_turn' } })
   }
+  const dueMode = last.includes('⟦系统·承诺到期⟧') && existsSync(P('due-mode')) ? readFileSync(P('due-mode'), 'utf8') : ''
+  if (dueMode.includes('mute')) {
+    await callTool(s, sessionId, 'stay_silent', { reason: 'test mute' })
+    return send({ id, result: { stopReason: 'end_turn' } })
+  }
+  if (dueMode.includes('cancel')) { // 到点时觉得不需要了：取消，不回复也不调 stay_silent
+    await callTool(s, sessionId, 'commitment_cancel', { id: Number(last.match(/取消 #(\d+)/)?.[1]), reason: 'test cancel' })
+    return send({ id, result: { stopReason: 'end_turn' } })
+  }
+  const cm = last.match(/!commit:([^|\s]+)\|(\S+)/)
+  if (cm) await callTool(s, sessionId, 'commitment_create', { content: cm[1]!.replace(/_/g, ' '), when: cm[2]!.replace(/_/g, ' ') })
   const rem = last.match(/!remember:(\S+)/)
   if (rem) await callTool(s, sessionId, 'remember', { text: rem[1]!.replace(/_/g, ' ') })
   const react = directive(last, 'react')
   if (react) await callTool(s, sessionId, 'react', { message_id: Number(react[0]), emoji: '❤️' })
   const parts = Number(directive(last, 'parts')?.[0] || 1)
-  const base = last.startsWith('⟦系统') ? '接着刚才的说' : `收到：${lastUserLine(last)}`
+  const say = last.match(/!say:(\S+)/)
+  const base = say ? say[1]!.replace(/_/g, ' ') : last.startsWith('⟦系统') ? '接着刚才的说' : `收到：${lastUserLine(last)}`
   const text = parts > 1 ? Array.from({ length: parts }, (_, i) => `${base}（第${i + 1}段）`).join('\n\n') : base
   const args: Record<string, unknown> = { text }
   const rt = directive(last, 'replyto')

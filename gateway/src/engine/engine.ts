@@ -19,11 +19,38 @@ import { parseCommand } from '../telegram/inbound'
 import { describeResults, normText, planParts, type Sender } from '../telegram/sender'
 import { Backoff, randomToken, sleep } from '../util'
 import { MemoryStore } from '../memory'
+import { Commitments } from '../commit/service'
+import { situLine, SituationBridge } from '../life/situation'
+import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
 import {
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, summaryPrompt,
 } from './format'
 import { formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, type KeyStatus, type ModelChoice } from './commands'
+
+/**
+ * 被晾追问等多久的倍数：按关系数值（好感 + 信任）调，越亲近追得越快（用户在 M3 真机验收后定的）。
+ * 很亲近（两项都 100）0.5 倍，一般（两项都 50）1 倍，生疏（两项都 0）1.5 倍。读不到关系数值就按 1 倍。
+ */
+export function hangPace(channelDir: string): number {
+  try {
+    const r = JSON.parse(readFileSync(join(channelDir, 'relationship.json'), 'utf8'))
+    const a = Number(r?.affection)
+    const t = Number(r?.trust)
+    if (!Number.isFinite(a) || !Number.isFinite(t)) return 1
+    const close = Math.max(0, Math.min(1, (a + t) / 200))
+    return 1.5 - close
+  } catch { return 1 }
+}
+
+function safeMeta(m: string | null): Record<string, unknown> | null {
+  try { return m ? JSON.parse(m) as Record<string, unknown> : null } catch { return null }
+}
+
+/** 旧调度器的被晾提示以 [hang-check] 开头；新系统统一用 ⟦系统…⟧ 标记程序说明 */
+function hangText(t: string): string {
+  return t.replace(/^\[hang-check\]\s*/, '⟦系统·被晾⟧ ')
+}
 
 /** 主人能用的命令（/start 等其它命令照样被网关吞掉，不交给模型） */
 const OWNER_COMMANDS = new Set(['clear', 'compact', 'model', 'models', 'provider', 'providers', 'help', 'commands'])
@@ -73,6 +100,8 @@ export class Engine {
   private waiting = new Set<string>()
   private loaded = new Map<string, number>() // sessionId → dsh 代数
   private dshStarting: Promise<void> | null = null
+  /** 空闲重启 dsh 进行中：这期间来的消息要等旧进程停完再用新进程（CI 上抓到过：消息被交给正在退出的旧进程） */
+  private restarting: Promise<void> | null = null
   /** 启动时清理旧 dsh 的任务；拉起新 dsh 之前必须等它做完，免得把新进程当成旧的清掉 */
   private reaping: Promise<void> = Promise.resolve()
   private dshBackoff = new Backoff(2_000, 60_000)
@@ -97,6 +126,9 @@ export class Engine {
   brain: Brain
   botUsername = ''
   readonly memory: MemoryStore
+  readonly situation: SituationBridge
+  readonly commitments: Commitments
+  readonly hang: HangRuntime
 
   constructor(
     readonly cfg: BotConfig,
@@ -110,6 +142,23 @@ export class Engine {
     this.configBrain = cfg.brain
     this.brain = this.withOverride(cfg.brain)
     this.memory = new MemoryStore(cfg.memoryDir)
+    this.situation = new SituationBridge(cfg.id, cfg.configPath, log, cfg.gw.situationCmd, cfg.gw.situationTtlMs)
+    this.commitments = new Commitments({
+      ledger, log, situation: this.situation,
+      timeZone: () => this.cfg.gw.timezone,
+      inject: (chatId, text, key, meta) => this.injectSynthetic(chatId, text, key, meta),
+      isBusy: chatId => this.chat(chatId).running,
+      notifyOwner: (key, text) => void this.notifyOwner(key, text),
+      retryMs: cfg.gw.commitRetryMs,
+    })
+    // 被晾追问（从旧调度器原样搬来）：状态文件放在 state 目录；追问写成账本里的合成消息
+    this.hang = createHangRuntime({
+      channelDir: cfg.stateDir,
+      inject: (chatId, text) => { this.injectSynthetic(chatId, hangText(text), `hang:${chatId}:${Date.now()}`, { source: 'hang' }) },
+      probe: () => this.situation.current(),
+      log: line => this.log.info('hang', { detail: line }),
+      pace: () => hangPace(this.cfg.channelDir),
+    })
     this.dsh.onUnexpectedExit = () => { this.loaded.clear() }
   }
 
@@ -146,6 +195,32 @@ export class Engine {
         description: '把值得长期记住的事记下来（对方的喜好、重要的日子、你们的约定、你们之间发生的事）。一次一条，写清楚是什么。不要记密码、证件号这类敏感信息。',
         inputSchema: { type: 'object', properties: { text: { type: 'string', description: '要记住的一件事，一两句话' } }, required: ['text'] },
         call: (args, ctx) => engine().toolRemember(args, ctx),
+      },
+      {
+        name: 'commitment_create',
+        description: '登记一件答应对方将来要做的事（比如"三点提醒你""明早叫你起床""周五陪你看电影"）。到点时程序会提醒你去做。',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            content: { type: 'string', description: '要做的事，一句话' },
+            when: { type: 'string', description: '什么时候：可以写"今晚八点""明天早上""30分钟后""起床后""下班后""周五晚上"，或 2026-10-07T09:00' },
+            quote: { type: 'string', description: '你当时对对方说的原话（可选）' },
+          },
+          required: ['content', 'when'],
+        },
+        call: (args, ctx) => engine().toolCommit('create', args, ctx),
+      },
+      {
+        name: 'commitment_list',
+        description: '查看这个聊天里还没兑现的承诺。',
+        inputSchema: { type: 'object', properties: {} },
+        call: (args, ctx) => engine().toolCommit('list', args, ctx),
+      },
+      {
+        name: 'commitment_cancel',
+        description: '取消一件承诺（不打算做了、对方说不用了、登记错了）。',
+        inputSchema: { type: 'object', properties: { id: { type: 'number', description: '承诺编号' }, reason: { type: 'string' } }, required: ['id'] },
+        call: (args, ctx) => engine().toolCommit('cancel', args, ctx),
       },
       {
         name: 'stay_silent',
@@ -233,6 +308,22 @@ export class Engine {
     }
   }
 
+  async toolCommit(op: 'create' | 'list' | 'cancel', args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
+    const at = this.activeFor(ctx.chatId, ctx.segmentId)
+    if (!at) return { text: '这一轮已经结束。', isError: true }
+    if (at.mode === 'summary') return LOCKED
+    if (op === 'list') return this.commitments.list(at.chatId)
+    if (op === 'create') return this.commitments.create(at.chatId, args)
+    const r = this.commitments.cancel(at.chatId, args)
+    // 到点提醒的这一轮里取消了这件事：等于选择这次不开口，不再追一句"你还没回复"
+    const c = this.ledger.commitment(Number(String(args.id ?? '').replace(/^#/, '')))
+    if (!r.isError && c?.inbound_id && this.ledger.inbound(c.inbound_id)?.turn_id === at.turnId && this.ledger.deliveredInChain(at.rootId) === 0) {
+      this.ledger.markSilent(at.turnId, 'commitment cancelled')
+      at.silent = true
+    }
+    return r
+  }
+
   async toolSilent(args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
     const at = this.activeFor(ctx.chatId, ctx.segmentId)
     if (!at) return { text: '这一轮已经结束。', isError: true }
@@ -262,7 +353,43 @@ export class Engine {
     this.timers.push(setInterval(() => this.watchConfig(), g.configPollMs))
     this.timers.push(setInterval(() => void this.probe(), g.probeMs))
     this.timers.push(setInterval(() => this.watchHealth(), Math.min(10_000, g.heartbeatMs)))
+    this.timers.push(setInterval(() => void this.situation.get().then(() => this.commitments.tick()).catch(e => this.log.error('commitment.tick_failed', { err: safeError(e) })), g.commitPollMs))
+    this.timers.push(setInterval(() => void this.situation.get().then(() => this.hang.tick()).catch(e => this.log.error('hang.tick_failed', { err: safeError(e) })), g.hangTickMs))
+    void this.situation.get()
     for (const chatId of this.ledger.chatsWithPending()) this.schedule(chatId)
+  }
+
+  private pendingHints(chatId: string): string[] {
+    try { const v = JSON.parse(this.ledger.getMeta(`hints:${chatId}`) || '[]'); return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [] } catch { return [] }
+  }
+
+  /**
+   * 对方发来消息的这一轮，附带几行"生活状态"（旧系统每条私聊都带，这里只在变化时或新会话开头带，省 token）：
+   * 关系数值的提示（relationship.json 的 prompt_snippet）、她此刻在干什么、被晾之后迟到的反应（带完即清）。
+   */
+  private lifeLines(chatId: string, segmentId: number, fresh: boolean): string[] {
+    const out: string[] = []
+    try {
+      const snippet = JSON.parse(readFileSync(join(this.cfg.channelDir, 'relationship.json'), 'utf8'))?.prompt_snippet
+      if (typeof snippet === 'string' && snippet.trim()) {
+        const k = `rel_seen:${segmentId}`
+        if (fresh || this.ledger.getMeta(k) !== snippet) { out.push(`⟦关系状态⟧ ${snippet.trim()}`); this.ledger.setMeta(k, snippet) }
+      }
+    } catch {}
+    const situ = situLine(this.situation.current())
+    if (situ && (fresh || this.ledger.getMeta(`situ_seen:${chatId}`) !== situ)) { out.push(situ); this.ledger.setMeta(`situ_seen:${chatId}`, situ) }
+    const late = takeHangArchive(this.cfg.stateDir, chatId)
+    if (late) out.push(hangText(late))
+    if (out.length) this.log.info('life.lines', { chat: chatId, relationship: out.some(l => l.startsWith('⟦关系状态')), situation: !!situ && out.includes(situ), late: !!late })
+    return out
+  }
+
+  /** 程序自己往某个聊天里塞一条要模型处理的消息（承诺到期、被晾追问）。重复的 key 不会再塞。返回账本 id。 */
+  injectSynthetic(chatId: string, text: string, key: string, meta: Record<string, unknown>): number | null {
+    const r = this.ledger.insertInbound({ ukey: `int:${key}`, chatId, kind: 'synthetic', text, ts: Date.now(), meta })
+    if (!r.inserted) return null
+    this.schedule(chatId)
+    return r.id
   }
 
   async stop(waitMs = 60_000): Promise<void> {
@@ -303,6 +430,7 @@ export class Engine {
   }
 
   private async ensureDsh(): Promise<void> {
+    if (this.restarting) await this.restarting
     if (this.dsh.running) return
     if (this.dshStarting) return this.dshStarting
     const wait = this.dshNextTryAt - Date.now()
@@ -335,7 +463,11 @@ export class Engine {
 
   // ─── 调度 ───
 
-  onInbound(chatId: string): void { this.schedule(chatId) }
+  onInbound(chatId: string): void {
+    const last = this.ledger.pendingFor(chatId).at(-1)
+    if (last?.kind === 'user') this.hang.onInbound(chatId, last.received_at) // 对方回话了：取消还没发的追问
+    this.schedule(chatId)
+  }
 
   private chat(chatId: string): ChatState {
     let st = this.chats.get(chatId)
@@ -398,7 +530,12 @@ export class Engine {
     }
     // 新消息一进来就会超预算：先换段再处理
     await this.maybeRoll(chatId, batch)
+    const since = Date.now()
     const delay = await this.runBatch(chatId, batch)
+    // 这一轮说了"三点提醒你"却没登记：能换算时间的替它登记，下一轮告诉它；换算不了的下一轮提醒它自己登记
+    const hints = this.commitments.afterTurn(chatId, since, batch.some(r => r.kind === 'synthetic' && (safeMeta(r.meta)?.source === 'commitment')))
+    if (hints.length) this.ledger.setMeta(`hints:${chatId}`, JSON.stringify([...this.pendingHints(chatId), ...hints]))
+    if (this.ledger.sentTextsSince(chatId, since).length > 0) this.hang.onOutbound(chatId)
     // 这一轮之后用量到线了：趁这个聊天还占着，马上换段（下一条消息就不用等摘要了）
     if (delay === 0) await this.maybeRoll(chatId, [])
     return delay
@@ -422,7 +559,10 @@ export class Engine {
     const news = this.ledger.memoriesFromOtherChats(chatId, seg.memory_seen)
     if (news.length) this.ledger.setMemorySeen(seg.id, news[news.length - 1]!.id)
     const hint = news.length ? [formatMemoryHint(news.map(n => n.text))] : []
-    let blocks = [...head, ...hint, formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone })]
+    const commitHints = this.pendingHints(chatId)
+    if (commitHints.length) this.ledger.setMeta(`hints:${chatId}`, '')
+    const life = batch.some(r => r.kind === 'user') ? this.lifeLines(chatId, seg.id, this.ledger.segmentTurnCount(seg.id) === 0) : []
+    let blocks = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone })]
     let kind: TurnKind = 'message'
     let attempt = 0
     let rootId: number | undefined
@@ -1019,8 +1159,11 @@ export class Engine {
     if (!this.restartPending || this.runningCount > 0) return
     this.restartPending = false
     this.log.info('dsh.restart_idle')
-    await this.dsh.stop()
-    this.loaded.clear()
+    this.restarting = (async () => {
+      await this.dsh.stop()
+      this.loaded.clear()
+    })().finally(() => { this.restarting = null })
+    await this.restarting
     for (const c of this.ledger.chatsWithPending()) this.schedule(c)
   }
 

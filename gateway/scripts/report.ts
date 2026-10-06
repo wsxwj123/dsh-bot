@@ -48,6 +48,11 @@ if (rolled.length) {
 const fromLedger = q<{ n: number }>(`SELECT COUNT(*) AS n FROM events WHERE kind = 'summary_from_ledger' AND at > ?`, since)[0]?.n ?? 0
 if (fromLedger) w(`- 崩溃或续接失败后用账本补写摘要：${fromLedger} 次`)
 w()
+w('## 承诺')
+w(`- 按状态：${rows(q(`SELECT state || '/' || source AS k, COUNT(*) AS n FROM commitments WHERE created_at > ? AND note IS NOT 'vague: hinted' GROUP BY state, source`, since))}（source：tool = 模型自己登记，auto = 网关从说过的话里补登记）`)
+w(`- 时间说得含糊、提醒模型自己登记：${q<{ n: number }>(`SELECT COUNT(*) AS n FROM commitments WHERE created_at > ? AND note = 'vague: hinted'`, since)[0]?.n ?? 0}`)
+w(`- 合成消息（程序塞给模型的）：${rows(q(`SELECT COALESCE(json_extract(meta, '$.source'), '?') AS k, COUNT(*) AS n FROM inbound WHERE kind = 'synthetic' AND received_at > ? GROUP BY k`, since))}`)
+w()
 w('## 长期记忆')
 w(`- 新记下的条数（remember）：${q<{ n: number }>(`SELECT COUNT(*) AS n FROM memories WHERE at > ?`, since)[0]?.n ?? 0}`)
 w()

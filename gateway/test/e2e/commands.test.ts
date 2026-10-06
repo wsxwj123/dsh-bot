@@ -38,8 +38,16 @@ async function cmd(tg: FakeTelegram, text: string, chat = OWNER): Promise<string
 }
 
 async function say(tg: FakeTelegram, text: string): Promise<void> {
-  tg.pushText(OWNER, text)
+  const mid = tg.pushText(OWNER, text)
   await until(() => tg.sentTo(OWNER).some(s => s.text === `收到：${text}`), `reply to ${text}`)
+  // 等这一轮在账本里收尾：Windows 上停网关是硬杀，没收尾的轮重启后会按崩溃恢复重新处理
+  await until(() => {
+    const l = gw!.ledger()
+    const st = l.inboundByKey(`tg:${OWNER}:${mid}`)?.state
+    const busy = (l.db.query(`SELECT COUNT(*) AS n FROM turns WHERE state IN ('preparing','sent')`).get() as { n: number }).n
+    l.close()
+    return st === 'done' && busy === 0
+  }, `turn settled for ${text}`)
 }
 
 const modelOf = (b: BotEnv, text: string) => prompts(b).find(p => p.text.includes(text))!.model

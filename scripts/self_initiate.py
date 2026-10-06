@@ -37,9 +37,110 @@ def _bot_port(bot: str) -> str | None:
     return "17801"
 
 
+# ─── 新系统（dsh-bot 网关）的 bot ─────────────────────────────
+# 方案 3.9：每次机会都有结果，并按原因安排下一次（不再先重抽周期、再判断发不发）；
+# 投递走网关的本机接口（写成账本里的合成消息，由模型在下一轮处理）。
+
+def _dsh_cfg(bot: str) -> dict | None:
+    """这个 bot 由新网关在跑就返回它的配置；否则 None（走旧流程）。"""
+    try:
+        import config_loader
+        import chat_history
+        cfg = config_loader.load_bot(bot)
+        return cfg if chat_history.is_dsh_bot(cfg.get("bot_channel_path")) else None
+    except Exception:
+        return None
+
+
+def _next_wake(bot: str) -> int | None:
+    try:
+        import importlib
+        hs = importlib.import_module("hang_situation")
+        wakes = hs.plan(bot).get("wakes") or []
+        return int(wakes[0]) if wakes else None
+    except Exception:
+        return None
+
+
+def retry_after(reason: str, now: int, wake: int | None = None) -> int:
+    """跳过之后，过多久再试（秒）。"""
+    r = reason or ""
+    if "用户" in r:                                   # 对方大概率在睡
+        return random.randint(5400, 9000)
+    if "sleep" in r or "睡" in r:                      # 她自己在睡：起床后再试
+        return max(600, wake - now) if wake and wake > now else 3600
+    if "配额" in r:                                    # 额度用完：下个窗口
+        return 3600
+    if "非静默期" in r or "刚说过" in r or "专注" in r or "moment" in r:  # 刚聊过、正忙
+        return random.randint(1800, 3600)
+    return random.randint(3600, 7200)                 # 没素材、不想说
+
+
+def _inject(cfg: dict, chat: str, text: str, key: str) -> bool:
+    state = os.path.join(os.path.dirname(os.path.abspath(os.path.expanduser(cfg["bot_channel_path"]))), "state")
+    token = open(os.path.join(state, "api.key"), encoding="utf-8").read().strip()
+    body = json.dumps({"chat_id": chat, "source": "self_initiate", "text": text, "key": key}).encode("utf-8")
+    req = urllib.request.Request(f"http://127.0.0.1:{int(cfg.get('dispatcher_port') or 17950)}/v1/inject", data=body, method="POST",
+                                 headers={"content-type": "application/json", "authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return bool(json.loads(r.read().decode("utf-8")).get("ok"))
+
+
+def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_judge: bool = False) -> int:
+    state_dir = os.path.join(os.path.dirname(os.path.abspath(os.path.expanduser(cfg["bot_channel_path"]))), "state", "self-initiate")
+    os.makedirs(state_dir, exist_ok=True)
+    next_f = os.path.join(state_dir, f"{chat}.next")
+    try:
+        next_at = int(open(next_f, encoding="utf-8").read().strip())
+    except Exception:
+        next_at = 0
+    if not force and now < next_at:
+        print(f"skip: 还没到下次机会（还有 {(next_at - now) // 60} 分钟）", file=sys.stderr)
+        return 0
+
+    def schedule(sec: int, why: str) -> int:
+        with open(next_f, "w", encoding="utf-8") as f:
+            f.write(str(now + sec))
+        print(f"{why}；下次机会在 {sec // 60} 分钟后", file=sys.stderr)
+        return 0
+
+    hour = datetime.now().hour
+    text = f"⟦系统·主动开口⟧ 现在 {hour} 点，你可以按自己的心情主动找对方说点什么，也可以不说（用 stay_silent）。"
+    if skip_judge:  # 只给手动测试用：不问 life-context，直接把默认文本投给网关
+        try:
+            ok = _inject(cfg, chat, text, f"{chat}:{now}:test")
+        except Exception as e:
+            print(f"投递失败（网关没在跑？）：{type(e).__name__}", file=sys.stderr)
+            return 1
+        print("已投递给网关（测试，跳过了判断，不改下次机会的时间）" if ok else "投递被拒", file=sys.stderr)
+        return 0 if ok else 1
+    try:
+        r = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "life-context.py"), bot, chat],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, cwd=REPO_ROOT)
+        out = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 and r.stdout.strip() else {"action": "FALLBACK"}
+    except Exception as e:
+        print(f"life-context error {type(e).__name__} → 用 FALLBACK 文本", file=sys.stderr)
+        out = {"action": "FALLBACK"}
+    action = out.get("action")
+    if action == "SKIP":
+        reason = str(out.get("reason", ""))
+        wake = _next_wake(bot) if ("sleep" in reason or "睡" in reason) and "用户" not in reason else None
+        return schedule(retry_after(reason, now, wake), f"skip: {reason}")
+    if action == "TEXT":
+        text = "⟦系统·主动开口⟧ " + str(out.get("text", ""))[:4000]
+    try:
+        ok = _inject(cfg, chat, text, f"{chat}:{now}")
+    except Exception as e:
+        return schedule(600, f"投递失败（网关没在跑？）：{type(e).__name__}")
+    if not ok:
+        return schedule(600, "投递被拒")
+    # 真正投出去了：下一次机会按随机间隔（开口时机不可预测，像活人）
+    return schedule(random.randint(COOLDOWN_MIN, COOLDOWN_MAX), "已投递给网关")
+
+
 def main() -> int:
     if len(sys.argv) < 3:
-        print("usage: self_initiate.py <bot> <chat_id>", file=sys.stderr)
+        print("usage: self_initiate.py <bot> <chat_id> [--force] [--skip-judge]", file=sys.stderr)
         return 2
     bot, chat = sys.argv[1], sys.argv[2]
     now = int(os.environ.get("SELF_INITIATE_NOW") or time.time())  # 时钟注入（测试用）
@@ -52,6 +153,9 @@ def main() -> int:
 
     # ─── 需求⑤：停用的 bot 计划任务照常触发，这里自行空退出（不写 inbox、不 POST）───
     # 先刷 .last（不动 .interval）：启用后随机间隔从最后一轮停用 tick 重新计，不会一启用就补发主动消息。
+    dsh = _dsh_cfg(bot)
+    if dsh is not None and bot not in disabled_ids_safe():
+        return run_dsh(bot, chat, dsh, now, force="--force" in sys.argv[3:], skip_judge="--skip-judge" in sys.argv[3:])
     if bot in disabled_ids_safe():
         print(f"skip: {bot} disabled (configs/{bot}.yml enabled:false)", file=sys.stderr)
         with open(marker, "w", encoding="utf-8") as f:

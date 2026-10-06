@@ -42,6 +42,14 @@ def load_bot(bot_id: str) -> dict:
     with open(p, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
 
+    # 新系统（dsh-bot 网关）的 bot 配置可以用 life_config 指向旧配置：作息、生活、情绪等设置从那里读，
+    # 新配置里写了的键优先（bot_channel_path、brain、gateway 等）。
+    life = cfg.get("life_config")
+    if isinstance(life, str) and life.strip():
+        with open(os.path.expanduser(life.strip()), encoding="utf-8") as f:
+            base = yaml.safe_load(f) or {}
+        cfg = {**base, **cfg}
+
     # 运行时会注入的计算字段不应来自 YAML；先清掉残留，避免旧值绕过年龄闸门。
     cfg.pop("_age", None)
     cfg.pop("_schooling", None)

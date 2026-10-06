@@ -1,7 +1,7 @@
 # gateway：每个 bot 一个网关进程
 
 取代旧的 `dispatcher/`（调度器 + worker 管理器）。大脑换成 DeepSeek Harness（dsh），通过 ACP 协议驱动。
-设计见 `docs/dsh-migration/PLAN.md`，各期的说明和真机清单见 `docs/dsh-migration/M1.md`、`M2.md`。
+设计见 `docs/dsh-migration/PLAN.md`，各期的说明和真机清单见 `docs/dsh-migration/M1.md`、`M2.md`、`M3.md`。
 
 ## 运行
 
@@ -51,6 +51,8 @@ src/
   ledger.ts          送达账本（sqlite）：收到 / 开轮 / 发送，启动时的恢复规则；段、摘要、记忆事件
   ledger-schema.sql  账本表结构（Python 周边的测试也用这一份）
   memory.ts          长期记忆：<频道目录>/memory/MEMORY.md，remember 工具往"随手记"里追加
+  commit/            承诺：中文时间说法解析、许诺识别（when.ts），登记、到点、睡觉顺延、兑现判定（service.ts）
+  life/              作息查询（调 hang_situation.py --plan）、被晾追问（从旧调度器原样搬来）
   log.ts             落盘、按大小轮转、写盘前脱敏
   util.ts            小工具；测试用的崩溃点（DSH_BOT_CRASH_AT）
   telegram/

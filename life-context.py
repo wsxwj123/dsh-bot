@@ -65,6 +65,8 @@ def main():
         sys.exit(1)
 
     now = datetime.now()
+    # 新系统（dsh-bot 网关）的 bot 走 DeepSeek，不占 Claude 订阅的 5 小时配额
+    dsh_bot = chat_history.is_dsh_bot(bot_cfg.get("bot_channel_path"))
 
     # ─── 0. 全局/bot pause 检查 ─────────────────────────
     paused = pause.is_paused(bot_id)
@@ -75,7 +77,7 @@ def main():
     # ─── 1. 配额 ───────────────────────────────────────
     # /clear hook 路径（用户主动唤醒）允许 bypass，但有硬顶防滥用：
     # quota 真的过 cap*1.5 还是要挡（防连续 /clear 烧爆 Anthropic 真实配额）
-    q = quota.check_quota(global_cfg) if not dry_run else "ok"
+    q = quota.check_quota(global_cfg) if not dry_run and not dsh_bot else "ok"
     bypass_quota = os.environ.get("CLAUDEBOTLIFE_BYPASS_SILENCE") == "1"
     if q == "over" and not bypass_quota:
         emit("SKIP", reason="5h 配额耗尽")
@@ -257,10 +259,7 @@ def main():
             speaking_threshold=bot_cfg.get("speaking_threshold", ""),
         )
 
-    # 6b. 朋友圈撞 dm 抑制：刚发了圈就别同时 dm 刷屏
-    if moment_id and action == "dm" and not jiwen_forced:
-        sys.stderr.write(f"[{bot_id}] 刚发圈，抑制本次 dm 避免撞车\n")
-        action, reason = "skip", f"moment_just_posted({moment_id})"
+    # 6b. 发朋友圈和私聊各走各的闸门，互不取消（旧版"刚发了圈就取消这次私聊"会让私聊机会被朋友圈吃掉）
 
     # 6c. action=skip → 不发 self-initiate text（朋友圈已独立处理过）
     if action == "skip":
@@ -442,8 +441,8 @@ def _write_back_activity(bot_id: str, chat_id: str, state, activity_type: str,
         if new_state is state:
             return  # 冷却拒绝
         # 写回
-        state_dir = global_cfg.get("jiwen", {}).get("state_dir") or \
-            os.path.expanduser("~/.claude/dispatcher/.jiwen-state")
+        from jiwen import reader as _reader
+        state_dir = _reader.resolve(bot_id, global_cfg.get("jiwen", {}) or {})[1]
         path = _tick.state_path(state_dir, bot_id, chat_id)
         # 读最新看是否被 tick 覆盖过
         try:

@@ -90,3 +90,21 @@ CREATE TABLE IF NOT EXISTS memories (
   chat_id TEXT,
   text TEXT NOT NULL
 );
+-- 承诺（M3）：模型用 commitment_create 登记，或网关从 bot 说过的话里兜底识别出来
+CREATE TABLE IF NOT EXISTS commitments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  quote TEXT,
+  when_text TEXT,
+  due_at INTEGER NOT NULL,
+  next_at INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  source TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  inbound_id INTEGER,
+  created_at INTEGER NOT NULL,
+  closed_at INTEGER,
+  note TEXT
+);
+CREATE INDEX IF NOT EXISTS commitments_due ON commitments(state, next_at);

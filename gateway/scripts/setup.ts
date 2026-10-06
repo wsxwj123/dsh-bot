@@ -98,6 +98,7 @@ function bot(): number {
       `display_name: ${id}`,
       `bot_channel_path: ${JSON.stringify(ch)}`,
       `dispatcher_port: ${Number(opt('port') ?? 17950)}   # 本机接口端口，只听 127.0.0.1`,
+      '# life_config: ~/旧仓库/configs/<旧名>.yml   # 作息、生活、情绪等设置从旧配置读（M3 起）；这里写了的键优先',
       '',
       'brain:',
       '  provider: deepseek-official',
