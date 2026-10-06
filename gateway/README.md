@@ -16,6 +16,22 @@ bun gateway/src/main.ts --config ~/.dsh-bot/configs/<名>.yml
 
 查看状态：`bun gateway/scripts/health.ts --config …`；运行报告（只有数字）：`bun gateway/scripts/report.ts --config …`。
 
+## 主人命令（在 Telegram 里发，只有主人能用）
+
+| 命令 | 作用 |
+|---|---|
+| `/model` | 看现在用的模型、这段对话用了多少 |
+| `/model list`（`/models`） | 列出能换的模型（dsh 回报的列表，含配置里的自定义路由） |
+| `/model <模型>`、`/model <供应商>/<模型>` | 换模型。这个 bot 的所有聊天都换，重启后保持；配置文件里的模型改了就以配置文件为准 |
+| `/model default` | 换回配置文件里的模型 |
+| `/provider`（`/providers`） | 列出供应商和密钥配没配（只说配没配，不显示密钥） |
+| `/provider <供应商>` | 换到这个供应商的第一个模型；缺密钥时不换 |
+| `/compact [要特别留意的事]` | 现在就换段：在旧会话里写摘要（可带重点），新会话带着摘要和最近的原话 |
+| `/clear` | 清空：写摘要后换新会话，不带清空前的原话 |
+| `/help`（`/commands`） | 命令说明 |
+
+用法参照 OpenClaw 的同名命令。命令不会交给模型；别人发的命令网关直接忽略。
+
 ## 测试
 
 ```bash

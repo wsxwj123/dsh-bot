@@ -92,7 +92,7 @@ test('命令解析：只有网关自己的命令算命令，其余 / 开头的�
   expect(parseCommand('你好')).toBeNull()
   const base = { message_id: 3, date: 1, chat: { id: 1, type: 'private' }, from: { id: 1, first_name: 'A' } } as any
   expect(toInbound({ ...base, text: '/clear' }, 9).kind).toBe('command')
-  expect(toInbound({ ...base, text: '/compact' }, 9).kind).toBe('user')
+  expect(toInbound({ ...base, text: '/shrug' }, 9).kind).toBe('user')
   expect(toInbound({ ...base, photo: [{}], caption: '看' }, 9).text).toBe('[图片] 看')
   const r = toInbound({ ...base, text: 'hi', reply_to_message: { ...base, message_id: 2, from: { id: 9 }, text: '旧话' } }, 9)
   expect(JSON.parse(JSON.stringify(r.meta))).toEqual({ reply_to: { message_id: 2, from_me: true, text: '旧话' } })

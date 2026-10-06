@@ -21,8 +21,12 @@ import { Backoff, randomToken, sleep } from '../util'
 import { MemoryStore } from '../memory'
 import {
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
-  NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, SUMMARY_PROMPT,
+  NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, summaryPrompt,
 } from './format'
+import { formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, type KeyStatus, type ModelChoice } from './commands'
+
+/** 主人能用的命令（/start 等其它命令照样被网关吞掉，不交给模型） */
+const OWNER_COMMANDS = new Set(['clear', 'compact', 'model', 'models', 'provider', 'providers', 'help', 'commands'])
 
 /** 预算小的时候，新段开头的原话最多占预算的这个比例（按一个字一个 token 算，宁可少带） */
 const SEED_RECENT_RATIO = 0.1
@@ -75,6 +79,10 @@ export class Engine {
   private dshNextTryAt = 0
   private dshFailures = 0
   private fingerprint = ''
+  /** 配置文件里的模型；this.brain 是实际在用的（可能被 /model 换过） */
+  private configBrain: Brain
+  /** dsh 回报的可选模型（最近一次看到的） */
+  private modelChoices: ModelChoice[] = []
   /** 正在跑的 dsh 用的系统提示词的指纹（dsh 启动时算） */
   private promptKey = ''
   private restartPending = false
@@ -99,7 +107,8 @@ export class Engine {
     readonly dsh: DshProcess,
     readonly mcp: McpServer,
   ) {
-    this.brain = cfg.brain
+    this.configBrain = cfg.brain
+    this.brain = this.withOverride(cfg.brain)
     this.memory = new MemoryStore(cfg.memoryDir)
     this.dsh.onUnexpectedExit = () => { this.loaded.clear() }
   }
@@ -306,6 +315,7 @@ export class Engine {
         await this.dsh.start(this.dshSpec())
         this.fingerprint = restartFingerprint(input)
         this.promptKey = promptFingerprint(input, this.harnessVersion())
+        this.modelChoices = []
         this.loaded.clear()
         this.lastProbeOkAt = Date.now()
         this.dshBackoff.reset()
@@ -554,7 +564,8 @@ export class Engine {
     let seg = this.ledger.activeSegment(chatId)
     if (seg?.session_id && this.loaded.get(seg.session_id) !== gen) {
       try {
-        await conn.request('session/resume', { sessionId: seg.session_id, cwd: this.cfg.workDir, mcpServers: this.mcp.serverSpec(seg.id, seg.mcp_token) }, 60_000)
+        const r = await conn.request<{ configOptions?: any[] }>('session/resume', { sessionId: seg.session_id, cwd: this.cfg.workDir, mcpServers: this.mcp.serverSpec(seg.id, seg.mcp_token) }, 60_000)
+        this.noteOptions(r?.configOptions)
         this.loaded.set(seg.session_id, gen)
         this.log.info('segment.resumed', { chat: chatId, segment: seg.id })
       } catch (e) {
@@ -590,6 +601,7 @@ export class Engine {
       if (!seg) seg = this.ledger.createSegment(chatId, randomToken(), true)
       const s = await conn.request<{ sessionId: string; configOptions?: any[] }>('session/new', { cwd: this.cfg.workDir, mcpServers: this.mcp.serverSpec(seg.id, seg.mcp_token) }, 60_000)
       this.ledger.setSegmentSession(seg.id, s.sessionId, '', this.promptKey)
+      this.noteOptions(s.configOptions)
       this.loaded.set(s.sessionId, gen)
       this.log.info('segment.created', { chat: chatId, segment: seg.id, needs_seed: seg.needs_seed === 1 })
       seg = this.ledger.segment(seg.id)!
@@ -629,6 +641,7 @@ export class Engine {
     if (!conn) throw new AcpExited('session/set_config_option')
     const b = this.brain
     const r = await conn.request<{ configOptions?: any[] }>('session/set_config_option', { sessionId, configId: 'model', value: modelValue(b) }, 30_000)
+    this.noteOptions(r?.configOptions)
     if (b.reasoningEffort) {
       const opt = (r?.configOptions ?? []).find((o: any) => o?.id === 'reasoning_effort')
       if (opt) await conn.request('session/set_config_option', { sessionId, configId: 'reasoning_effort', value: b.reasoningEffort }, 30_000)
@@ -690,17 +703,19 @@ export class Engine {
    * 换段：先在旧会话里写交接摘要（这一轮工具全锁），写不成就用账本流水单独写一份；
    * 摘要不像样或为空就不存（新段开头沿用上一份）。然后关掉旧会话，下一轮开新会话。
    */
-  async rollSegment(chatId: string, seg: SegmentRow, reason: string): Promise<void> {
+  async rollSegment(chatId: string, seg: SegmentRow, reason: string, focus?: string): Promise<{ how: 'in-session' | 'ledger' | 'none' | 'crashed'; chars: number }> {
     this.log.info('segment.roll_start', { chat: chatId, segment: seg.id, reason, used: seg.used_tokens, budget: this.budgetFor(seg) })
     let summary: string | null = null
-    let how = 'none'
+    let how: 'in-session' | 'ledger' | 'none' = 'none'
+    // 网关重启后旧会话还没载入：先续接上，摘要照样在旧会话里写（命中缓存）
+    if (seg.session_id && this.dsh.running && this.loaded.get(seg.session_id) !== this.dsh.generation) await this.resumeForSummary(seg)
     if (seg.session_id && this.dsh.running && this.loaded.get(seg.session_id) === this.dsh.generation) {
-      const r = await this.summarizeInSession(chatId, seg)
-      if (r === 'crashed') return // 段已作废，下一轮开新段时用账本补写摘要
+      const r = await this.summarizeInSession(chatId, seg, focus)
+      if (r === 'crashed') return { how: 'crashed', chars: 0 } // 段已作废，下一轮开新段时用账本补写摘要
       if (r) { summary = r; how = 'in-session' }
     }
     if (!summary) {
-      summary = await this.summarizeFromLedger(chatId, seg).catch(e => { this.log.warn('summary.ledger_failed', { err: safeError(e) }); return null })
+      summary = await this.summarizeFromLedger(chatId, seg, focus).catch(e => { this.log.warn('summary.ledger_failed', { err: safeError(e) }); return null })
       if (summary) how = 'ledger'
     }
     if (summary) this.ledger.setSegmentSummary(seg.id, summary)
@@ -711,12 +726,24 @@ export class Engine {
     }
     this.ledger.event(chatId, 'segment_rolled', { segment: seg.id, reason, summary: how, summary_chars: summary?.length ?? 0, used: seg.used_tokens })
     this.log.info('segment.rolled', { chat: chatId, segment: seg.id, reason, summary: how, summary_chars: summary?.length ?? 0 })
+    return { how, chars: summary?.length ?? 0 }
+  }
+
+  private async resumeForSummary(seg: SegmentRow): Promise<void> {
+    const conn = this.dsh.conn
+    if (!conn || !seg.session_id) return
+    try {
+      await conn.request('session/resume', { sessionId: seg.session_id, cwd: this.cfg.workDir, mcpServers: this.mcp.serverSpec(seg.id, seg.mcp_token) }, 60_000)
+      this.loaded.set(seg.session_id, this.dsh.generation)
+    } catch (e) {
+      this.log.warn('summary.resume_failed', { segment: seg.id, err: safeError(e) })
+    }
   }
 
   /** 在旧会话里写摘要。返回摘要；不像样返回 null；dsh 中途死了返回 'crashed'。 */
-  private async summarizeInSession(chatId: string, seg: SegmentRow): Promise<string | null | 'crashed'> {
+  private async summarizeInSession(chatId: string, seg: SegmentRow, focus?: string): Promise<string | null | 'crashed'> {
     const turn = this.ledger.startTurn({ chatId, segmentId: seg.id, kind: 'summary', inboundIds: [], attempt: 0 })
-    const outcome = await this.runPrompt(turn.id, turn.id, seg, [SUMMARY_PROMPT], 'summary')
+    const outcome = await this.runPrompt(turn.id, turn.id, seg, [summaryPrompt(focus)], 'summary')
     if (outcome.type === 'crashed') {
       this.ledger.finishTurn(turn.id, 'crashed', { error: outcome.err })
       this.ledger.closeSegment(seg.id, 'abandoned', 'crash during summary')
@@ -735,14 +762,14 @@ export class Engine {
   }
 
   /** 旧会话用不了：把这一段的账本流水（加上更早的摘要）交给一个不带工具的临时会话写摘要。 */
-  private async summarizeFromLedger(chatId: string, seg: SegmentRow): Promise<string | null> {
+  private async summarizeFromLedger(chatId: string, seg: SegmentRow, focus?: string): Promise<string | null> {
     let entries = this.ledger.segmentTranscript(seg.id)
     if (entries.length === 0) return null
     // 太长就只取后面的部分
     let total = entries.reduce((n, e) => n + e.text.length, 0)
     while (total > this.cfg.gw.summarySourceMaxChars && entries.length > 1) { total -= entries[0]!.text.length; entries = entries.slice(1) }
     const prev = this.ledger.latestSummary(chatId)
-    const prompt = formatLedgerSummaryPrompt(prev?.summary ?? null, entries, { timeZone: this.cfg.gw.timezone })
+    const prompt = formatLedgerSummaryPrompt(prev?.summary ?? null, entries, { timeZone: this.cfg.gw.timezone }, focus)
     const text = await this.oneShot(prompt)
     const s = cleanSummary(text)
     this.ledger.event(chatId, 'summary_from_ledger', { segment: seg.id, entries: entries.length, ok: s !== null })
@@ -795,26 +822,159 @@ export class Engine {
   private async handleCommand(row: InboundRow): Promise<void> {
     const cmd = parseCommand(row.text)
     const targetOk = !cmd?.target || (this.botUsername !== '' && cmd.target.toLowerCase() === this.botUsername.toLowerCase())
-    if (!cmd || cmd.name !== 'clear') { this.ledger.settleInbound([row.id], 'dropped', 'command ignored'); return }
+    if (!cmd || !OWNER_COMMANDS.has(cmd.name)) { this.ledger.settleInbound([row.id], 'dropped', 'command ignored'); return }
     if (!targetOk) { this.ledger.settleInbound([row.id], 'dropped', 'command addressed to another bot'); this.log.info('command.wrong_target', { chat: row.chat_id }); return }
     if (!this.isOwner(row.sender_id)) { this.ledger.settleInbound([row.id], 'dropped', 'not owner'); this.log.warn('command.not_owner', { chat: row.chat_id }); return }
-    // 清空 = 这一段收尾写一份摘要（写不出来或为空就沿用上一份，不覆盖）+ 下一条消息开新段、不再带清空前的原话
-    const seg = this.ledger.activeSegment(row.chat_id)
+    let text: string
+    try {
+      switch (cmd.name) {
+        case 'clear': text = await this.cmdClear(row.chat_id); break
+        case 'compact': text = await this.cmdCompact(row.chat_id, cmd.args); break
+        case 'model': text = await this.cmdModel(row.chat_id, cmd.args); break
+        case 'models': text = await this.cmdModel(row.chat_id, 'list'); break
+        case 'provider': case 'providers': text = await this.cmdProvider(cmd.args); break
+        default: text = HELP_TEXT
+      }
+    } catch (e) {
+      this.log.warn('command.failed', { name: cmd.name, err: safeError(e) })
+      text = `【系统】/${cmd.name} 没做成：${safeError(e).slice(0, 120)}`
+    }
+    this.ledger.settleInbound([row.id], 'done', cmd.name)
+    this.log.info('command.done', { chat: row.chat_id, name: cmd.name })
+    await this.sender.send({ chatId: row.chat_id, turnId: null, callSeq: 0, text, kind: 'system' }).catch(() => {})
+  }
+
+  /** 清空 = 这一段收尾写一份摘要（写不出来或为空就沿用上一份，不覆盖）+ 下一条消息开新段、不再带清空前的原话 */
+  private async cmdClear(chatId: string): Promise<string> {
+    const seg = this.ledger.activeSegment(chatId)
     if (seg) {
       try {
         await this.ensureDsh().catch(() => {})
-        await this.rollSegment(row.chat_id, seg, 'clear')
+        await this.rollSegment(chatId, seg, 'clear')
       } catch (e) {
         this.log.warn('command.clear_summary_failed', { err: safeError(e) })
         this.ledger.closeSegment(seg.id, 'closed', 'clear')
         if (seg.session_id) this.loaded.delete(seg.session_id)
       }
     }
-    this.ledger.setMeta(`clear_at:${row.chat_id}`, String(Date.now()))
-    this.ledger.event(row.chat_id, 'clear', { segment: seg?.id ?? null })
-    this.ledger.settleInbound([row.id], 'done', 'clear')
-    this.log.info('command.clear', { chat: row.chat_id, segment: seg?.id ?? null })
-    await this.sender.send({ chatId: row.chat_id, turnId: null, callSeq: 0, text: '【系统】已清空这段对话的上下文（聊过的要点留了一份摘要），下一条消息从新会话开始。', kind: 'system' }).catch(() => {})
+    this.ledger.setMeta(`clear_at:${chatId}`, String(Date.now()))
+    this.ledger.event(chatId, 'clear', { segment: seg?.id ?? null })
+    this.log.info('command.clear', { chat: chatId, segment: seg?.id ?? null })
+    return '【系统】已清空这段对话的上下文（聊过的要点留了一份摘要），下一条消息从新会话开始。'
+  }
+
+  /** 压缩 = 现在就换段：写一份摘要（可以带主人交代的重点），新会话带着摘要和最近的原话（和 /clear 的区别：原话也带） */
+  private async cmdCompact(chatId: string, focus: string): Promise<string> {
+    const seg = this.ledger.activeSegment(chatId)
+    if (!seg?.session_id || this.ledger.segmentTurnsOfKind(seg.id, 'message') === 0) return '【系统】这段对话还没聊什么，不用压缩。'
+    await this.ensureDsh()
+    const r = await this.rollSegment(chatId, seg, 'compact', focus || undefined)
+    this.log.info('command.compact', { chat: chatId, segment: seg.id, summary: r.how, summary_chars: r.chars, focus: focus.length > 0 })
+    if (r.how === 'crashed') return '【系统】压缩时模型进程出了问题。下一条消息会用聊天记录补写摘要，再开新会话。'
+    if (r.how === 'none') return '【系统】已换新会话，但这次摘要没写成，沿用上一份摘要；最近的原话照常带上。'
+    return `【系统】已把这段对话压缩成一份摘要（${r.chars} 字，压缩前约 ${seg.used_tokens ?? '?'} token）。下一条消息从新会话开始，带着摘要和最近的原话。`
+  }
+
+  private async cmdModel(chatId: string, args: string): Promise<string> {
+    const a = args.trim()
+    const b = this.brain
+    const cur = { provider: b.provider, model: b.model }
+    const file = this.configBrain
+    if (a === '' || a === 'status') {
+      const seg = this.ledger.activeSegment(chatId)
+      const budget = seg ? this.budgetFor(seg) : null
+      return [
+        `【系统】现在用的模型：${b.provider} / ${b.model}${b.reasoningEffort ? `（思考 ${b.reasoningEffort}）` : ''}`,
+        b.provider === file.provider && b.model === file.model ? '来自配置文件。' : `这是用命令换的；配置文件里是 ${file.provider} / ${file.model}，/model default 换回去。`,
+        ...(seg?.used_tokens ? [`这段对话已用 ${seg.used_tokens} token${budget ? `，到 ${budget} 换段` : ''}。`] : []),
+        '看能换哪些：/model list；换模型：/model <模型名>。',
+      ].join('\n')
+    }
+    if (a === 'default') {
+      if (b.provider === file.provider && b.model === file.model) return `【系统】现在用的就是配置文件里的模型：${file.provider} / ${file.model}。`
+      this.setOverride(null)
+      return `【系统】已换回配置文件里的模型：${file.provider} / ${file.model}，下一条消息起生效。`
+    }
+    const choices = await this.modelChoicesNow()
+    if (choices.length === 0) return '【系统】暂时拿不到可选模型的列表，稍后再试。'
+    if (a === 'list') return formatModelList(choices, cur)
+    const r = resolveModel(a, choices)
+    if ('error' in r) return `【系统】${r.error}`
+    return this.switchTo(r.ok)
+  }
+
+  private async cmdProvider(args: string): Promise<string> {
+    const a = args.trim()
+    const choices = await this.modelChoicesNow()
+    if (choices.length === 0) return '【系统】暂时拿不到可选模型的列表，稍后再试。'
+    const cur = { provider: this.brain.provider, model: this.brain.model }
+    if (a === '') return formatProviders(choices, cur, p => this.keyStatus(p))
+    const p = providersOf(choices).find(x => x.toLowerCase() === a.toLowerCase())
+    if (!p) return `【系统】没有 ${a} 这个供应商。用 /provider 看有哪些。`
+    if (p === cur.provider) return `【系统】现在用的就是 ${p}（模型 ${cur.model}）。`
+    // 配置文件里用的就是这个供应商：换回配置文件里的模型；否则用它的第一个模型
+    const file = this.configBrain
+    const pick = choices.find(c => c.provider === p && p === file.provider && c.model === file.model) ?? choices.find(c => c.provider === p)!
+    return this.switchTo(pick)
+  }
+
+  private switchTo(c: ModelChoice): string {
+    if (c.provider === this.brain.provider && c.model === this.brain.model) return `【系统】现在用的就是 ${c.provider} / ${c.model}。`
+    const k = this.keyStatus(c.provider)
+    if (k.status === 'missing') return `【系统】${c.provider} 还没配密钥（凭据文件里填 ${k.env}），先不换。`
+    this.setOverride(c)
+    return `【系统】已换成 ${c.provider} / ${c.model}，下一条消息起生效。这个 bot 的所有聊天都换，重启后保持；/model default 换回配置文件里的。`
+  }
+
+  // ─── /model、/provider 换的模型：记在账本里，重启后保持；配置文件里的模型改了就作废（以后改的为准） ───
+
+  private withOverride(file: Brain): Brain {
+    let o: { provider: string; model: string; configKey: string } | null = null
+    try { o = JSON.parse(this.ledger.getMeta('brain_override') || 'null') } catch {}
+    if (!o) return file
+    if (o.configKey !== brainKey(file)) {
+      this.ledger.setMeta('brain_override', '')
+      this.log.info('brain.override_cleared', { reason: 'config changed' })
+      return file
+    }
+    return { ...file, provider: o.provider, model: o.model }
+  }
+
+  private setOverride(c: ModelChoice | null): void {
+    const file = this.configBrain
+    const same = !c || (c.provider === file.provider && c.model === file.model)
+    this.ledger.setMeta('brain_override', same ? '' : JSON.stringify({ provider: c!.provider, model: c!.model, configKey: brainKey(file) }))
+    this.brain = this.withOverride(file)
+    this.log.info('brain.override', { provider: this.brain.provider, model: this.brain.model, from_config: same })
+  }
+
+  private noteOptions(opts: unknown): void {
+    const c = parseModelChoices(opts)
+    if (c.length) this.modelChoices = c
+  }
+
+  /** 可选模型：用最近一次 dsh 回报的；还没有就开一个临时会话问一下（不发请求，不花钱） */
+  private async modelChoicesNow(): Promise<ModelChoice[]> {
+    if (this.modelChoices.length) return this.modelChoices
+    await this.ensureDsh()
+    const conn = this.dsh.conn
+    if (!conn) throw new AcpExited('session/new')
+    const s = await conn.request<{ sessionId: string; configOptions?: any[] }>('session/new', { cwd: this.cfg.workDir, mcpServers: [] }, 60_000)
+    void conn.request('session/close', { sessionId: s.sessionId }, 15_000).catch(() => {})
+    this.noteOptions(s.configOptions)
+    return this.modelChoices
+  }
+
+  /** 供应商的密钥配没配：只看凭据文件里有没有像样的值，绝不读出、打印值本身 */
+  private keyStatus(provider: string): { status: KeyStatus; env?: string } {
+    const route = this.brain.routes[provider]
+    if (provider !== 'deepseek-official' && !route) return { status: 'unknown' }
+    const env = route ? route.apiKeyEnv : 'DEEPSEEK_API_KEY'
+    if (!env) return { status: 'none' }
+    let refs: Record<string, unknown> = {}
+    try { refs = (Bun.YAML.parse(readFileSync(this.cfg.credentialsPath, 'utf8')) as { refs?: Record<string, unknown> })?.refs ?? {} } catch {}
+    const v = refs[env]
+    return { status: typeof v === 'string' && /^[\x21-\x7e]{8,}$/.test(v.trim()) ? 'ok' : 'missing', env }
   }
 
   // ─── 通知主人 ───
@@ -841,9 +1001,11 @@ export class Engine {
     if (!nb) { this.log.warn('config.reload_failed', { path: 'configs/<bot>.yml' }); return }
     const before = brainKey(this.brain)
     const beforeCap = this.brain.maxInputTokens ?? null
-    this.brain = nb
-    if (brainKey(nb) !== before || (nb.maxInputTokens ?? null) !== beforeCap) {
-      this.log.info('config.brain_changed', { provider: nb.provider, model: nb.model, effort: nb.reasoningEffort ?? null, max_input_tokens: nb.maxInputTokens ?? null })
+    this.configBrain = nb
+    this.brain = this.withOverride(nb)
+    const b = this.brain
+    if (brainKey(b) !== before || (b.maxInputTokens ?? null) !== beforeCap) {
+      this.log.info('config.brain_changed', { provider: b.provider, model: b.model, effort: b.reasoningEffort ?? null, max_input_tokens: b.maxInputTokens ?? null })
     }
     const fp = restartFingerprint(this.patchInput())
     if (fp !== this.fingerprint && this.dsh.running) {
