@@ -20,14 +20,37 @@ import json
 import urllib.request
 
 
-def _post(prompt: str, timeout: int, max_tokens: int) -> dict:
-    """共享底层 HTTP POST。返回响应 JSON。"""
+def _dsh_bot_credentials_key() -> str:
+    """新系统的共用密钥文件 $DSH_BOT_HOME/credentials.yaml（默认 ~/.dsh-bot）里的 DEEPSEEK_API_KEY。读不到返回空串。"""
+    import os
+    home = os.path.expanduser(os.environ.get("DSH_BOT_HOME") or "~/.dsh-bot")
+    p = os.path.join(home, "credentials.yaml")
+    try:
+        import yaml
+        with open(p, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        v = ((data.get("refs") or {}).get("DEEPSEEK_API_KEY") or "").strip()
+        return v if v.startswith("sk-") else ""
+    except Exception:
+        return ""
+
+
+def _delta_cfg() -> dict:
+    """接口配置：旧系统写在 _global.yml.jiwen.delta_llm；那里没有密钥时，用新系统的共用密钥文件。"""
     import config_loader as _cfg
     g = _cfg.load_global()
-    delta_cfg = ((g.get("jiwen") or {}).get("delta_llm") or {})
-    api_key = delta_cfg.get("api_key", "")
-    if not api_key:
-        raise RuntimeError("deepseek api_key 未配置（_global.yml.jiwen.delta_llm.api_key）")
+    delta_cfg = dict(((g.get("jiwen") or {}).get("delta_llm") or {}))
+    if not delta_cfg.get("api_key"):
+        delta_cfg["api_key"] = _dsh_bot_credentials_key()
+    if not delta_cfg.get("api_key"):
+        raise RuntimeError("deepseek api_key 未配置（_global.yml.jiwen.delta_llm.api_key 或 ~/.dsh-bot/credentials.yaml）")
+    return delta_cfg
+
+
+def _post(prompt: str, timeout: int, max_tokens: int) -> dict:
+    """共享底层 HTTP POST。返回响应 JSON。"""
+    delta_cfg = _delta_cfg()
+    api_key = delta_cfg["api_key"]
 
     body = {
         "model": delta_cfg.get("model", "deepseek-v4-flash"),
@@ -72,12 +95,8 @@ async def call_text_stream(prompt: str, timeout: int = 30, max_tokens: int = 256
     """流式输出：async generator，逐块 yield 文本增量（Anthropic SSE content_block_delta）。
     只给 voicecall 通话用（需要边生成边合成语音）；httpx lazy import，不影响同步 caller。"""
     import httpx  # lazy：只有 voicecall（voice-bridge venv 有 httpx）会调，jiwen 等不受影响
-    import config_loader as _cfg
-    g = _cfg.load_global()
-    delta_cfg = ((g.get("jiwen") or {}).get("delta_llm") or {})
-    api_key = delta_cfg.get("api_key", "")
-    if not api_key:
-        raise RuntimeError("deepseek api_key 未配置（_global.yml.jiwen.delta_llm.api_key）")
+    delta_cfg = _delta_cfg()
+    api_key = delta_cfg["api_key"]
     body = {
         "model": delta_cfg.get("model", "deepseek-v4-flash"),
         "max_tokens": max_tokens,

@@ -1,7 +1,8 @@
 """读 bot 的 MEMORY.md 给 self-initiate prompt 注入摘要。
 
-实际位置：~/.claude/projects/<slug>/memory/MEMORY.md
-（这是 Claude Code 内置 auto-memory 路径，bot 在对话中也会自己更新它）
+实际位置：
+- 新系统（dsh-bot 网关）：<频道目录>/memory/MEMORY.md（bot 用 remember 工具往里记，网关每个新会话开头带上）
+- 旧系统：~/.claude/projects/<slug>/memory/MEMORY.md（Claude Code 内置 auto-memory 路径）
 
 slug 算法只有一份：chat_history._project_slug_for（非字母数字全换 '-'，与 worker-manager.ts 同规则）。
 此前这里自带一份只换 / 和 . 的旧写法，Windows 上反斜杠与盘符冒号留下 → MEMORY.md 路径永远算错 → 摘要恒空。
@@ -17,6 +18,10 @@ except ImportError:  # 仓根不在 sys.path 上（单独当脚本跑、从别�
 
 
 def memory_path(bot_channel_path: str) -> str:
+    """新系统（dsh-bot 网关）：<频道目录>/memory/MEMORY.md；旧系统：Claude Code 的 auto-memory 路径。"""
+    from chat_history import is_dsh_bot
+    if is_dsh_bot(bot_channel_path):
+        return os.path.join(os.path.abspath(os.path.expanduser(bot_channel_path)), "memory", "MEMORY.md")
     slug = _project_slug_for(bot_channel_path)
     return os.path.expanduser(f"~/.claude/projects/{slug}/memory/MEMORY.md")
 

@@ -68,6 +68,8 @@ test('恢复：反复崩溃超过上限就进死信', () => {
 
 test('前情：对方说的 + bot 真正发出去的，按时间排，有字数上限，排除本轮的新消息', () => {
   const l = new Ledger(':memory:')
+  let clock = 1_000_000
+  l.now = () => (clock += 10)
   const a = l.insertInbound({ ukey: 'a', chatId: '1', kind: 'user', text: '早上好', ts: 1000 }).id
   const seg = l.createSegment('1', 't', false)
   const t = l.startTurn({ chatId: '1', segmentId: seg.id, kind: 'message', inboundIds: [a], attempt: 0 })

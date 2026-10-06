@@ -7,11 +7,13 @@
 //   bun gateway/scripts/setup.ts bot <bot 名> --from <旧频道目录> [--port 17950] [--model deepseek-flash]
 //       把旧 bot 目录里的人设、白名单、关系、令牌文件"复制"一份到 <根>/bots/<bot 名>/channel，
 //       并生成 <根>/configs/<bot 名>.yml。旧目录原封不动。
+//   bun gateway/scripts/setup.ts memory <bot 名> --from <旧频道目录> [--claude-home ~/.claude]
+//       再导一次旧系统的长期记忆（Claude Code 的 auto-memory）到 <频道目录>/memory/。bot 命令第一次准备时已经自动导过
 //   bun gateway/scripts/setup.ts check <配置文件>
 //       检查配置、凭据权限、令牌、人设、dsh 是否就绪（不联网，不打印任何机密）
 //
 // <根> 默认 ~/.dsh-bot，可用环境变量 DSH_BOT_HOME 改。
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { checkCredentialsFile, ConfigError, expandHome, loadBotConfig, readTelegramToken, rootDir } from '../src/config'
 import { defaultDshCommand } from '../src/dsh/process'
@@ -79,7 +81,12 @@ function bot(): number {
     if (f === '.env' && process.platform !== 'win32') chmodSync(join(ch, f), 0o600)
     ok(`已复制 ${f}`)
   }
-  if (existsSync(join(src, 'memory')) && !existsSync(join(ch, 'memory'))) { cpSync(join(src, 'memory'), join(ch, 'memory'), { recursive: true }); ok('已复制 memory/') }
+  // 长期记忆：旧系统里 bot 真正在用的是 Claude Code 的 auto-memory（~/.claude/projects/<路径转写>/memory/），
+  // 频道目录里的 memory/ 只是最初的种子。有 auto-memory 就导它，没有才用种子。
+  if (!importMemory(src, join(ch, 'memory')) && existsSync(join(src, 'memory')) && !existsSync(join(ch, 'memory'))) {
+    cpSync(join(src, 'memory'), join(ch, 'memory'), { recursive: true })
+    ok('没找到 Claude Code 的记忆目录，复制了频道目录里的 memory/')
+  }
   const cfgDir = join(root, 'configs')
   mkdirSync(cfgDir, { recursive: true })
   const cfg = join(cfgDir, `${id}.yml`)
@@ -112,6 +119,59 @@ function bot(): number {
     ok(`已生成配置：${cfg}`)
   }
   console.log(`下一步：bun gateway/scripts/setup.ts check ${cfg}`)
+  return 0
+}
+
+/** 旧频道目录 → Claude Code 的项目目录名（与旧系统 chat_history._project_slug_for 同规则：非字母数字一律换成 -） */
+export function claudeProjectSlug(dir: string): string {
+  return resolve(dir).replace(/[^a-zA-Z0-9]/g, '-')
+}
+
+/**
+ * 把 Claude Code 的 auto-memory（MEMORY.md 和主题记忆文件）复制到新系统的记忆目录。不打印任何内容，只报文件数和大小。
+ * 新目录里已经有不同内容的 MEMORY.md：先改名备份，不直接覆盖。返回是否找到了旧记忆。
+ */
+function importMemory(oldChannel: string, destDir: string): boolean {
+  const claudeHome = resolve(expandHome(opt('claude-home') ?? '~/.claude'))
+  const srcDir = join(claudeHome, 'projects', claudeProjectSlug(oldChannel), 'memory')
+  if (!existsSync(srcDir)) return false
+  const files = readdirSync(srcDir).filter(f => f.endsWith('.md') && !/\.bak$/.test(f) && f !== 'recent_conversation.md')
+  if (files.length === 0) return false
+  mkdirSync(destDir, { recursive: true })
+  let bytes = 0
+  let copied = 0
+  let backedUp = 0
+  const stamp = new Date().toISOString().slice(0, 10)
+  for (const f of files) {
+    const from = join(srcDir, f)
+    const to = join(destDir, f)
+    const data = readFileSync(from)
+    if (existsSync(to)) {
+      if (readFileSync(to).equals(data)) continue
+      renameSync(to, `${to}.before-import-${stamp}`)
+      backedUp++
+    }
+    writeFileSync(to, data)
+    copied++
+    bytes += data.length
+  }
+  if (copied === 0) ok(`Claude Code 的长期记忆（${files.length} 个文件）和新目录里的一样，没有改动`)
+  else {
+    const same = files.length - copied
+    const notes = ['旧文件不动', ...(same ? [`${same} 个和新目录里的一样，跳过`] : []), backedUp ? `新目录里原有的 ${backedUp} 个同名文件已改名备份（.before-import-${stamp}）` : '新目录里没有同名文件，不用备份']
+    ok(`已导入 Claude Code 的长期记忆：${copied} 个文件，共 ${bytes} 字节（${notes.join('；')}）`)
+  }
+  return true
+}
+
+function memory(): number {
+  const id = rest[0]
+  const from = opt('from')
+  if (!id || !from) { bad('用法：setup.ts memory <bot 名> --from <旧频道目录> [--claude-home ~/.claude]'); return 2 }
+  const cfgPath = join(root, 'configs', `${id}.yml`)
+  if (!existsSync(cfgPath)) { bad(`没有 ${cfgPath}，先跑 setup.ts bot`); return 1 }
+  const cfg = loadBotConfig(cfgPath)
+  if (!importMemory(resolve(expandHome(from)), cfg.memoryDir)) { bad('没找到这个 bot 在 Claude Code 里的记忆目录'); return 1 }
   return 0
 }
 
@@ -152,10 +212,10 @@ function check(): number {
   return problems ? 1 : 0
 }
 
-const run: Record<string, () => number | Promise<number>> = { harness, credentials, bot, check }
+const run: Record<string, () => number | Promise<number>> = { harness, credentials, bot, memory, check }
 const fn = cmd ? run[cmd] : undefined
 if (!fn) {
-  console.log('用法：bun gateway/scripts/setup.ts harness | credentials | bot <名> --from <旧频道目录> | check <配置文件>')
+  console.log('用法：bun gateway/scripts/setup.ts harness | credentials | bot <名> --from <旧频道目录> | memory <名> --from <旧频道目录> | check <配置文件>')
   process.exit(2)
 }
 process.exit(await fn())

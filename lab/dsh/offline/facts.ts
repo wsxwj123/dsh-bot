@@ -349,6 +349,38 @@ await check('C21', '出厂压缩与中文：单条消息按“4 字符 1 token�
   return ['仅记录', res.join(' ｜ ')]
 })
 
+// ── C22：改了系统提示词以后续用旧会话（M2 真机报告问题 2）──
+await check('C22', 'deepseek-flash：改了人设后续用旧会话，新的系统提示词整份追加进历史、旧的还在；新会话里只有新的', async () => {
+  const f = startFakeLlm({ port: 0 })
+  const rowsFor = (persona: string): object[] => [
+    { id: 'acp', config: { provider: 'deepseek-official', model: 'deepseek-flash' } },
+    { id: 'agent-default-model', config: { provider: 'deepseek-official', model: 'deepseek-flash' } },
+    { id: 'system-prompt', config: { includeHarnessIdentity: false, includeRuntimeContext: false, personaPrefix: persona } },
+    ...DISABLE_ROWS.map(id => ({ id, disabled: true })),
+  ]
+  const sb = sandbox(rowsFor('你是旧人设甲。'))
+  const env = dshEnv(sb, { DEEPSEEK_API_KEY: 'sk-dummy-not-real', DEEPSEEK_BASE_URL: `http://127.0.0.1:${f.port}` })
+  let c = new AcpClient(dshCmd(sb), { env, cwd: sb.work })
+  await c.initialize()
+  const s = await c.request('session/new', { cwd: sb.work, mcpServers: [] })
+  await c.prompt(s.sessionId, '改之前')
+  await c.close()
+  writeFileSync(sb.patch, JSON.stringify(rowsFor('你是新人设乙。'), null, 1))
+  c = new AcpClient(dshCmd(sb), { env, cwd: sb.work })
+  await c.initialize()
+  await c.request('session/resume', { sessionId: s.sessionId, cwd: sb.work, mcpServers: [] })
+  await c.prompt(s.sessionId, '改之后续用旧会话')
+  const resumed = JSON.stringify(f.requests.at(-1)?.body ?? {})
+  const s2 = await c.request('session/new', { cwd: sb.work, mcpServers: [] })
+  await c.prompt(s2.sessionId, '改之后的新会话')
+  const fresh = JSON.stringify(f.requests.at(-1)?.body ?? {})
+  await c.close()
+  f.stop()
+  const has = (s: string) => `旧=${s.includes('旧人设甲')} 新=${s.includes('新人设乙')}`
+  return [ok(resumed.includes('旧人设甲') && resumed.includes('新人设乙') && fresh.includes('新人设乙') && !fresh.includes('旧人设甲')),
+    `续用旧会话的请求：${has(resumed)}；新会话的请求：${has(fresh)}`]
+})
+
 fake.stop()
 report.h(2, '结果')
 report.table(['编号', '核对的事实', '结论', '实际观察'], rows)

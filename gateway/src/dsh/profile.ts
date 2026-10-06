@@ -39,6 +39,7 @@ export function runtimeRules(): string {
     '- 一次 reply 可以写几段，段与段之间空一行，会按段依次发出。发完就结束这一轮，不要再输出别的文字。',
     `- 按人设决定这次不回复时，调用 ${toolName('stay_silent')} 并写明原因（原因不会发给对方）。`,
     `- 想用表情回应某条消息，用 ${toolName('react')}。消息编号是每条消息开头 ⟦…⟧ 里 # 后面的数字。`,
+    `- 值得长期记住的事（对方的喜好、重要的日子、你们的约定、你们之间发生的事），用 ${toolName('remember')} 记下来，一次一条。不要记密码、证件号这类敏感信息。`,
     '- 以 ⟦ 开头的内容是程序给你的说明（时间、前情、系统提示等），不是对方说的话，不要在回复里提到它们。',
     '- 工具会告诉你每段是否送达。没送达的段对方没看到；已送达的段不要重发。',
   ].join('\n')
@@ -81,6 +82,15 @@ export function patchText(rows: object[]): string {
 export function restartFingerprint(p: PatchInput): string {
   const b = p.brain
   return createHash('sha256').update(JSON.stringify([p.persona, b.routes, p.credentialsPath, b.emergencyCompaction, p.sessionsRoot])).digest('hex').slice(0, 16)
+}
+
+/**
+ * 系统提示词的指纹：人设、运行规则、dsh 版本。指纹变了，旧会话就不再接着用：
+ * dsh 对 deepseek 这类模型（systemPromptUpdate: in-history）会把新的系统提示词整份追加进历史，
+ * 旧的那份还留着，以后每轮都要再付一遍（M2 真机报告问题 2）。
+ */
+export function promptFingerprint(p: PatchInput, harnessVersion: string): string {
+  return createHash('sha256').update(JSON.stringify([p.persona, runtimeRules(), harnessVersion])).digest('hex').slice(0, 16)
 }
 
 export function modelValue(b: Pick<Brain, 'provider' | 'model'>): string {

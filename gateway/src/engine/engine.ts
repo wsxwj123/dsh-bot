@@ -10,7 +10,7 @@ import { join } from 'path'
 import { loadAccess, reloadBrain, type Access, type Brain, type BotConfig } from '../config'
 import { AcpError, AcpExited, AcpTimeout, type SessionUpdate } from '../dsh/acp'
 import { buildDshEnv, defaultDshCommand, type DshProcess, type DshSpec } from '../dsh/process'
-import { buildPatchRows, modelValue, patchText, restartFingerprint, type PatchInput } from '../dsh/profile'
+import { buildPatchRows, modelValue, patchText, promptFingerprint, restartFingerprint, type PatchInput } from '../dsh/profile'
 import type { InboundRow, Ledger, SegmentRow, TurnKind } from '../ledger'
 import { safeError, type Logger } from '../log'
 import type { McpServer, ToolDef } from '../mcp/server'
@@ -18,7 +18,14 @@ import type { TelegramApi } from '../telegram/api'
 import { parseCommand } from '../telegram/inbound'
 import { describeResults, normText, planParts, type Sender } from '../telegram/sender'
 import { Backoff, randomToken, sleep } from '../util'
-import { formatInterrupted, formatMessages, formatSeed, NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY } from './format'
+import { MemoryStore } from '../memory'
+import {
+  cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
+  NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, SUMMARY_PROMPT,
+} from './format'
+
+/** 预算小的时候，新段开头的原话最多占预算的这个比例（按一个字一个 token 算，宁可少带） */
+const SEED_RECENT_RATIO = 0.1
 
 type ActiveTurn = {
   turnId: number
@@ -33,6 +40,10 @@ type ActiveTurn = {
   delivered: number
   silent: boolean
   cancelledAt: number | null
+  /** summary：换段时写摘要的一轮，所有工具都锁住 */
+  mode: 'chat' | 'summary'
+  /** 模型直接输出的文字（写摘要那一轮要用） */
+  textOut: string
 }
 
 type ChatState = { running: boolean; timer: ReturnType<typeof setTimeout> | null; active: ActiveTurn | null }
@@ -42,7 +53,9 @@ type Outcome = (
   | { type: 'cancelled' }
   | { type: 'error'; err: string; fatal: boolean }
   | { type: 'crashed'; err: string }
-) & { used?: number | null }
+) & { used?: number | null; text?: string }
+
+const LOCKED = { text: '现在是整理记忆的时间，不能调用工具，也不会发给对方。请直接输出摘要正文。', isError: true }
 
 const FATAL_RE = /MISSING_CREDENTIAL|INVALID_CREDENTIAL|QUOTA|UNKNOWN_MODEL|unauthori[sz]ed|authentication|invalid api key|insufficient|balance|\b40[123]\b/i
 
@@ -62,6 +75,8 @@ export class Engine {
   private dshNextTryAt = 0
   private dshFailures = 0
   private fingerprint = ''
+  /** 正在跑的 dsh 用的系统提示词的指纹（dsh 启动时算） */
+  private promptKey = ''
   private restartPending = false
   private stopping = false
   private noticeAt = new Map<string, number>()
@@ -73,6 +88,7 @@ export class Engine {
   private unhealthySince: number | null = null
   brain: Brain
   botUsername = ''
+  readonly memory: MemoryStore
 
   constructor(
     readonly cfg: BotConfig,
@@ -84,6 +100,7 @@ export class Engine {
     readonly mcp: McpServer,
   ) {
     this.brain = cfg.brain
+    this.memory = new MemoryStore(cfg.memoryDir)
     this.dsh.onUnexpectedExit = () => { this.loaded.clear() }
   }
 
@@ -116,6 +133,12 @@ export class Engine {
         call: (args, ctx) => engine().toolReact(args, ctx),
       },
       {
+        name: 'remember',
+        description: '把值得长期记住的事记下来（对方的喜好、重要的日子、你们的约定、你们之间发生的事）。一次一条，写清楚是什么。不要记密码、证件号这类敏感信息。',
+        inputSchema: { type: 'object', properties: { text: { type: 'string', description: '要记住的一件事，一两句话' } }, required: ['text'] },
+        call: (args, ctx) => engine().toolRemember(args, ctx),
+      },
+      {
         name: 'stay_silent',
         description: '这一轮决定不回复对方时调用，写明原因（原因不会发给对方）。',
         inputSchema: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] },
@@ -132,6 +155,7 @@ export class Engine {
   async toolReply(args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
     const at = this.activeFor(ctx.chatId, ctx.segmentId)
     if (!at) return { text: '这一轮已经结束，消息没有发出。', isError: true }
+    if (at.mode === 'summary') return LOCKED
     const text = typeof args.text === 'string' ? args.text : ''
     const files = Array.isArray(args.files) ? args.files.filter((f): f is string => typeof f === 'string') : []
     if (!text.trim() && files.length === 0) return { text: 'text 不能为空。', isError: true }
@@ -166,6 +190,7 @@ export class Engine {
   async toolReact(args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
     const at = this.activeFor(ctx.chatId, ctx.segmentId)
     if (!at) return { text: '这一轮已经结束。', isError: true }
+    if (at.mode === 'summary') return LOCKED
     const mid = Number(args.message_id)
     const emoji = typeof args.emoji === 'string' ? args.emoji.trim() : ''
     if (!Number.isInteger(mid) || mid <= 0 || !emoji) return { text: '需要 message_id 和 emoji。', isError: true }
@@ -180,9 +205,29 @@ export class Engine {
     }
   }
 
+  async toolRemember(args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
+    const at = this.activeFor(ctx.chatId, ctx.segmentId)
+    if (!at) return { text: '这一轮已经结束。', isError: true }
+    if (at.mode === 'summary') return LOCKED
+    const text = (typeof args.text === 'string' ? args.text : '').replace(/\s+/g, ' ').trim()
+    if (!text) return { text: 'text 不能为空。', isError: true }
+    if (text.length > 300) return { text: '太长了，请压缩成一两句话再记。', isError: true }
+    const date = new Intl.DateTimeFormat('sv-SE', { timeZone: this.cfg.gw.timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+    try {
+      const r = await this.memory.append(text, date)
+      if (r.added) this.ledger.addMemory(at.chatId, text)
+      this.log.info('tool.remember', { turn: at.turnId, chars: text.length, added: r.added })
+      return { text: r.added ? '记下了。' : '这件事之前已经记过了。' }
+    } catch (e) {
+      this.log.error('tool.remember_failed', { err: safeError(e) })
+      return { text: '这次没记上（写文件出错）。', isError: true }
+    }
+  }
+
   async toolSilent(args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
     const at = this.activeFor(ctx.chatId, ctx.segmentId)
     if (!at) return { text: '这一轮已经结束。', isError: true }
+    if (at.mode === 'summary') return LOCKED
     if (this.ledger.deliveredInChain(at.rootId) > 0) return { text: '这一轮你已经回复过对方了，不需要再调用 stay_silent，直接结束这一轮就好。' }
     const reason = typeof args.reason === 'string' ? args.reason : ''
     this.ledger.markSilent(at.turnId, reason || '(未写原因)')
@@ -229,6 +274,12 @@ export class Engine {
     return { persona, brain: this.brain, credentialsPath: this.cfg.credentialsPath, sessionsRoot: join(this.cfg.dshHome, 'sessions') }
   }
 
+  private harnessVersion(): string {
+    try {
+      return String(JSON.parse(readFileSync(join(this.cfg.harnessDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8')).version ?? '')
+    } catch { return '' }
+  }
+
   dshSpec(): DshSpec {
     const input = this.patchInput()
     return {
@@ -254,6 +305,7 @@ export class Engine {
         const input = this.patchInput()
         await this.dsh.start(this.dshSpec())
         this.fingerprint = restartFingerprint(input)
+        this.promptKey = promptFingerprint(input, this.harnessVersion())
         this.loaded.clear()
         this.lastProbeOkAt = Date.now()
         this.dshBackoff.reset()
@@ -334,7 +386,12 @@ export class Engine {
     } catch {
       return Math.max(1_000, this.dshNextTryAt - Date.now())
     }
-    return this.runBatch(chatId, batch)
+    // 新消息一进来就会超预算：先换段再处理
+    await this.maybeRoll(chatId, batch)
+    const delay = await this.runBatch(chatId, batch)
+    // 这一轮之后用量到线了：趁这个聊天还占着，马上换段（下一条消息就不用等摘要了）
+    if (delay === 0) await this.maybeRoll(chatId, [])
+    return delay
   }
 
   private async runBatch(chatId: string, batch: InboundRow[]): Promise<number> {
@@ -351,7 +408,11 @@ export class Engine {
     const prevTs = this.ledger.previousUserTs(chatId, batch[0]!.id)
     // 新会话的第一轮：前情（如果有）后面加一句提醒，和新消息分成两个内容块（real-03 与真机验收里新会话第一轮偶尔不用 reply）
     const head = this.ledger.segmentTurnCount(seg.id) === 0 ? [seed ? `${seed}\n${NEW_SEGMENT_HINT}` : NEW_SEGMENT_HINT] : seed ? [seed] : []
-    let blocks = [...head, formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone })]
+    // 别的聊天里新记下的长期记忆：在这一轮前面提一句
+    const news = this.ledger.memoriesFromOtherChats(chatId, seg.memory_seen)
+    if (news.length) this.ledger.setMemorySeen(seg.id, news[news.length - 1]!.id)
+    const hint = news.length ? [formatMemoryHint(news.map(n => n.text))] : []
+    let blocks = [...head, ...hint, formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone })]
     let kind: TurnKind = 'message'
     let attempt = 0
     let rootId: number | undefined
@@ -424,7 +485,7 @@ export class Engine {
   }
 
   /** 发一轮 prompt 并盯着它：卡住就取消，取消不掉就重启 dsh。 */
-  private async runPrompt(turnId: number, rootId: number, seg: SegmentRow, blocks: string[]): Promise<Outcome> {
+  private async runPrompt(turnId: number, rootId: number, seg: SegmentRow, blocks: string[], mode: ActiveTurn['mode'] = 'chat'): Promise<Outcome> {
     const conn = this.dsh.conn
     const sessionId = seg.session_id!
     if (!conn) return { type: 'crashed', err: 'dsh not running' }
@@ -432,20 +493,23 @@ export class Engine {
     const at: ActiveTurn = {
       turnId, rootId, chatId: seg.chat_id, segmentId: seg.id, sessionId,
       startedAt: Date.now(), lastProgressAt: Date.now(), toolsInFlight: 0, replyCalls: 0, delivered: 0, silent: false, cancelledAt: null,
+      mode, textOut: '',
     }
     st.active = at
     let used: number | null = null
     let size: number | null = null
     conn.onSession(sessionId, (u: SessionUpdate) => {
       at.lastProgressAt = Date.now()
+      if (u.update.sessionUpdate === 'agent_message_chunk' && u.update.content?.type === 'text') at.textOut += String(u.update.content.text ?? '')
       if (u.update.sessionUpdate === 'usage_update') {
         if (typeof u.update.used === 'number') used = u.update.used
         if (typeof u.update.size === 'number') size = u.update.size
       }
     })
     const g = this.cfg.gw
-    const typing = setInterval(() => { void this.api.sendChatAction(seg.chat_id).catch(() => {}) }, 4_500)
-    void this.api.sendChatAction(seg.chat_id).catch(() => {})
+    // 写摘要的那一轮不显示"正在输入"
+    const typing = mode === 'chat' ? setInterval(() => { void this.api.sendChatAction(seg.chat_id).catch(() => {}) }, 4_500) : undefined
+    if (mode === 'chat') void this.api.sendChatAction(seg.chat_id).catch(() => {})
     const cancelGrace = Math.max(1_000, Math.min(15_000, g.stallCancelMs / 2))
     const watchdog = setInterval(() => {
       const now = Date.now()
@@ -466,7 +530,7 @@ export class Engine {
     try {
       const res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: blocks.map(text => ({ type: 'text', text })) }, 0)
       if (at.cancelledAt !== null || res?.stopReason === 'cancelled') return { type: 'cancelled', used }
-      return { type: 'ok', stopReason: String(res?.stopReason ?? ''), used }
+      return { type: 'ok', stopReason: String(res?.stopReason ?? ''), used, text: at.textOut }
     } catch (e) {
       if (e instanceof AcpExited || !this.dsh.running) return { type: 'crashed', err: safeError(e) }
       if (at.cancelledAt !== null) return { type: 'cancelled', used }
@@ -500,10 +564,32 @@ export class Engine {
         seg = null
       }
     }
+    // 人设、运行规则或 dsh 版本变了：旧会话不再接着用，写一份交接摘要后换新会话。
+    // 接着用的话，dsh 会把新的系统提示词整份追加进历史，新旧两份都在，以后每轮都要多付一份的钱。
+    if (seg?.session_id && seg.prompt_key !== this.promptKey) {
+      this.log.info('segment.prompt_changed', { chat: chatId, segment: seg.id })
+      if (this.ledger.segmentTurnsOfKind(seg.id, 'message') === 0) {
+        this.ledger.closeSegment(seg.id, 'closed', 'prompt-changed')
+        this.loaded.delete(seg.session_id)
+        void conn.request('session/close', { sessionId: seg.session_id }, 15_000).catch(() => {})
+      } else {
+        try {
+          await this.rollSegment(chatId, seg, 'prompt-changed')
+        } catch (e) {
+          if (e instanceof AcpExited) throw e
+          this.log.error('segment.roll_failed', { chat: chatId, segment: seg.id, err: safeError(e) })
+          this.ledger.closeSegment(seg.id, 'closed', 'prompt-changed (summary failed)')
+          this.loaded.delete(seg.session_id)
+        }
+      }
+      seg = this.ledger.activeSegment(chatId)
+    }
     if (!seg || !seg.session_id) {
-      if (!seg) seg = this.ledger.createSegment(chatId, randomToken(), this.ledger.hasHistory(chatId))
+      // 上一段是崩溃作废的、还没有摘要：先用账本流水补写一份（旧会话已经用不了）
+      if (!seg) await this.summarizeAbandoned(chatId)
+      if (!seg) seg = this.ledger.createSegment(chatId, randomToken(), true)
       const s = await conn.request<{ sessionId: string; configOptions?: any[] }>('session/new', { cwd: this.cfg.workDir, mcpServers: this.mcp.serverSpec(seg.id, seg.mcp_token) }, 60_000)
-      this.ledger.setSegmentSession(seg.id, s.sessionId, '')
+      this.ledger.setSegmentSession(seg.id, s.sessionId, '', this.promptKey)
       this.loaded.set(s.sessionId, gen)
       this.log.info('segment.created', { chat: chatId, segment: seg.id, needs_seed: seg.needs_seed === 1 })
       seg = this.ledger.segment(seg.id)!
@@ -512,27 +598,50 @@ export class Engine {
     let seed: string | null = null
     if (seg.needs_seed) {
       const clearAt = Number(this.ledger.getMeta(`clear_at:${chatId}`) ?? 0)
-      const entries = this.ledger.recentTranscript(chatId, { maxChars: this.cfg.gw.seedRecentChars, sinceMs: clearAt, excludeInboundIds: batchIds })
+      const recentCap = this.seedRecentChars(chatId)
+      const entries = this.ledger.recentTranscript(chatId, { maxChars: recentCap, sinceMs: clearAt, excludeInboundIds: batchIds })
       const intr = this.ledger.interruptedReply(chatId)
-      const parts = [formatSeed(entries, { timeZone: this.cfg.gw.timezone }), intr ? formatInterrupted(intr.sent, intr.total) : null].filter((x): x is string => !!x)
-      seed = parts.length ? parts.join('\n') : null
-      this.log.info('segment.seed', { chat: chatId, segment: seg.id, entries: entries.length, interrupted: intr !== null })
+      const mem = this.memory.readForSeed(this.cfg.gw.memoryMaxChars)
+      const summary = this.ledger.latestSummary(chatId)
+      seed = formatSeedParts({ memory: mem.text, summary: summary?.summary ?? null, entries, interrupted: intr }, { timeZone: this.cfg.gw.timezone })
+      this.log.info('segment.seed', {
+        chat: chatId, segment: seg.id, entries: entries.length, recent_cap: recentCap, interrupted: intr !== null,
+        memory_chars: mem.text.length, memory_truncated: mem.truncated, summary_from_segment: summary?.segmentId ?? null, chars: seed?.length ?? 0,
+      })
     }
     return { seg: this.ledger.segment(seg.id)!, seed }
   }
 
-  /** 按配置给会话设模型和思考强度。失败不挡聊天，记一条错误并通知主人。 */
-  private async applyBrain(seg: SegmentRow): Promise<void> {
+  /**
+   * 新段开头带多少字原话：配置的上限；预算小的时候再收紧到预算的一成。
+   * 不收紧的话，预算 3 万时一整段的原话都会原样带进新会话，摘要等于白写，新会话一开头就占掉一大半预算（M2 真机报告问题 4）。
+   */
+  private seedRecentChars(chatId: string): number {
+    const prev = this.ledger.lastClosedSegment(chatId)
+    const budget = prev ? this.budgetFor(prev) : this.brain.maxInputTokens ?? null
+    const n = this.cfg.gw.seedRecentChars
+    return budget ? Math.min(n, Math.floor(budget * SEED_RECENT_RATIO)) : n
+  }
+
+  /** 给一个会话设模型和思考强度。返回是否成功。 */
+  private async setSessionBrain(sessionId: string): Promise<void> {
     const conn = this.dsh.conn
-    if (!conn || !seg.session_id) return
+    if (!conn) throw new AcpExited('session/set_config_option')
+    const b = this.brain
+    const r = await conn.request<{ configOptions?: any[] }>('session/set_config_option', { sessionId, configId: 'model', value: modelValue(b) }, 30_000)
+    if (b.reasoningEffort) {
+      const opt = (r?.configOptions ?? []).find((o: any) => o?.id === 'reasoning_effort')
+      if (opt) await conn.request('session/set_config_option', { sessionId, configId: 'reasoning_effort', value: b.reasoningEffort }, 30_000)
+      else this.log.info('brain.effort_unsupported', { model: b.model })
+    }
+  }
+
+  /** 按配置给段设模型和思考强度。失败不挡聊天，记一条错误并通知主人。 */
+  private async applyBrain(seg: SegmentRow): Promise<void> {
+    if (!seg.session_id) return
     const b = this.brain
     try {
-      const r = await conn.request<{ configOptions?: any[] }>('session/set_config_option', { sessionId: seg.session_id, configId: 'model', value: modelValue(b) }, 30_000)
-      if (b.reasoningEffort) {
-        const opt = (r?.configOptions ?? []).find((o: any) => o?.id === 'reasoning_effort')
-        if (opt) await conn.request('session/set_config_option', { sessionId: seg.session_id, configId: 'reasoning_effort', value: b.reasoningEffort }, 30_000)
-        else this.log.info('brain.effort_unsupported', { model: b.model })
-      }
+      await this.setSessionBrain(seg.session_id)
       this.ledger.setSegmentModel(seg.id, brainKey(b))
       this.log.info('brain.applied', { segment: seg.id, provider: b.provider, model: b.model, effort: b.reasoningEffort ?? null })
     } catch (e) {
@@ -540,6 +649,140 @@ export class Engine {
       this.log.error('brain.apply_failed', { segment: seg.id, err: safeError(e) })
       void this.notifyOwner('brain', `换模型没成功（${b.provider} / ${b.model}）：${safeError(e).slice(0, 120)}。先继续用原来的模型。`)
       this.ledger.setSegmentModel(seg.id, brainKey(b)) // 不在每轮反复重试
+    }
+  }
+
+  // ─── 换段 ───
+
+  /** 这一段的预算：配置了硬上限就用它（不超过窗口的比例），否则用 dsh 回报的窗口 × 比例。都不知道就不换段。 */
+  budgetFor(seg: SegmentRow): number | null {
+    const byWindow = seg.window ? Math.floor(seg.window * this.cfg.gw.rollRatio) : null
+    const cap = this.brain.maxInputTokens ?? null
+    if (cap !== null && byWindow !== null) return Math.min(cap, byWindow)
+    return cap ?? byWindow
+  }
+
+  /** 用量到线（或者新消息一进来就会超）就换段。incoming 是马上要送进去的新消息。 */
+  private async maybeRoll(chatId: string, incoming: InboundRow[]): Promise<void> {
+    const seg = this.ledger.activeSegment(chatId)
+    if (!seg?.session_id || !seg.used_tokens) return
+    const budget = this.budgetFor(seg)
+    if (budget === null) return
+    // 一段里至少聊过两轮才换：否则预算比"新段开头"本身还小时，会每一轮都换段、每一轮都写摘要
+    if (this.ledger.segmentTurnsOfKind(seg.id, 'message') < 2) {
+      if (seg.used_tokens >= budget) this.log.warn('segment.budget_too_small', { chat: chatId, segment: seg.id, used: seg.used_tokens, budget })
+      return
+    }
+    // 估新消息的大小：按字数算（中文一个字大约一个 token 以内，英文更少），宁可估多
+    const est = incoming.reduce((n, r) => n + r.text.length + 40, 0)
+    if (seg.used_tokens + est < budget) return
+    try {
+      await this.rollSegment(chatId, seg, incoming.length ? 'pre-budget' : 'budget')
+    } catch (e) {
+      // 写摘要出了意外也要换段，不然会一直超预算
+      this.log.error('segment.roll_failed', { chat: chatId, segment: seg.id, err: safeError(e) })
+      this.ledger.closeSegment(seg.id, 'closed', 'budget (summary failed)')
+      if (seg.session_id) this.loaded.delete(seg.session_id)
+    }
+  }
+
+  /**
+   * 换段：先在旧会话里写交接摘要（这一轮工具全锁），写不成就用账本流水单独写一份；
+   * 摘要不像样或为空就不存（新段开头沿用上一份）。然后关掉旧会话，下一轮开新会话。
+   */
+  async rollSegment(chatId: string, seg: SegmentRow, reason: string): Promise<void> {
+    this.log.info('segment.roll_start', { chat: chatId, segment: seg.id, reason, used: seg.used_tokens, budget: this.budgetFor(seg) })
+    let summary: string | null = null
+    let how = 'none'
+    if (seg.session_id && this.dsh.running && this.loaded.get(seg.session_id) === this.dsh.generation) {
+      const r = await this.summarizeInSession(chatId, seg)
+      if (r === 'crashed') return // 段已作废，下一轮开新段时用账本补写摘要
+      if (r) { summary = r; how = 'in-session' }
+    }
+    if (!summary) {
+      summary = await this.summarizeFromLedger(chatId, seg).catch(e => { this.log.warn('summary.ledger_failed', { err: safeError(e) }); return null })
+      if (summary) how = 'ledger'
+    }
+    if (summary) this.ledger.setSegmentSummary(seg.id, summary)
+    this.ledger.closeSegment(seg.id, 'closed', reason)
+    if (seg.session_id) {
+      this.loaded.delete(seg.session_id)
+      void this.dsh.conn?.request('session/close', { sessionId: seg.session_id }, 15_000).catch(() => {})
+    }
+    this.ledger.event(chatId, 'segment_rolled', { segment: seg.id, reason, summary: how, summary_chars: summary?.length ?? 0, used: seg.used_tokens })
+    this.log.info('segment.rolled', { chat: chatId, segment: seg.id, reason, summary: how, summary_chars: summary?.length ?? 0 })
+  }
+
+  /** 在旧会话里写摘要。返回摘要；不像样返回 null；dsh 中途死了返回 'crashed'。 */
+  private async summarizeInSession(chatId: string, seg: SegmentRow): Promise<string | null | 'crashed'> {
+    const turn = this.ledger.startTurn({ chatId, segmentId: seg.id, kind: 'summary', inboundIds: [], attempt: 0 })
+    const outcome = await this.runPrompt(turn.id, turn.id, seg, [SUMMARY_PROMPT], 'summary')
+    if (outcome.type === 'crashed') {
+      this.ledger.finishTurn(turn.id, 'crashed', { error: outcome.err })
+      this.ledger.closeSegment(seg.id, 'abandoned', 'crash during summary')
+      if (seg.session_id) this.loaded.delete(seg.session_id)
+      return 'crashed'
+    }
+    if (outcome.type !== 'ok') {
+      this.ledger.finishTurn(turn.id, outcome.type === 'cancelled' ? 'cancelled' : 'error', { error: outcome.type === 'error' ? outcome.err : undefined, usedTokens: outcome.used })
+      this.log.warn('summary.in_session_failed', { segment: seg.id, outcome: outcome.type })
+      return null
+    }
+    this.ledger.finishTurn(turn.id, 'ok', { stopReason: outcome.stopReason, usedTokens: outcome.used })
+    const s = cleanSummary(outcome.text)
+    if (!s) this.log.warn('summary.rejected', { segment: seg.id, chars: outcome.text?.length ?? 0 })
+    return s
+  }
+
+  /** 旧会话用不了：把这一段的账本流水（加上更早的摘要）交给一个不带工具的临时会话写摘要。 */
+  private async summarizeFromLedger(chatId: string, seg: SegmentRow): Promise<string | null> {
+    let entries = this.ledger.segmentTranscript(seg.id)
+    if (entries.length === 0) return null
+    // 太长就只取后面的部分
+    let total = entries.reduce((n, e) => n + e.text.length, 0)
+    while (total > this.cfg.gw.summarySourceMaxChars && entries.length > 1) { total -= entries[0]!.text.length; entries = entries.slice(1) }
+    const prev = this.ledger.latestSummary(chatId)
+    const prompt = formatLedgerSummaryPrompt(prev?.summary ?? null, entries, { timeZone: this.cfg.gw.timezone })
+    const text = await this.oneShot(prompt)
+    const s = cleanSummary(text)
+    this.ledger.event(chatId, 'summary_from_ledger', { segment: seg.id, entries: entries.length, ok: s !== null })
+    if (!s) this.log.warn('summary.rejected', { segment: seg.id, chars: text.length, from: 'ledger' })
+    return s
+  }
+
+  /** 新开段之前：上一段是作废的（崩溃、续接失败）且没有摘要，就用账本补写一份。每段只试一次。 */
+  private async summarizeAbandoned(chatId: string): Promise<void> {
+    const prev = this.ledger.lastClosedSegment(chatId)
+    if (!prev || prev.state !== 'abandoned' || prev.summary) return
+    const key = `ledger_summary_tried:${prev.id}`
+    if (this.ledger.getMeta(key)) return
+    this.ledger.setMeta(key, '1')
+    try {
+      const s = await this.summarizeFromLedger(chatId, prev)
+      if (s) this.ledger.setSegmentSummary(prev.id, s)
+    } catch (e) {
+      if (e instanceof AcpExited) throw e
+      this.log.warn('summary.ledger_failed', { segment: prev.id, err: safeError(e) })
+    }
+  }
+
+  /** 在一个不挂任何工具的临时会话里跑一次请求，返回模型直接输出的文字，用完就关。 */
+  private async oneShot(prompt: string): Promise<string> {
+    await this.ensureDsh()
+    const conn = this.dsh.conn
+    if (!conn) throw new AcpExited('session/new')
+    const s = await conn.request<{ sessionId: string }>('session/new', { cwd: this.cfg.workDir, mcpServers: [] }, 60_000)
+    let text = ''
+    conn.onSession(s.sessionId, u => {
+      if (u.update.sessionUpdate === 'agent_message_chunk' && u.update.content?.type === 'text') text += String(u.update.content.text ?? '')
+    })
+    try {
+      await this.setSessionBrain(s.sessionId).catch(e => { if (e instanceof AcpExited) throw e })
+      await conn.request('session/prompt', { sessionId: s.sessionId, prompt: [{ type: 'text', text: prompt }] }, this.cfg.gw.summaryTimeoutMs)
+      return text
+    } finally {
+      conn.onSession(s.sessionId, null)
+      void conn.request('session/close', { sessionId: s.sessionId }, 15_000).catch(() => {})
     }
   }
 
@@ -555,13 +798,23 @@ export class Engine {
     if (!cmd || cmd.name !== 'clear') { this.ledger.settleInbound([row.id], 'dropped', 'command ignored'); return }
     if (!targetOk) { this.ledger.settleInbound([row.id], 'dropped', 'command addressed to another bot'); this.log.info('command.wrong_target', { chat: row.chat_id }); return }
     if (!this.isOwner(row.sender_id)) { this.ledger.settleInbound([row.id], 'dropped', 'not owner'); this.log.warn('command.not_owner', { chat: row.chat_id }); return }
+    // 清空 = 这一段收尾写一份摘要（写不出来或为空就沿用上一份，不覆盖）+ 下一条消息开新段、不再带清空前的原话
     const seg = this.ledger.activeSegment(row.chat_id)
-    if (seg) { this.ledger.closeSegment(seg.id, 'closed', 'clear'); this.loaded.delete(seg.session_id ?? '') }
+    if (seg) {
+      try {
+        await this.ensureDsh().catch(() => {})
+        await this.rollSegment(row.chat_id, seg, 'clear')
+      } catch (e) {
+        this.log.warn('command.clear_summary_failed', { err: safeError(e) })
+        this.ledger.closeSegment(seg.id, 'closed', 'clear')
+        if (seg.session_id) this.loaded.delete(seg.session_id)
+      }
+    }
     this.ledger.setMeta(`clear_at:${row.chat_id}`, String(Date.now()))
     this.ledger.event(row.chat_id, 'clear', { segment: seg?.id ?? null })
     this.ledger.settleInbound([row.id], 'done', 'clear')
     this.log.info('command.clear', { chat: row.chat_id, segment: seg?.id ?? null })
-    await this.sender.send({ chatId: row.chat_id, turnId: null, callSeq: 0, text: '【系统】已清空这段对话的上下文，下一条消息从头开始。', kind: 'system' }).catch(() => {})
+    await this.sender.send({ chatId: row.chat_id, turnId: null, callSeq: 0, text: '【系统】已清空这段对话的上下文（聊过的要点留了一份摘要），下一条消息从新会话开始。', kind: 'system' }).catch(() => {})
   }
 
   // ─── 通知主人 ───
@@ -587,8 +840,11 @@ export class Engine {
     const nb = reloadBrain(this.cfg.configPath)
     if (!nb) { this.log.warn('config.reload_failed', { path: 'configs/<bot>.yml' }); return }
     const before = brainKey(this.brain)
+    const beforeCap = this.brain.maxInputTokens ?? null
     this.brain = nb
-    if (brainKey(nb) !== before) this.log.info('config.brain_changed', { provider: nb.provider, model: nb.model, effort: nb.reasoningEffort ?? null })
+    if (brainKey(nb) !== before || (nb.maxInputTokens ?? null) !== beforeCap) {
+      this.log.info('config.brain_changed', { provider: nb.provider, model: nb.model, effort: nb.reasoningEffort ?? null, max_input_tokens: nb.maxInputTokens ?? null })
+    }
     const fp = restartFingerprint(this.patchInput())
     if (fp !== this.fingerprint && this.dsh.running) {
       this.log.info('config.restart_needed', { reason: 'persona or routes changed' })

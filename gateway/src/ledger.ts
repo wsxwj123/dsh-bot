@@ -1,12 +1,12 @@
 // 送达账本：唯一的真相来源。收到的每条消息、送进模型的每一轮、发给用户的每一段，都先记账再动作。
 // 用 bun 自带的 sqlite，不引入第三方依赖。Python 周边脚本只读这个文件。
 import { Database } from 'bun:sqlite'
-import { mkdirSync } from 'fs'
-import { dirname } from 'path'
+import { mkdirSync, readFileSync } from 'fs'
+import { dirname, join } from 'path'
 
 export type InboundKind = 'user' | 'synthetic' | 'command'
 export type InboundState = 'pending' | 'in_turn' | 'done' | 'dropped' | 'dead'
-export type TurnKind = 'message' | 'retry' | 'nudge'
+export type TurnKind = 'message' | 'retry' | 'nudge' | 'summary'
 export type TurnState = 'preparing' | 'sent' | 'ok' | 'error' | 'cancelled' | 'crashed' | 'aborted'
 export type SegmentState = 'active' | 'closed' | 'abandoned'
 export type OutboundState = 'pending' | 'sent' | 'failed' | 'ambiguous'
@@ -45,6 +45,9 @@ export type SegmentRow = {
   needs_seed: number
   summary: string | null
   close_reason: string | null
+  memory_seen: number
+  /** 开这个会话时系统提示词（人设 + 运行规则 + dsh 版本）的指纹 */
+  prompt_key: string | null
 }
 
 export type TurnRow = {
@@ -86,91 +89,10 @@ export type OutboundRow = {
 
 export type TranscriptEntry = { who: 'user' | 'bot'; ts: number; text: string; senderName?: string | null }
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
-CREATE TABLE IF NOT EXISTS inbound (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ukey TEXT NOT NULL UNIQUE,
-  chat_id TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  tg_message_id INTEGER,
-  sender_id TEXT,
-  sender_name TEXT,
-  text TEXT NOT NULL,
-  meta TEXT,
-  ts INTEGER NOT NULL,
-  received_at INTEGER NOT NULL,
-  state TEXT NOT NULL DEFAULT 'pending',
-  turn_id INTEGER,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  note TEXT
-);
-CREATE INDEX IF NOT EXISTS inbound_chat_state ON inbound(chat_id, state, id);
-CREATE TABLE IF NOT EXISTS segments (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  chat_id TEXT NOT NULL,
-  session_id TEXT,
-  mcp_token TEXT NOT NULL,
-  state TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  closed_at INTEGER,
-  last_used_at INTEGER,
-  used_tokens INTEGER,
-  window INTEGER,
-  model TEXT,
-  needs_seed INTEGER NOT NULL DEFAULT 0,
-  summary TEXT,
-  close_reason TEXT
-);
-CREATE INDEX IF NOT EXISTS segments_chat ON segments(chat_id, state);
-CREATE TABLE IF NOT EXISTS turns (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  root_id INTEGER NOT NULL,
-  chat_id TEXT NOT NULL,
-  segment_id INTEGER NOT NULL,
-  kind TEXT NOT NULL,
-  attempt INTEGER NOT NULL DEFAULT 0,
-  state TEXT NOT NULL,
-  inbound_ids TEXT NOT NULL,
-  started_at INTEGER NOT NULL,
-  sent_at INTEGER,
-  ended_at INTEGER,
-  stop_reason TEXT,
-  error TEXT,
-  silent INTEGER NOT NULL DEFAULT 0,
-  silent_reason TEXT,
-  used_tokens INTEGER
-);
-CREATE INDEX IF NOT EXISTS turns_state ON turns(state);
-CREATE TABLE IF NOT EXISTS outbound (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  okey TEXT UNIQUE,
-  chat_id TEXT NOT NULL,
-  turn_id INTEGER,
-  part INTEGER NOT NULL DEFAULT 0,
-  kind TEXT NOT NULL,
-  text TEXT,
-  file TEXT,
-  reply_to INTEGER,
-  of_parts INTEGER,
-  state TEXT NOT NULL,
-  tg_message_id INTEGER,
-  error TEXT,
-  created_at INTEGER NOT NULL,
-  sent_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS outbound_turn ON outbound(turn_id);
-CREATE INDEX IF NOT EXISTS outbound_chat ON outbound(chat_id, id);
-CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  at INTEGER NOT NULL,
-  chat_id TEXT,
-  kind TEXT NOT NULL,
-  data TEXT
-);
-`
+/** 表结构放在单独的 .sql 文件里，Python 周边的测试也读同一份 */
+const SCHEMA = readFileSync(join(import.meta.dir, 'ledger-schema.sql'), 'utf8')
 
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 3
 
 export type NewInbound = {
   ukey: string
@@ -200,7 +122,6 @@ export class Ledger {
     this.db.exec('PRAGMA busy_timeout = 5000')
     this.db.exec(SCHEMA)
     this.migrate()
-    if (!this.getMeta('schema_version')) this.setMeta('schema_version', String(SCHEMA_VERSION))
   }
 
   close(): void { this.db.close() }
@@ -209,6 +130,10 @@ export class Ledger {
   private migrate(): void {
     const cols = new Set(this.db.query<{ name: string }, []>('PRAGMA table_info(outbound)').all().map(c => c.name))
     if (!cols.has('of_parts')) this.db.exec('ALTER TABLE outbound ADD COLUMN of_parts INTEGER')
+    const segCols = new Set(this.db.query<{ name: string }, []>('PRAGMA table_info(segments)').all().map(c => c.name))
+    if (!segCols.has('memory_seen')) this.db.exec('ALTER TABLE segments ADD COLUMN memory_seen INTEGER NOT NULL DEFAULT 0')
+    if (!segCols.has('prompt_key')) this.db.exec('ALTER TABLE segments ADD COLUMN prompt_key TEXT')
+    this.setMeta('schema_version', String(SCHEMA_VERSION))
   }
 
   tx<T>(fn: () => T): T { return this.db.transaction(fn)() }
@@ -290,12 +215,12 @@ export class Ledger {
   createSegment(chatId: string, mcpToken: string, needsSeed: boolean): SegmentRow {
     return this.tx(() => {
       this.db.query(`UPDATE segments SET state = 'closed', closed_at = ?, close_reason = COALESCE(close_reason, 'superseded') WHERE chat_id = ? AND state = 'active'`).run(this.now(), chatId)
-      const r = this.db.query(`INSERT INTO segments (chat_id, mcp_token, state, created_at, needs_seed) VALUES (?, ?, 'active', ?, ?)`).run(chatId, mcpToken, this.now(), needsSeed ? 1 : 0)
+      const r = this.db.query(`INSERT INTO segments (chat_id, mcp_token, state, created_at, needs_seed, memory_seen) VALUES (?, ?, 'active', ?, ?, ?)`).run(chatId, mcpToken, this.now(), needsSeed ? 1 : 0, this.maxMemoryId())
       return this.segment(Number(r.lastInsertRowid))!
     })
   }
-  setSegmentSession(id: number, sessionId: string, model: string): void {
-    this.db.query('UPDATE segments SET session_id = ?, model = ? WHERE id = ?').run(sessionId, model, id)
+  setSegmentSession(id: number, sessionId: string, model: string, promptKey: string | null = null): void {
+    this.db.query('UPDATE segments SET session_id = ?, model = ?, prompt_key = ? WHERE id = ?').run(sessionId, model, promptKey, id)
   }
   setSegmentModel(id: number, model: string): void {
     this.db.query('UPDATE segments SET model = ? WHERE id = ?').run(model, id)
@@ -309,6 +234,57 @@ export class Ledger {
   closeSegment(id: number, state: Exclude<SegmentState, 'active'>, reason: string): void {
     this.db.query(`UPDATE segments SET state = ?, closed_at = ?, close_reason = ? WHERE id = ? AND state = 'active'`).run(state, this.now(), reason, id)
   }
+  setSegmentSummary(id: number, summary: string): void {
+    this.db.query('UPDATE segments SET summary = ? WHERE id = ?').run(summary, id)
+  }
+  /** 这个聊天最近一份有效的摘要（摘要为空的段不算，所以空摘要不会覆盖上一份） */
+  latestSummary(chatId: string): { segmentId: number; summary: string } | null {
+    const r = this.db.query<{ id: number; summary: string }, [string]>(
+      `SELECT id, summary FROM segments WHERE chat_id = ? AND summary IS NOT NULL AND summary != '' ORDER BY id DESC LIMIT 1`).get(chatId)
+    return r ? { segmentId: r.id, summary: r.summary } : null
+  }
+  /** 这个聊天最近一个已经结束的段 */
+  lastClosedSegment(chatId: string): SegmentRow | null {
+    return this.db.query<SegmentRow, [string]>(`SELECT * FROM segments WHERE chat_id = ? AND state != 'active' ORDER BY id DESC LIMIT 1`).get(chatId)
+  }
+  /** 一个段里的完整流水：对方说的（已处理完的真实用户消息）和 bot 真正发出去的，按时间排 */
+  segmentTranscript(segmentId: number): TranscriptEntry[] {
+    const turns = this.db.query<{ id: number; inbound_ids: string }, [number]>('SELECT id, inbound_ids FROM turns WHERE segment_id = ? ORDER BY id').all(segmentId)
+    const ids = new Set<number>()
+    for (const t of turns) for (const i of JSON.parse(t.inbound_ids) as number[]) ids.add(i)
+    const out: TranscriptEntry[] = []
+    for (const id of ids) {
+      const r = this.inbound(id)
+      // 只算处理完的：崩溃后放回队列的消息马上会作为新消息再送一次，不能也写进摘要
+      if (r && r.kind === 'user' && (r.state === 'done' || r.state === 'dead')) out.push({ who: 'user', ts: r.received_at, text: r.text, senderName: r.sender_name })
+    }
+    for (const t of turns) {
+      for (const o of this.outboundForTurn(t.id)) {
+        if (o.kind === 'text' && o.text && (o.state === 'sent' || o.state === 'ambiguous')) out.push({ who: 'bot', ts: o.sent_at ?? o.created_at, text: o.text })
+      }
+    }
+    return out.sort((a, b) => a.ts - b.ts)
+  }
+  segmentTurnsOfKind(segmentId: number, kind: TurnKind): number {
+    return this.db.query<{ n: number }, [number, string]>('SELECT COUNT(*) AS n FROM turns WHERE segment_id = ? AND kind = ?').get(segmentId, kind)?.n ?? 0
+  }
+
+  // ─── 长期记忆的事件（MEMORY.md 本身是文件，这里只记"哪个聊天什么时候记了什么"，用来提醒其它会话） ───
+  addMemory(chatId: string | null, text: string): number {
+    return Number(this.db.query('INSERT INTO memories (at, chat_id, text) VALUES (?, ?, ?)').run(this.now(), chatId, text).lastInsertRowid)
+  }
+  maxMemoryId(): number {
+    return this.db.query<{ m: number | null }, []>('SELECT MAX(id) AS m FROM memories').get()?.m ?? 0
+  }
+  /** 别的聊天在 afterId 之后新记下的 */
+  memoriesFromOtherChats(chatId: string, afterId: number): { id: number; text: string }[] {
+    return this.db.query<{ id: number; text: string }, [number, string]>(
+      `SELECT id, text FROM memories WHERE id > ? AND (chat_id IS NULL OR chat_id != ?) ORDER BY id`).all(afterId, chatId)
+  }
+  setMemorySeen(segmentId: number, id: number): void {
+    this.db.query('UPDATE segments SET memory_seen = ? WHERE id = ? AND memory_seen < ?').run(id, segmentId, id)
+  }
+
   segmentsByToken(token: string): SegmentRow | null {
     return this.db.query<SegmentRow, [string]>('SELECT * FROM segments WHERE mcp_token = ?').get(token)
   }
@@ -460,8 +436,9 @@ export class Ledger {
   recentTranscript(chatId: string, o: { maxChars: number; sinceMs?: number; excludeInboundIds?: number[] }): TranscriptEntry[] {
     const since = o.sinceMs ?? 0
     const exclude = new Set(o.excludeInboundIds ?? [])
+    // 排序一律用本机时钟（收到 / 发出的毫秒时间）：Telegram 给的消息时间只到秒，同一秒里的一问一答会排乱
     const users = this.db.query<{ id: number; ts: number; text: string; sender_name: string | null }, [string, number]>(
-      `SELECT id, ts, text, sender_name FROM inbound WHERE chat_id = ? AND kind = 'user' AND state IN ('done', 'dead') AND received_at > ? ORDER BY id DESC LIMIT 400`).all(chatId, since)
+      `SELECT id, received_at AS ts, text, sender_name FROM inbound WHERE chat_id = ? AND kind = 'user' AND state IN ('done', 'dead') AND received_at > ? ORDER BY id DESC LIMIT 400`).all(chatId, since)
     const bots = this.db.query<{ ts: number; text: string }, [string, number]>(
       `SELECT COALESCE(sent_at, created_at) AS ts, text FROM outbound WHERE chat_id = ? AND kind = 'text' AND state IN ('sent', 'ambiguous') AND turn_id IS NOT NULL AND created_at > ? ORDER BY id DESC LIMIT 400`).all(chatId, since)
     const all: TranscriptEntry[] = [

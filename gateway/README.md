@@ -1,14 +1,15 @@
 # gateway：每个 bot 一个网关进程
 
 取代旧的 `dispatcher/`（调度器 + worker 管理器）。大脑换成 DeepSeek Harness（dsh），通过 ACP 协议驱动。
-设计见 `docs/dsh-migration/PLAN.md`，这一期的说明和真机清单见 `docs/dsh-migration/M1.md`。
+设计见 `docs/dsh-migration/PLAN.md`，各期的说明和真机清单见 `docs/dsh-migration/M1.md`、`M2.md`。
 
 ## 运行
 
 ```bash
 bun gateway/scripts/setup.ts harness                       # 装钉死版本的 dsh
 bun gateway/scripts/setup.ts credentials                   # 生成密钥文件模板，然后自己填
-bun gateway/scripts/setup.ts bot <名> --from <旧频道目录>   # 复制人设等文件，生成配置
+bun gateway/scripts/setup.ts bot <名> --from <旧频道目录>   # 复制人设等文件、导入旧长期记忆，生成配置
+bun gateway/scripts/setup.ts memory <名> --from <旧频道目录> # 再导一次旧系统的长期记忆（Claude Code 的 auto-memory）
 bun gateway/scripts/setup.ts check ~/.dsh-bot/configs/<名>.yml
 bun gateway/src/main.ts --config ~/.dsh-bot/configs/<名>.yml
 ```
@@ -31,7 +32,9 @@ DSH_BOT_HARNESS=../harness bun test --timeout 90000 test/e2e/real-dsh.test.ts
 src/
   main.ts            入口：加载配置、单实例锁、拉起各部分、优雅退出
   config.ts          configs/<bot>.yml（brain、gateway 两段）、access.json、令牌、凭据文件检查
-  ledger.ts          送达账本（sqlite）：收到 / 开轮 / 发送，启动时的恢复规则
+  ledger.ts          送达账本（sqlite）：收到 / 开轮 / 发送，启动时的恢复规则；段、摘要、记忆事件
+  ledger-schema.sql  账本表结构（Python 周边的测试也用这一份）
+  memory.ts          长期记忆：<频道目录>/memory/MEMORY.md，remember 工具往"随手记"里追加
   log.ts             落盘、按大小轮转、写盘前脱敏
   util.ts            小工具；测试用的崩溃点（DSH_BOT_CRASH_AT）
   telegram/
@@ -46,8 +49,8 @@ src/
     profile.ts       "只留人设"补丁层、运行规则
   mcp/server.ts      给 dsh 的工具服务（每个会话一个地址和口令）
   engine/
-    engine.ts        回合调度、出错补救、崩溃恢复、换模型、/clear、健康
-    format.ts        每轮送给模型的格式、前情
+    engine.ts        回合调度、出错补救、崩溃恢复、换段与交接摘要、换模型、/clear、健康
+    format.ts        每轮送给模型的格式、新段开头（长期记忆 + 摘要 + 最近原话）、摘要指令
   api/server.ts      本机接口（口令、只听 127.0.0.1、拒绝 Origin、只收 JSON）
 scripts/             setup / health / report
 test/                unit/、e2e/、fakes/
