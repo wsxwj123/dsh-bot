@@ -1,0 +1,114 @@
+// 真 dsh + 假模型：在真实 harness 上核对补丁层、隐私字段、工具挂载、按会话换模型。
+// 需要一份装好的 dsh：设置 DSH_BOT_HARNESS=<目录>（目录下有 node_modules/@deepseek-ai/dsh），没有就跳过。
+import { afterAll, beforeAll, expect, test } from 'bun:test'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'fs'
+import { join, resolve } from 'path'
+import { isAlive } from '../../src/dsh/process'
+import { startFakeLlm, type FakeLlm } from '../../../lab/dsh/lib/fake-llm'
+import { FakeTelegram } from '../fakes/fake-telegram'
+import { cleanup, Gateway, makeBot, OWNER, sleep, until, writeConfig, type BotEnv } from '../harness'
+
+const harness = process.env.DSH_BOT_HARNESS ? resolve(process.env.DSH_BOT_HARNESS) : ''
+const available = !!harness && existsSync(join(harness, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
+
+let tg: FakeTelegram
+let llm: FakeLlm
+let b: BotEnv
+let gw: Gateway
+
+beforeAll(async () => {
+  if (!available) return
+  tg = new FakeTelegram()
+  llm = startFakeLlm({
+    port: 0,
+    script: [
+      { match: 'realA', tool: { name: 'mcp__tg__reply', arguments: { text: '真的收到了\n\n第二段' } } },
+      { match: '已送达', text: '' },
+      // 换模型后 dsh 会在用户消息后面插一条英文说明 "[model changed: …]"，所以最后一条用户消息是它
+      { match: 'model changed', tool: { name: 'mcp__tg__reply', arguments: { text: '换了模型' } } },
+      { match: '已送达', text: '' },
+    ],
+  })
+  b = makeBot(tg, {
+    gw: { dsh_command: undefined, burst_window_ms: 0 },
+    brain: {
+      provider: 'fake', model: 'fake-chat',
+      routes: { fake: { api: 'openai-completions', baseURL: `http://127.0.0.1:${llm.port}/v1`, apiKeyEnv: 'FAKE_LLM_KEY', retryPolicy: { mode: 'normal', maxRetries: 0 }, models: [{ id: 'fake-chat', contextWindow: 1000000 }, { id: 'fake-chat-2', contextWindow: 500000 }] } },
+    },
+  })
+  delete (b.gw as Record<string, unknown>).dsh_command
+  writeConfig(b)
+  const cred = join(b.root, 'credentials.yaml')
+  writeFileSync(cred, 'version: 1\nrefs:\n  FAKE_LLM_KEY: fake-key-for-tests\n')
+  chmodSync(cred, 0o600)
+  gw = new Gateway(b)
+  await gw.start({ DSH_BOT_HARNESS: harness })
+}, 60_000)
+
+afterAll(async () => {
+  if (!available) return
+  await gw.stop()
+  llm.stop()
+  tg.stop()
+  cleanup(b)
+})
+
+test.skipIf(!available)('真 dsh：只留人设、只有我们的 3 个工具、不带隐私字段，回复能发出去', async () => {
+  tg.pushText(OWNER, '你好 realA')
+  await until(() => tg.sentTo(OWNER).some(s => s.text === '第二段'), 'reply via real dsh', 60_000)
+  // 工具结果回到模型那里（逐段送达情况），这一轮才算结束
+  await until(() => llm.requests.find(r => JSON.stringify(r.body.messages).includes('已送达 2/2 段')), 'tool result reached the model', 30_000)
+  await until(() => { const l = gw.ledger(); const ok = l.activeSegment(String(OWNER))?.used_tokens; l.close(); return ok }, 'turn finished', 30_000)
+  expect(tg.sentTo(OWNER).map(s => s.text)).toEqual(['真的收到了', '第二段'])
+  const first = llm.requests.find(r => JSON.stringify(r.body.messages).includes('realA'))!
+  const body = first.body
+  const system = body.messages.find((m: any) => m.role === 'system')
+  const systemText = typeof system.content === 'string' ? system.content : system.content.map((c: any) => c.text).join('')
+  expect(systemText.startsWith('# 测试人设')).toBe(true)
+  expect(systemText).toContain('{⁠{user}}')
+  expect(systemText).toContain('运行规则')
+  expect(systemText).not.toContain('MCP resource')
+  expect(body.tools.map((t: any) => t.function.name).sort()).toEqual(['mcp__tg__react', 'mcp__tg__reply', 'mcp__tg__stay_silent'])
+  const raw = JSON.stringify(body)
+  expect(raw).not.toContain('dsh_session_log')
+  expect(raw).not.toContain('dsh_plugin_packages')
+  const led = gw.ledger()
+  const seg = led.activeSegment(String(OWNER))!
+  expect(seg.window).toBe(1000000)
+  expect(seg.used_tokens).toBeGreaterThan(0)
+  led.close()
+})
+
+test.skipIf(!available)('真 dsh：dsh 进程环境里没有 Telegram 令牌', async () => {
+  if (process.platform !== 'linux') return
+  const pid = JSON.parse(readFileSync(join(b.botDir, 'state', 'dsh.pid'), 'utf8')).pid
+  const env = readFileSync(`/proc/${pid}/environ`, 'utf8')
+  expect(env).not.toContain(tg.token)
+  expect(env).not.toContain('TELEGRAM')
+  expect(env).not.toContain('fake-key-for-tests')
+})
+
+test.skipIf(!available)('真 dsh：改配置换模型，下一轮请求就用新模型，进程不重启', async () => {
+  const pid = JSON.parse(readFileSync(join(b.botDir, 'state', 'dsh.pid'), 'utf8')).pid
+  b.brain = { ...b.brain, model: 'fake-chat-2' }
+  writeConfig(b)
+  await sleep(500)
+  tg.pushText(OWNER, 'realB')
+  await until(() => tg.sentTo(OWNER).some(s => s.text === '换了模型'), 'reply after switch', 60_000)
+  const req = llm.requests.find(r => JSON.stringify(r.body.messages).includes('realB'))!
+  expect(req.body.model).toBe('fake-chat-2')
+  expect(JSON.stringify(req.body.messages)).toContain('[model changed:')
+  expect(JSON.parse(readFileSync(join(b.botDir, 'state', 'dsh.pid'), 'utf8')).pid).toBe(pid)
+})
+
+test.skipIf(!available)('真 dsh：网关被强杀后，旧 dsh 不会一直留着（自己退出，或者网关重启时被清理）', async () => {
+  const pid = JSON.parse(readFileSync(join(b.botDir, 'state', 'dsh.pid'), 'utf8')).pid
+  expect(isAlive(pid)).toBe(true)
+  // 空闲的 dsh 标准输入一关就退出；正在处理一轮的，会先把这一轮做完（期间调我们的工具都会失败，发不出任何消息）。
+  // Windows 上子进程不会因为父进程退出而结束。所以统一用"重启网关后旧进程一定不在了"来验收。
+  await gw.kill()
+  await gw.start({ DSH_BOT_HARNESS: harness })
+  await until(() => !isAlive(pid), 'old dsh is gone after the gateway restarts', 20_000)
+  tg.pushText(OWNER, 'realC')
+  await until(() => llm.requests.some(r => JSON.stringify(r.body.messages).includes('realC')), 'new dsh works', 60_000)
+})

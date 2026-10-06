@@ -1,0 +1,8 @@
+{
+  "name": "dsh-bot-harness",
+  "private": true,
+  "description": "钉死版本的 DeepSeek Harness（dsh），由 install 脚本装到 ~/.dsh-bot/harness/",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.0-rc.2"
+  }
+}

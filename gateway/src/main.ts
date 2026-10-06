@@ -1,0 +1,132 @@
+// 网关入口：bun src/main.ts --config configs/<bot>.yml
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'fs'
+import { join } from 'path'
+import { ApiServer } from './api/server'
+import { checkCredentialsFile, ConfigError, loadAccess, loadBotConfig, readTelegramToken, type BotConfig } from './config'
+import { DshProcess, isAlive, processCommandLine } from './dsh/process'
+import { Engine } from './engine/engine'
+import { Ledger } from './ledger'
+import { Logger, registerSecret, safeError } from './log'
+import { McpServer } from './mcp/server'
+import { TelegramApi } from './telegram/api'
+import { Poller } from './telegram/poller'
+import { Sender } from './telegram/sender'
+import { ensureSecretFile, sleep, writeAtomic } from './util'
+
+function arg(name: string): string | undefined {
+  const i = process.argv.indexOf(`--${name}`)
+  return i >= 0 ? process.argv[i + 1] : undefined
+}
+
+/** 同一个 bot 只允许一个网关在跑。锁文件里记 pid 和命令行特征，确认是我们的进程才算数。 */
+async function takeGatewayLock(cfg: BotConfig): Promise<() => void> {
+  const lock = join(cfg.stateDir, 'gateway.lock')
+  if (existsSync(lock)) {
+    try {
+      const rec = JSON.parse(readFileSync(lock, 'utf8')) as { pid?: number; configArg?: string }
+      const pid = Number(rec.pid)
+      if (pid > 0 && pid !== process.pid && isAlive(pid)) {
+        // 锁里记的是那个进程自己收到的 --config 参数原文，所以它的命令行里一定有这一串
+        const cmd = await processCommandLine(pid)
+        if (cmd && rec.configArg && cmd.includes('main.ts') && cmd.includes(rec.configArg)) throw new ConfigError(`这个 bot 的网关已经在运行（pid ${pid}）`)
+      }
+    } catch (e) {
+      if (e instanceof ConfigError) throw e
+    }
+  }
+  writeAtomic(lock, JSON.stringify({ pid: process.pid, startedAt: Date.now(), config: cfg.configPath, configArg: arg('config') }))
+  return () => { try { rmSync(lock, { force: true }) } catch {} }
+}
+
+async function main(): Promise<void> {
+  const configPath = arg('config')
+  if (!configPath) { process.stderr.write('用法：bun src/main.ts --config configs/<bot>.yml\n'); process.exit(2) }
+  const cfg = loadBotConfig(configPath)
+  // bot 目录里有私密对话（账本、日志、dsh 会话），只给本用户读写
+  mkdirSync(cfg.botDir, { recursive: true, mode: 0o700 })
+  if (process.platform !== 'win32') chmodSync(cfg.botDir, 0o700)
+  for (const d of [cfg.stateDir, cfg.dshHome, cfg.workDir, cfg.homeDir, cfg.logsDir, cfg.mediaDir]) mkdirSync(d, { recursive: true, mode: 0o700 })
+  const log = new Logger({ dir: cfg.logsDir, level: cfg.gw.logLevel, console: process.env.DSH_BOT_LOG_CONSOLE === '1', maxBytes: cfg.gw.logMaxBytes, keep: cfg.gw.logKeep, bot: cfg.id })
+
+  const token = readTelegramToken(cfg.channelDir)
+  registerSecret(token)
+  const apiToken = ensureSecretFile(join(cfg.stateDir, 'api.key'))
+  registerSecret(apiToken)
+  if (!cfg.gw.dshCommand) {
+    const credErr = checkCredentialsFile(cfg.credentialsPath)
+    if (credErr) throw new ConfigError(credErr)
+  }
+  if (!existsSync(join(cfg.channelDir, 'CLAUDE.md'))) throw new ConfigError(`人设文件不存在：${join(cfg.channelDir, 'CLAUDE.md')}`)
+  if (cfg.gw.owners.length === 0) log.warn('config.no_owner', { hint: 'access.json allowFrom is empty and gateway.owners not set; /clear and notices are disabled' })
+
+  const releaseLock = await takeGatewayLock(cfg)
+  const ledger = new Ledger(join(cfg.stateDir, 'ledger.sqlite'))
+  const api = new TelegramApi(token, cfg.gw.telegramApi)
+  const allowDirs = () => [cfg.mediaDir]
+  const sender = new Sender(api, ledger, log, { allowDirs, maxSendWaitMs: cfg.gw.maxSendWaitMs, access: () => loadAccess(cfg.channelDir) })
+  const dsh = new DshProcess(log)
+  let engine: Engine | null = null
+  const mcp = new McpServer(Engine.tools(() => engine!), segId => {
+    const s = ledger.segment(segId)
+    return s ? { chatId: s.chat_id, token: s.mcp_token } : null
+  }, log)
+  mcp.start()
+  engine = new Engine(cfg, ledger, log, api, sender, dsh, mcp)
+
+  let me: { id: number; username?: string } | null = null
+  for (let i = 0; !me; i++) {
+    try { me = await api.getMe() } catch (e) {
+      log.warn('telegram.get_me_failed', { err: safeError(e) })
+      if (i >= 5) throw new ConfigError('连不上 Telegram（getMe 一直失败），检查网络或令牌')
+      await sleep(2_000 * (i + 1))
+    }
+  }
+  engine.botUsername = me.username ?? ''
+  log.info('gateway.starting', { bot: cfg.id, telegram_bot: me.username ?? null, pid: process.pid })
+
+  const poller = new Poller(api, ledger, log, {
+    channelDir: cfg.channelDir, botId: me.id, pollTimeoutS: cfg.gw.pollTimeoutS,
+    onInbound: chatId => engine!.onInbound(chatId),
+    onFatal: why => { log.error('gateway.fatal', { why }); void shutdown(1) },
+  })
+  engine.healthSource = () => ({ pollLastOkAt: poller.health.lastOkAt, pollConflict: poller.health.conflict, pollError: poller.health.lastError })
+  const apiServer = new ApiServer({
+    token: apiToken, port: cfg.apiPort, ledger, log, sender, channelDir: cfg.channelDir, allowDirs,
+    health: () => engine!.health(engine!.healthSource!()),
+    onInbound: chatId => engine!.onInbound(chatId),
+  })
+  apiServer.start()
+  engine.start()
+  poller.start()
+
+  const heartbeatFile = join(cfg.stateDir, 'heartbeat')
+  const beat = () => writeAtomic(heartbeatFile, JSON.stringify({ at: Date.now(), pid: process.pid }))
+  beat()
+  const hb = setInterval(beat, cfg.gw.heartbeatMs)
+
+  let shuttingDown = false
+  async function shutdown(code: number): Promise<void> {
+    if (shuttingDown) return
+    shuttingDown = true
+    log.info('gateway.stopping')
+    clearInterval(hb)
+    await poller.stop()
+    await engine!.stop()
+    await apiServer.stop()
+    await mcp.stop()
+    ledger.close()
+    releaseLock()
+    log.info('gateway.stopped')
+    process.exit(code)
+  }
+  process.on('SIGINT', () => void shutdown(0))
+  process.on('SIGTERM', () => void shutdown(0))
+  log.info('gateway.ready', { api_port: apiServer.port, mcp_port: mcp.port })
+  if (process.env.DSH_BOT_READY_FILE) writeAtomic(process.env.DSH_BOT_READY_FILE, JSON.stringify({ api_port: apiServer.port, pid: process.pid }))
+}
+
+main().catch(e => {
+  const msg = e instanceof ConfigError ? e.message : safeError(e)
+  process.stderr.write(`dsh-bot 网关启动失败：${msg}\n`)
+  process.exit(1)
+})
