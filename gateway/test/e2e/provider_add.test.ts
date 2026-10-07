@@ -4,7 +4,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { chmodSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { FakeTelegram } from '../fakes/fake-telegram'
-import { cleanup, Gateway, makeBot, OWNER, FRIEND, until, writeConfig, type BotEnv } from '../harness'
+import { cleanup, Gateway, GATEWAY_DIR, makeBot, OWNER, FRIEND, until, writeConfig, type BotEnv } from '../harness'
 
 const KEY = 'sk-TESTONLY-provider-secret-0123456789'
 const OPENAI_KEY = 'sk-TESTONLY-openai-secret-9876543210'
@@ -121,6 +121,14 @@ test('/provider add：删掉原消息、密钥只进凭据文件、拉到模型�
   expect(readFileSync(join(b.root, 'providers.json'), 'utf8')).not.toContain(KEY)
   expect(tg.sent.some(s => (s.text ?? '').includes(KEY))).toBe(false)
   expect(existsSync(join(b.botDir, 'logs', 'chat.log')) ? readFileSync(join(b.botDir, 'logs', 'chat.log'), 'utf8') : '').not.toContain('/provider add')
+  // 本机用的自查工具也查得出来（真机验收靠它，不用打开凭据文件）：Telegram 令牌、DeepSeek 密钥、新供应商的密钥
+  const rep = Bun.spawnSync(['bun', join(GATEWAY_DIR, 'scripts', 'report.ts'), '--config', b.configPath, '--hours', '1'], { env: { ...process.env, DSH_BOT_HOME: b.root } })
+  const out = rep.stdout.toString()
+  expect(out).toContain('3 个机密值：没有发现')
+  // 反过来：真有泄漏时它能发现
+  writeFileSync(join(b.botDir, 'logs', 'leak.log'), `oops ${KEY}\n`)
+  const rep2 = Bun.spawnSync(['bun', join(GATEWAY_DIR, 'scripts', 'report.ts'), '--config', b.configPath, '--hours', '1'], { env: { ...process.env, DSH_BOT_HOME: b.root } })
+  expect(rep2.stdout.toString()).toContain('发现 1 处')
 })
 
 test('/provider add … openai：模型列表没拉到也照样建好，说明原因；/provider refresh 和管理台接口能再拉', async () => {

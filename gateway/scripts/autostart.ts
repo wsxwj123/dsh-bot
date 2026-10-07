@@ -2,8 +2,9 @@
 //   bun gateway/scripts/autostart.ts install <配置文件>              这个 bot 的网关开机自启
 //   bun gateway/scripts/autostart.ts install-director --chat <群 id>  导演开机自启
 //   bun gateway/scripts/autostart.ts install-jobs <配置文件>         这个 bot 的主动消息（每 10 分钟看一次要不要开口）
-//   bun gateway/scripts/autostart.ts install-shared [--botlife-db <朋友圈库>]
+//   bun gateway/scripts/autostart.ts install-shared [--botlife-db <朋友圈库>] [--only jiwen,memory-compactor] [--web-port N] [--call-port N]
 //                                                                    全部 bot 切完以后：情绪、记忆整理、朋友圈网页、电话
+//                                                                    （切换期间可以先 --only jiwen,memory-compactor：只管新系统的 bot）
 //   bun gateway/scripts/autostart.ts uninstall <bot 名 | director>   停掉并取消开机自启
 //   bun gateway/scripts/autostart.ts status                          列出新系统的开机自启项、状态、定时任务上次的退出码
 // 仓库和 ~/.dsh-bot 都不能放在桌面、文稿、下载、iCloud 云盘下（macOS 的隐私保护会拦住 launchd 拉起的程序），安装时会检查
@@ -87,9 +88,20 @@ function main(): number {
     const py = Bun.which('python3')
     if (!py) { console.log('没找到 python3'); return 1 }
     const db = opt('botlife-db')
-    const extraEnv = db ? { BOTLIFE_STATE_DB: resolve(db.replace(/^~/, HOME)) } : undefined
+    // --only：只装其中几项。切换期间情绪、记忆整理可以先装（只管新系统的 bot，和旧系统的同名任务互不干扰）
+    const only = opt('only')?.split(',').map(x => x.trim()).filter(Boolean)
+    const unknown = (only ?? []).filter(n => !SHARED.some(j => j.name === n))
+    if (unknown.length) { console.log(`不认识：${unknown.join('、')}。能装的有：${SHARED.map(j => j.name).join('、')}`); return 2 }
+    // --web-port、--call-port：和旧系统的朋友圈网页（8765）、电话（8766）同时跑时换个端口
+    const ports: Record<string, Record<string, string>> = {
+      'moments-web': opt('web-port') ? { MOMENTS_WEB_PORT: opt('web-port')! } : {},
+      voicecall: opt('call-port') ? { VOICECALL_PORT: opt('call-port')! } : {},
+    }
     let bad = 0
-    for (const j of SHARED) bad += install(pythonAgent({ name: j.name, python: py, repo: REPO, script: j.script, root: rootDir(), env: env(), extraEnv, interval: j.interval, calendar: j.calendar }))
+    for (const j of SHARED.filter(x => !only || only.includes(x.name))) {
+      const extraEnv = { ...(db ? { BOTLIFE_STATE_DB: resolve(db.replace(/^~/, HOME)) } : {}), ...ports[j.name] }
+      bad += install(pythonAgent({ name: j.name, python: py, repo: REPO, script: j.script, root: rootDir(), env: env(), extraEnv, interval: j.interval, calendar: j.calendar }))
+    }
     return bad ? 1 : 0
   }
   if (cmd === 'uninstall') {
@@ -117,7 +129,7 @@ function main(): number {
     if (bad) console.log(`\n${bad} 项有问题，见上面标 ⚠️ 的行。`)
     return bad ? 1 : 0
   }
-  console.log('用法：bun gateway/scripts/autostart.ts install <配置文件> | install-director --chat <群 id> | install-jobs <配置文件> | install-shared [--botlife-db <路径>] | uninstall <名字> | status')
+  console.log('用法：bun gateway/scripts/autostart.ts install <配置文件> | install-director --chat <群 id> | install-jobs <配置文件> | install-shared [--botlife-db <路径>] [--only 名字,名字] [--web-port N] [--call-port N] | uninstall <名字> | status')
   return 2
 }
 

@@ -40,9 +40,31 @@
 
 Telegram 会把旧程序还没确认的消息投给新网关，账本负责去重，不会重复回复。
 
-## 二、全部 bot 切完以后
+## 二、共用服务
 
-旧系统还有几个所有 bot 共用的服务和定时任务。全部 bot 都切完以后，换成新仓库里的同一批脚本：
+旧系统还有几个所有 bot 共用的服务和定时任务：情绪（关系数值）、每周记忆整理、朋友圈网页、电话。
+
+### 切换期间就能先装的：情绪、记忆整理
+
+这两项按新系统的配置目录（`~/.dsh-bot/configs`）找 bot，只管新系统的 bot，状态写在新 bot 自己的目录里，和旧系统的同名任务互不干扰（旧的照旧管旧 bot）。切了一个 bot 以后就可以装：
+
+```bash
+bun gateway/scripts/autostart.ts install-shared --only jiwen,memory-compactor
+```
+
+- 不用停旧的情绪、记忆整理任务。
+- 新仓库的 `configs/` 里没有 `_global.yml` 时，情绪按默认速率算。想沿用旧系统调过的速率，把旧仓库的 `configs/_global.yml` 复制一份过来；里面 `jiwen.bots` 列的旧名字会被忽略。
+- 以后全部切完、按下面的步骤再装一次 `install-shared`，会覆盖这两项，不冲突。
+
+朋友圈网页和电话**不建议**提前装。网页和电话都是"谁收到请求谁去通知 bot"：
+- 你在旧网页（8765）上评论 bot5 的圈，旧网页不认识新系统的 bot5，通知不到；
+- 反过来，新网页不认识旧 bot。
+
+要提前用，只能让新网页、新电话换个端口（`--web-port 8767 --call-port 8768`），只给新系统的 bot 用：评论新 bot 的圈去 8767，评论旧 bot 的圈还在 8765，容易弄混。电话还要改 Tailscale 的转发和登录设置。最省事的是把剩下的 bot 也切过来。
+
+### 全部 bot 切完以后
+
+全部 bot 都切完以后，换成新仓库里的同一批脚本：
 
 1. 停掉旧的：`launchctl bootout gui/$UID/<旧任务名>`。旧任务名见 `docs/dsh-migration/local/INVENTORY.md` 的"launchd 任务"一节，要停的是朋友圈网页、记忆整理、电话三个。plist 文件留着，回滚要用。
 2. 把旧仓库的 `configs/_global.yml` 复制一份到新仓库的 `configs/`。这个文件在 `.gitignore` 里，不会被提交。
@@ -63,7 +85,7 @@ Telegram 会把旧程序还没确认的消息投给新网关，账本负责去�
 旧数据切换时没动过，旧 bot 直接接着用。新系统运行期间的聊天不在旧会话里；需要的话可以从账本里读出来（`chat_history.py` 能读账本）。
 
 **回滚共用服务：**
-1. `uninstall` 掉 `jiwen`、`memory-compactor`、`moments-web`、`voicecall`；
+1. `uninstall` 掉 `jiwen`、`memory-compactor`、`moments-web`、`voicecall`（只提前装了情绪、记忆整理的，卸这两项就行，旧的一直在跑）；
 2. 再 `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/<旧任务名>.plist`。
 
 ## 四、故障排查
@@ -78,6 +100,7 @@ Telegram 会把旧程序还没确认的消息投给新网关，账本负责去�
 | 开机后没起来 | `autostart.ts status`；`~/.dsh-bot/bots/<名>/logs/launchd.log` | 找不到 bun 或 python：在能运行它们的终端里重新 `install`。连不上 Telegram：在设了代理的终端里重新 `install` |
 | 定时任务的"上次退出码"不是 0 | `~/.dsh-bot/logs/<任务名>.log` 和 `<任务名>.launchd.log` | launchd.log 里有 `Operation not permitted`：仓库在桌面、文稿、下载下，挪到家目录下重装（见第一节"前提"） |
 | 回复很慢 | `logs.ts` 里 `turn.end` 前后的时间；`send.photo_shrunk`、`tool.reply_slow` | 发图慢看代理；模型慢可以用 `/model` 换 |
+| `/provider add` 回复"模型列表没拉到" | 回复里写的原因 | 密钥不对（401/403）：重新 add 一次；404 或"不是 JSON"：地址不对，OpenAI 兼容的地址一般以 `/v1` 结尾，Anthropic 的写到 `/v1` 之前；对方确实没有模型列表的，这个供应商用不了（dsh 要求至少一个模型） |
 | 语音转不成文字 | `media.transcribe_failed` 后面的状态码 | 401：voice-bridge 设了口令，凭据文件里要加 `VOICE_BRIDGE_TOKEN`；403：目录不在它的白名单里（网关会自动换目录再试一次） |
 | 群里没人说话 | 导演日志 `~/.dsh-bot/director/director.log`；网关日志里的 `inbound.dropped` | 导演开关文件在不在；`access.json` 的 `groups` 里有没有这个群；bot 的隐私模式关了没有 |
 | 朋友圈通知没到新 bot | 网页是哪个仓库起的 | 要用新仓库起的网页（全部切完以后用 `install-shared`）；`state/api.key`、`state/api.port` 要在 |

@@ -462,10 +462,14 @@ def main():
         sys.exit(2)
 
     # 默认：新系统的 bot；没有就扫旧系统 channels 下所有带 access.json 的目录。也可用 --bot 指定单个
+    # 配置目录里有新系统的 bot 时只跑它们，不看 _global.yml 的 jiwen.bots：那里是旧名字，
+    # 切换期间旧 bot 由旧系统自己的积温任务管，两边同时跑也不会重复更新同一个 bot
     if args.bot:
         bots = [args.bot]
+    elif dsh_bots:
+        bots = dsh_bots
     else:
-        bots = jiwen_cfg.get("bots") or dsh_bots
+        bots = jiwen_cfg.get("bots") or []
         if not bots:
             _chdir = os.path.expanduser("~/.claude/channels")
             if os.path.isdir(_chdir):

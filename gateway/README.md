@@ -1,7 +1,7 @@
 # gateway：每个 bot 一个网关进程
 
 取代旧的 `dispatcher/`（调度器 + worker 管理器）。大脑换成 DeepSeek Harness（dsh），通过 ACP 协议驱动。
-设计见 `docs/dsh-migration/PLAN.md`，各期的说明和真机清单见 `docs/dsh-migration/M1.md`、`M2.md`、`M3.md`、`M4.md`、`M5.md`、`M6.md`；切换手册见 `CUTOVER.md`。
+设计见 `docs/dsh-migration/PLAN.md`，各期的说明和真机清单见 `docs/dsh-migration/M1.md`、`M2.md`、`M3.md`、`M4.md`、`M5.md`、`M6.md`；切换手册见 `CUTOVER.md`；新建供应商见 `PROVIDER.md`。
 
 ## 运行
 
@@ -26,6 +26,8 @@ bun gateway/src/main.ts --config ~/.dsh-bot/configs/<名>.yml
 | `/model default` | 换回配置文件里的模型 |
 | `/provider`（`/providers`） | 列出供应商和密钥配没配（只说配没配，不显示密钥） |
 | `/provider <供应商>` | 换到这个供应商的第一个模型；缺密钥时不换 |
+| `/provider add <名字> <接口地址> <密钥> [openai]` | 新建供应商，所有 bot 共用。末尾写 `openai` 是 OpenAI 兼容接口，不写按 Anthropic 接口。只在私聊里发；这条消息不进账本和日志，收到就删掉。见 `docs/dsh-migration/PROVIDER.md` |
+| `/provider refresh <名字>`、`/provider remove <名字>` | 重新拉模型列表；删掉用 add 建的供应商和它的密钥 |
 | `/compact [要特别留意的事]` | 现在就换段：在旧会话里写摘要（可带重点），新会话带着摘要和最近的原话 |
 | `/clear` | 清空：写摘要后换新会话，不带清空前的原话 |
 | `/help`（`/commands`） | 命令说明 |

@@ -160,11 +160,16 @@ def test_情绪_新系统的bot不用全局配置也能跑_关系数值写在自
     db.execute("INSERT INTO inbound (ukey, chat_id, kind, text, ts, received_at, state) VALUES ('j1', '1', 'user', '今天考试过了', ?, ?, 'done')", (t * 1000, t * 1000))
     db.commit()
     tick = _load("jiwen_tick_main", ROOT / "jiwen" / "tick.py")
-    monkeypatch.setattr(tick.config_loader, "load_global", lambda: {})
+    # 切换期间和旧系统的积温任务同时跑：_global.yml 里列的旧 bot 不碰（它们归旧系统管）
+    monkeypatch.setattr(tick.config_loader, "load_global", lambda: {"jiwen": {"enabled": True, "bots": ["oldbot1", "oldbot2"]}})
     calls = []
     monkeypatch.setattr(tick.deepseek_delta, "compute_delta", lambda **k: calls.append(k) or {"connection": 0.1, "valence": 0.3, "arousal": 0.1})
+    ticked = []
+    real_tick = tick.tick_one_bot
+    monkeypatch.setattr(tick, "tick_one_bot", lambda bot_id, *a, **k: ticked.append(bot_id) or real_tick(bot_id, *a, **k))
     monkeypatch.setattr(sys, "argv", ["tick.py"])
     tick.main()
+    assert ticked == ["bot5"]
     assert len(calls) == 1
     rel = json.loads((root / "channel" / "relationship.json").read_text(encoding="utf-8"))
     assert "updated_ts" in rel and "prompt_snippet" in rel

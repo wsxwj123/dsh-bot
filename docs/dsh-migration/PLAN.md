@@ -732,4 +732,5 @@ M1 私聊收发 → M2 记忆 → M3 承诺与主动消息 → M4 语音、生�
 - M4 的说明、验收结果和真机清单见 `docs/dsh-migration/M4.md`。
 - M5 的说明、验收结果和真机清单见 `docs/dsh-migration/M5.md`。
 - M6 的说明和真机清单见 `docs/dsh-migration/M6.md`；切换、回滚、故障排查、dsh 升级见 `docs/dsh-migration/CUTOVER.md`。
+- 新建供应商的斜杠命令 `/provider add` 见 `docs/dsh-migration/PROVIDER.md`。
 - 真机验收用 bot5。验收前需要你先停掉 bot5 的旧程序：同一个令牌，同一时刻只能有一个程序在收消息。
