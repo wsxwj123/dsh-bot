@@ -59,6 +59,20 @@ def model_set(channel_dir: str, spec: str) -> tuple[bool, dict]:
     return code == 200 and bool(r.get("ok")), r
 
 
+def providers_list(channel_dir: str) -> list:
+    """用 /provider add 建的供应商（几个 bot 共用一份；名字、协议、模型数、上次拉列表的结果，不含密钥）"""
+    code, r = _call(channel_dir, "GET", "/v1/providers")
+    if code != 200:
+        raise RuntimeError(r.get("error") or f"HTTP {code}")
+    return r.get("providers") or []
+
+
+def provider_refresh(channel_dir: str, name: str) -> tuple[bool, dict]:
+    """重新拉这个供应商的模型列表（网关从凭据文件里取密钥）"""
+    code, r = _call(channel_dir, "POST", "/v1/providers/refresh", {"name": name}, timeout=70)
+    return code == 200 and bool(r.get("ok")), r
+
+
 def inject(channel_dir: str, chat_id: str, text: str, source: str, key: str,
            port: int | None = None, bot_lines: list[str] | None = None, timeout: float = 10) -> bool:
     """写一条系统消息进网关的账本，模型在下一轮处理。key 相同的只算一次。

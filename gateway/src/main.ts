@@ -100,6 +100,7 @@ async function main(): Promise<void> {
     channelDir: cfg.channelDir, botId: me.id, pollTimeoutS: cfg.gw.pollTimeoutS,
     onInbound: chatId => engine!.onInbound(chatId),
     onFatal: why => { log.error('gateway.fatal', { why }); void shutdown(1) },
+    onSecretCommand: msg => { void engine!.secretCommand(msg).catch(e => log.warn('provider.add_failed', { err: safeError(e) })) },
     onHumanMessage: (msg, observed) => {
       if (observed) { transcript.observe(msg); return }
       // 私聊"刚聊过"标记：导演不点正在私聊的 bot 去群里说话（格式同旧系统：整数秒）
@@ -117,6 +118,7 @@ async function main(): Promise<void> {
     onInbound: chatId => engine!.onInbound(chatId),
     callPromises: (chatId, lines) => engine!.commitments.fromCall(chatId, lines),
     model: { info: () => engine!.modelInfo(), set: spec => engine!.modelSet(spec) },
+    providers: { list: () => engine!.providersInfo(), refresh: name => engine!.providerRefresh(name) },
   })
   apiServer.start()
   engine.start()

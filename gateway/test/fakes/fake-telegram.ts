@@ -32,6 +32,7 @@ export class FakeTelegram {
   sent: Sent[] = []
   calls: { method: string; at: number; params: Record<string, any> }[] = []
   reactions: { chatId: string; messageId: number; emoji: string | null }[] = []
+  deleted: { chatId: string; messageId: number }[] = []
   faults: Fault[] = []
   private updates: Update[] = []
   private nextUpdate = 1
@@ -131,6 +132,9 @@ export class FakeTelegram {
         this.reactions.push({ chatId: String(params.chat_id), messageId: Number(params.message_id), emoji: r })
         return ok(true)
       }
+      case 'deleteMessage':
+        this.deleted.push({ chatId: String(params.chat_id), messageId: Number(params.message_id) })
+        return ok(true)
       case 'getFile': return ok({ file_id: params.file_id, file_path: String(params.file_id).startsWith('voice') ? 'voice/file_1.oga' : 'photos/file_2.jpg' })
       case 'sendMessage':
       case 'sendPhoto':

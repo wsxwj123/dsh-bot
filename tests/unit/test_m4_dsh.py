@@ -43,6 +43,8 @@ class _FakeGateway(BaseHTTPRequestHandler):
         if not self._authed():
             return
         type(self).calls.append(("GET", self.path, None))
+        if self.path == "/v1/providers":
+            return self._reply(200, {"providers": [{"name": "myproxy", "displayName": "MyProxy", "api": "anthropic-messages", "models": 2, "fetchedAt": 1, "fetchError": None}]})
         self._reply(200, {"current": type(self).model, "config": {"provider": "deepseek-official", "model": "deepseek-flash"},
                           "choices": [{"provider": "deepseek-official", "model": "deepseek-flash"},
                                       {"provider": "deepseek-official", "model": "deepseek-v4-pro"}]})
@@ -54,6 +56,9 @@ class _FakeGateway(BaseHTTPRequestHandler):
         type(self).calls.append(("POST", self.path, body))
         if self.path == "/v1/inject":
             return self._reply(200, {"ok": True, "id": 1, "duplicate": False})
+        if self.path == "/v1/providers/refresh":
+            ok = body.get("name") == "myproxy"
+            return self._reply(200 if ok else 400, {"ok": ok, "text": "【系统】「MyProxy」拉到 2 个模型。" if ok else "【系统】没有用 /provider add 建过", "models": 2 if ok else 0})
         spec = body.get("spec")
         if spec == "deepseek-official/deepseek-v4-pro":
             type(self).model = {"provider": "deepseek-official", "model": "deepseek-v4-pro"}
@@ -155,3 +160,18 @@ def test_新系统的bot用旧名字也能找到配置(tmp_path, monkeypatch):
     assert config_loader.load_bot("bot5")["bot_channel_path"] == "/new/channel"
     with pytest.raises(FileNotFoundError):
         config_loader.load_bot("nobody")
+
+
+def test_管理台列出用provider_add建的供应商并能刷新模型列表(gateway):
+    from moments.hub_routes import hub_bp
+    app = Flask(__name__, template_folder=str(ROOT / "moments" / "templates"))
+    app.register_blueprint(hub_bp)
+    c = app.test_client()
+    assert "用 /provider add 建的供应商" in c.get("/hub/dsh-model").get_data(as_text=True)
+    ps = c.get("/hub/api/dsh-providers").get_json()["providers"]
+    assert ps == [{"name": "myproxy", "displayName": "MyProxy", "api": "anthropic-messages", "models": 2, "fetchedAt": 1, "fetchError": None}]
+    r = c.post("/hub/api/dsh-providers/myproxy/refresh")
+    assert r.status_code == 200 and r.get_json()["text"] == "「MyProxy」拉到 2 个模型。"
+    assert _FakeGateway.calls[-1] == ("POST", "/v1/providers/refresh", {"name": "myproxy"})
+    assert c.post("/hub/api/dsh-providers/nope/refresh").status_code == 400
+    assert c.post("/hub/api/dsh-providers/a_b/refresh").status_code == 400

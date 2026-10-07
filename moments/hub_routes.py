@@ -1492,3 +1492,31 @@ def dsh_model_set(bot_id):
         raise HubError(404, "bot_not_found", "没有这个新系统的 bot（或它的网关没在跑）")
     ok, r = gateway_client.model_set(hit[0][2], spec.strip())
     return jsonify({"ok": ok, "text": r.get("text") or r.get("error") or "", "current": r.get("current")}), (200 if ok else 400)
+
+
+# 用 /provider add 建的供应商（providers.json，所有新系统 bot 共用一份）：列出来、重新拉模型列表。
+# 随便找一个在跑的网关转发就行；密钥在凭据文件里，网关自己取，这里碰不到。
+_DM_PROVIDER_RE = _dm_re.compile(r"^[A-Za-z0-9-]{1,40}$")
+
+
+@hub_bp.get("/hub/api/dsh-providers")
+def dsh_providers_list():
+    bots = _dm_bots()
+    if not bots:
+        return jsonify({"providers": [], "error": "没有在跑的新系统 bot"})
+    try:
+        return jsonify({"providers": gateway_client.providers_list(bots[0][2])})
+    except Exception as e:
+        return jsonify({"providers": [], "error": redact.scrub_text(str(e))[:200] or "网关没响应"})
+
+
+@hub_bp.post("/hub/api/dsh-providers/<name>/refresh")
+@_api
+def dsh_provider_refresh(name):
+    if not _DM_PROVIDER_RE.match(name):
+        raise HubError(400, "bad_provider", "供应商名字不合法")
+    bots = _dm_bots()
+    if not bots:
+        raise HubError(404, "bot_not_found", "没有在跑的新系统 bot")
+    ok, r = gateway_client.provider_refresh(bots[0][2], name)
+    return jsonify({"ok": ok, "text": (r.get("text") or r.get("error") or "").replace("【系统】", ""), "models": r.get("models")}), (200 if ok else 400)

@@ -9,7 +9,7 @@
 {% include "_nav.html" %}
 <div class="wrap">
   <h1>新系统模型</h1>
-  <div class="sub">新系统（dsh）bot 用的模型。和在 Telegram 里发 /model 是一回事：换了以后这个 bot 的所有聊天从下一条消息起生效，重启后保持；选「配置文件里的」换回去。</div>
+  <div class="sub">新系统（dsh）bot 用的模型。用 /provider add 新建的供应商也在这里换。和在 Telegram 里发 /model 是一回事：换了以后这个 bot 的所有聊天从下一条消息起生效，重启后保持；选「配置文件里的」换回去。</div>
   <div class="card">
     <div class="row" style="justify-content:space-between">
       <h2 style="margin:0">bot</h2>
@@ -21,6 +21,16 @@
       <tbody id="rows"></tbody>
     </table>
     <div class="empty" id="empty" hidden>没有在跑的新系统 bot。</div>
+  </div>
+  <div class="card">
+    <h2 style="margin:0">用 /provider add 建的供应商</h2>
+    <div class="sub">所有新系统 bot 共用。新建要在 Telegram 里给任意一个 bot 私聊发 <span class="mono">/provider add &lt;名字&gt; &lt;接口地址&gt; &lt;密钥&gt; [openai]</span>（密钥不经过这个页面）。模型列表没拉到或者对方上了新模型，点「刷新模型列表」。</div>
+    <div class="muted" id="pmsg" style="margin-top:6px"></div>
+    <table style="margin-top:8px">
+      <thead><tr><th>名字</th><th>接口</th><th>模型</th><th>上次拉列表</th><th></th></tr></thead>
+      <tbody id="prows"></tbody>
+    </table>
+    <div class="empty" id="pempty" hidden>还没有。</div>
   </div>
 </div>
 <script>
@@ -64,8 +74,36 @@ async function load() {
     rows.appendChild(tr);
   }
 }
-document.getElementById('refresh').onclick = load;
+const pmsg = document.getElementById('pmsg');
+async function loadProviders() {
+  const r = await hubApi('/hub/api/dsh-providers');
+  const rows = document.getElementById('prows');
+  rows.textContent = '';
+  const ps = (r.body && r.body.providers) || [];
+  document.getElementById('pempty').hidden = ps.length > 0;
+  hubSay(pmsg, (r.body && r.body.error) || '');
+  for (const p of ps) {
+    const tr = document.createElement('tr');
+    tr.appendChild(el('td', p.displayName + (p.displayName.toLowerCase() !== p.name ? '（' + p.name + '）' : ''), 'mono'));
+    tr.appendChild(el('td', p.api === 'openai-completions' ? 'OpenAI 兼容' : 'Anthropic'));
+    tr.appendChild(el('td', p.models ? p.models + ' 个' : '没有'));
+    tr.appendChild(el('td', (p.fetchedAt ? new Date(p.fetchedAt).toLocaleString() : '') + (p.fetchError ? '：没拉到（' + p.fetchError + '）' : '：拉到了'), p.fetchError ? 'muted' : ''));
+    const btn = el('button', '刷新模型列表', 'btn mini'); btn.type = 'button';
+    btn.onclick = async () => {
+      btn.disabled = true;
+      hubSay(pmsg, p.displayName + '：正在拉…');
+      const s = await hubApi('/hub/api/dsh-providers/' + encodeURIComponent(p.name) + '/refresh', {method: 'POST', body: '{}'});
+      btn.disabled = false;
+      hubSay(pmsg, (s.body && (s.body.text || s.body.detail)) || ('失败（' + s.status + '）'));
+      loadProviders(); load();
+    };
+    const td = el('td'); td.appendChild(btn); tr.appendChild(td);
+    rows.appendChild(tr);
+  }
+}
+document.getElementById('refresh').onclick = () => { load(); loadProviders(); };
 load();
+loadProviders();
 </script>
 </body>
 </html>

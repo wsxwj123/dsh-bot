@@ -27,6 +27,9 @@ beforeAll(async () => {
       // 换模型后 dsh 会在用户消息后面插一条英文说明 "[model changed: …]"，所以最后一条用户消息是它
       { match: 'model changed', tool: { name: 'mcp__tg__reply', arguments: { text: '换了模型' } } },
       { match: '已送达', text: '' },
+      // 换到 /provider add 建的供应商：同样是"[model changed: … continues with fake2/…]"在最后
+      { match: 'continues with fake2', tool: { name: 'mcp__tg__reply', arguments: { text: '新供应商回的' } } },
+      { match: '已送达', text: '' },
       { match: '⟦系统·整理记忆⟧', text: '【我说过的要紧话】说过"真的收到了"\n【我答应过的事】无\n【对方的情况】对方在测试\n【正在聊的话题】换段\n【我们现在的关系和气氛】轻松（真dsh摘要）' },
     ],
   })
@@ -128,6 +131,22 @@ test.skipIf(!available)('真 dsh：用量快到线时来了新消息，先在旧
   b.brain = { ...b.brain, max_input_tokens: 1_000_000 }
   writeConfig(b)
   await sleep(500)
+})
+
+test.skipIf(!available)('真 dsh：/provider add 建的 Anthropic 接口供应商进了路由；切过去以后按它的协议、带凭据文件里的密钥发请求', async () => {
+  const key = 'sk-TESTONLY-real-dsh-provider-key'
+  tg.pushText(OWNER, `/provider add Fake2 http://127.0.0.1:${llm.port} ${key}`)
+  await until(() => tg.sentTo(OWNER).some(s => (s.text ?? '').includes('已添加供应商「Fake2」，拉到 1 个模型')), 'provider added', 30_000)
+  tg.pushText(OWNER, '/provider Fake2')
+  await until(() => tg.sentTo(OWNER).some(s => (s.text ?? '').includes('已换成 fake2 / fake-chat')), 'switched to the new provider', 60_000)
+  tg.pushText(OWNER, 'realP')
+  await until(() => tg.sentTo(OWNER).some(s => s.text === '新供应商回的'), 'reply via the new provider', 60_000)
+  const req = llm.requests.find(r => JSON.stringify(r.body.messages).includes('realP'))!
+  expect(req.path).toBe('/v1/messages')
+  expect(req.headers['x-api-key']).toBe(`${key.slice(0, 10)}…`)
+  tg.pushText(OWNER, '/model default')
+  await until(() => tg.sentTo(OWNER).some(s => (s.text ?? '').includes('已换回配置文件里的模型')), 'back to config model', 30_000)
+  expect(readFileSync(join(b.root, 'credentials.yaml'), 'utf8')).toContain('PROVIDER_FAKE2_API_KEY')
 })
 
 test.skipIf(!available)('真 dsh：网关被强杀后，旧 dsh 不会一直留着（自己退出，或者网关重启时被清理）', async () => {

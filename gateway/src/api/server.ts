@@ -21,6 +21,8 @@ export type ApiDeps = {
   health: () => { ok: boolean } & Record<string, unknown>
   /** 管理台看模型、换模型（和 /model 命令同一套逻辑） */
   model?: { info: () => Promise<unknown>; set: (spec: string) => Promise<{ ok: boolean }> }
+  /** 管理台：用 /provider add 建的供应商（不含密钥），以及重新拉模型列表 */
+  providers?: { list: () => unknown; refresh: (name: string) => Promise<{ ok: boolean }> }
   onInbound: (chatId: string) => void
 }
 
@@ -54,6 +56,7 @@ export class ApiServer {
         return json({ error: 'internal error' }, 500)
       }
     }
+    if (req.method === 'GET' && url.pathname === '/v1/providers' && this.d.providers) return json({ providers: this.d.providers.list() })
     if (req.method !== 'POST') return json({ error: 'not found' }, 404)
     const ct = (req.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
     if (ct !== 'application/json') return json({ error: 'content-type must be application/json' }, 415)
@@ -77,6 +80,13 @@ export class ApiServer {
           const spec = typeof body.spec === 'string' ? body.spec.slice(0, 200) : ''
           if (!spec.trim()) return json({ error: 'spec is required' }, 400)
           const r = await this.d.model.set(spec)
+          return json(r, r.ok ? 200 : 400)
+        }
+        case '/v1/providers/refresh': {
+          if (!this.d.providers) return json({ error: 'not found' }, 404)
+          const name = typeof body.name === 'string' ? body.name.slice(0, 64).trim() : ''
+          if (!name) return json({ error: 'name is required' }, 400)
+          const r = await this.d.providers.refresh(name)
           return json(r, r.ok ? 200 : 400)
         }
         default: return json({ error: 'not found' }, 404)

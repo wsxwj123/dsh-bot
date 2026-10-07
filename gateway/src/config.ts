@@ -1,11 +1,13 @@
 // 配置加载：configs/<bot>.yml（沿用旧格式，新增 brain 与 gateway 两段）+ 频道目录里的 access.json、.env。
 // 目录约定（和用户日常用的 ~/.dsh、旧系统的 ~/.claude 完全分开）：
 //   <根>/credentials.yaml              模型密钥（dsh 的凭据文件格式，权限 600）
+//   <根>/providers.json                /provider add 新建的供应商（所有 bot 共用，不含密钥）
 //   <根>/harness/                      钉死版本的 dsh
 //   <根>/bots/<bot>/{state,dsh-home,work,home,logs,media}
 // 根目录默认 ~/.dsh-bot，可用环境变量 DSH_BOT_HOME 改。
 import { existsSync, readFileSync, statSync } from 'fs'
 import { homedir } from 'os'
+import { sharedRoutes } from './providers'
 import { basename, isAbsolute, join, resolve } from 'path'
 
 export type Effort = 'off' | 'low' | 'high' | 'max'
@@ -117,6 +119,8 @@ export type BotConfig = {
   mediaDir: string
   harnessDir: string
   credentialsPath: string
+  /** /provider add 新建的供应商（所有 bot 共用，不含密钥） */
+  providersPath: string
   apiPort: number
   brain: Brain
   gw: GatewayOpts
@@ -149,7 +153,8 @@ function str(v: unknown, def: string): string {
 
 const EFFORTS: Effort[] = ['off', 'low', 'high', 'max']
 
-export function parseBrain(raw: unknown): Brain {
+/** shared：/provider add 新建、所有 bot 共用的供应商（providers.json）。配置文件里的同名路由优先 */
+export function parseBrain(raw: unknown, shared: Record<string, Route> = {}): Brain {
   const b = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const routesRaw = (b.routes && typeof b.routes === 'object' ? b.routes : {}) as Record<string, unknown>
   const routes: Record<string, Route> = {}
@@ -164,6 +169,7 @@ export function parseBrain(raw: unknown): Brain {
     for (const m of models) if (!m || typeof (m as RouteModel).id !== 'string') throw new ConfigError(`brain.routes.${name}.models 每项都要有 id`)
     routes[name] = { ...(o as Route), models: models as RouteModel[] }
   }
+  for (const [name, r] of Object.entries(shared)) if (!routes[name]) routes[name] = r
   const provider = str(b.provider, 'deepseek-official')
   if (provider !== 'deepseek-official' && !routes[provider]) {
     throw new ConfigError(`brain.provider 是 ${provider}，但 brain.routes 里没有这条路由`)
@@ -274,8 +280,9 @@ export function loadBotConfig(configPath: string, env: Record<string, string | u
     mediaDir: join(botDir, 'media'),
     harnessDir: resolve(expandHome(harnessRaw)),
     credentialsPath: join(root, 'credentials.yaml'),
+    providersPath: join(root, 'providers.json'),
     apiPort: num(y.dispatcher_port, 17801, 'dispatcher_port'),
-    brain: parseBrain(y.brain),
+    brain: parseBrain(y.brain, sharedRoutes(join(root, 'providers.json'))),
     gw: parseGateway(y.gateway, access),
   }
   if (!isAbsolute(cfg.channelDir)) throw new ConfigError('bot_channel_path 必须是绝对路径或以 ~ 开头')
@@ -283,8 +290,8 @@ export function loadBotConfig(configPath: string, env: Record<string, string | u
 }
 
 /** 只重读 brain 段（换模型用）。读失败返回 null，由调用方保留旧值并记警告。 */
-export function reloadBrain(configPath: string): Brain | null {
-  try { return parseBrain(readYaml(configPath).brain) } catch { return null }
+export function reloadBrain(configPath: string, providersPath?: string): Brain | null {
+  try { return parseBrain(readYaml(configPath).brain, providersPath ? sharedRoutes(providersPath) : {}) } catch { return null }
 }
 
 // ─── access.json（格式与旧系统完全相同） ───

@@ -5,6 +5,8 @@
 //   /model default             换回配置文件里的
 //   /provider（/providers）     供应商列表、密钥配没配
 //   /provider <供应商>          换到这个供应商的默认模型
+//   /provider add <名字> <接口地址> <密钥> [openai]   新建供应商（所有 bot 共用；消息带密钥，见 providers.ts）
+//   /provider refresh <名字>     重新拉模型列表；/provider remove <名字> 删掉用 add 建的供应商和它的密钥
 //   /compact [要特别留意的内容]  把这段对话压缩成摘要，换新会话（带着摘要和最近的原话）
 // 这里只放纯函数（解析、格式），副作用在 engine 里。
 
@@ -88,6 +90,9 @@ export const HELP_TEXT = [
   '/model default —— 换回配置文件里的模型',
   '/provider —— 列出供应商，以及密钥配没配',
   '/provider <供应商> —— 换到这个供应商的第一个模型',
+  '/provider add <名字> <接口地址> <密钥> [openai] —— 新建供应商，所有 bot 共用。末尾写 openai 是 OpenAI 兼容接口，不写按 Anthropic 接口。只在私聊里发，发完我会马上删掉这条',
+  '/provider refresh <名字> —— 重新拉这个供应商的模型列表',
+  '/provider remove <名字> —— 删掉用 add 建的供应商和它的密钥',
   '/compact [要特别留意的事] —— 把这段对话压缩成摘要、换新会话，带着摘要和最近的原话',
   '/clear —— 清空这段对话的上下文，只留一份摘要',
   '/help —— 显示这份说明',

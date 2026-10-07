@@ -1,10 +1,12 @@
 // 长轮询收消息。每条更新：先过闸门，再和 offset 一起写进账本（同一个事务），最后通知调度器。
+// 带密钥的命令（/provider add）在写账本之前拦下，只推进 offset。
 import { loadAccess } from '../config'
 import type { Ledger } from '../ledger'
 import { safeError, type Logger } from '../log'
 import { Backoff, crashPoint } from '../util'
 import { TgApiError, type TelegramApi, type TgMessage, type TgUpdate } from './api'
 import { gate, toInbound } from './inbound'
+import { isSecretCommand } from '../providers'
 
 export type PollerHealth = { lastOkAt: number; lastError: string | null; conflict: boolean }
 
@@ -22,6 +24,8 @@ export class Poller {
       channelDir: string; botId: number | null; pollTimeoutS: number; onInbound: (chatId: string) => void; onFatal: (why: string) => void
       /** 真人发来的消息：群消息（记进群聊记录）和私聊消息（记"刚聊过"，导演据此不点正在私聊的 bot） */
       onHumanMessage?: (msg: TgMessage, observed: boolean) => void
+      /** 带密钥的命令（/provider add）：不写账本、不写聊天日志、不进群聊记录，直接交给它 */
+      onSecretCommand?: (msg: TgMessage) => void
     },
   ) {}
 
@@ -86,6 +90,12 @@ export class Poller {
     if (g.deliver === false) {
       this.ledger.recordUpdate(u.update_id, null)
       this.log.info('inbound.dropped', { chat: msg.chat.id, reason: g.reason })
+      return
+    }
+    if (isSecretCommand(msg.text)) {
+      this.ledger.recordUpdate(u.update_id, null)
+      this.log.info('inbound.secret_command', { chat: msg.chat.id })
+      this.o.onSecretCommand?.(msg)
       return
     }
     if (g.deliver === 'observe') {

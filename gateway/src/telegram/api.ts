@@ -118,6 +118,11 @@ export class TelegramApi {
     })
   }
 
+  /** 删掉一条消息（私聊里 bot 能删对方发来的；48 小时内） */
+  deleteMessage(chatId: string, messageId: number) {
+    return this.call<boolean>('deleteMessage', { chat_id: chatId, message_id: messageId }, { timeoutMs: 15_000 })
+  }
+
   getFile(fileId: string) {
     return this.call<{ file_path?: string; file_size?: number }>('getFile', { file_id: fileId }, { timeoutMs: 20_000 })
   }

@@ -12,9 +12,9 @@ import { AcpError, AcpExited, AcpTimeout, type SessionUpdate } from '../dsh/acp'
 import { buildDshEnv, defaultDshCommand, type DshProcess, type DshSpec } from '../dsh/process'
 import { buildPatchRows, modelValue, patchText, promptFingerprint, restartFingerprint, type PatchInput } from '../dsh/profile'
 import type { InboundRow, Ledger, SegmentRow, TurnKind } from '../ledger'
-import { safeError, type Logger } from '../log'
+import { registerSecret, safeError, type Logger } from '../log'
 import type { McpServer, ToolDef } from '../mcp/server'
-import type { TelegramApi } from '../telegram/api'
+import type { TelegramApi, TgMessage } from '../telegram/api'
 import { isGroupChat, parseCommand } from '../telegram/inbound'
 import type { GroupTranscript, TranscriptLine } from '../group/transcript'
 import { describeResults, normText, planParts, type Sender } from '../telegram/sender'
@@ -25,6 +25,7 @@ import { Commitments } from '../commit/service'
 import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
 import { LifeActions } from '../life/actions'
+import { envNameFor, fetchModels, loadProviders, parseAddArgs, removeCredential, removeProvider, saveProvider, setCredential } from '../providers'
 import {
   escapeUserText,
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
@@ -139,6 +140,7 @@ export class Engine {
   private timers: ReturnType<typeof setInterval>[] = []
   private configMtime = 0
   private personaMtime = 0
+  private providersMtime = 0
   private lastProbeOkAt = 0
   private probeFailures = 0
   private unhealthySince: number | null = null
@@ -451,6 +453,7 @@ export class Engine {
     this.reaping = this.dsh.reapStale(this.dshSpec()).catch(e => this.log.warn('dsh.reap_failed', { err: safeError(e) }))
     this.configMtime = mtime(this.cfg.configPath)
     this.personaMtime = mtime(this.personaPath())
+    this.providersMtime = mtime(this.cfg.providersPath)
     const g = this.cfg.gw
     this.timers.push(setInterval(() => this.watchConfig(), g.configPollMs))
     this.timers.push(setInterval(() => void this.probe(), g.probeMs))
@@ -1192,11 +1195,19 @@ export class Engine {
 
   private async cmdProvider(args: string): Promise<string> {
     const a = args.trim()
+    const sub = a.match(/^(refresh|remove)\s+(\S+)$/i)
+    if (sub) return sub[1]!.toLowerCase() === 'refresh' ? (await this.providerRefresh(sub[2]!)).text : this.providerRemove(sub[2]!)
     const choices = await this.modelChoicesNow()
     if (choices.length === 0) return '【系统】暂时拿不到可选模型的列表，稍后再试。'
     const cur = { provider: this.brain.provider, model: this.brain.model }
-    if (a === '') return formatProviders(choices, cur, p => this.keyStatus(p))
+    // 用 /provider add 建了、但模型列表没拉到的：dsh 里还没有，单独列出来
+    const pending = Object.entries(loadProviders(this.cfg.providersPath).providers).filter(([n]) => !providersOf(choices).includes(n))
+    if (a === '') return [formatProviders(choices, cur, p => this.keyStatus(p)), ...pending.map(([n, v]) => `· ${v.displayName || n}：模型列表没拉到（${v.fetchError ?? '还没生效'}），/provider refresh ${v.displayName || n} 再试`)].join('\n')
     const p = providersOf(choices).find(x => x.toLowerCase() === a.toLowerCase())
+    const added = pending.find(([n]) => n === a.toLowerCase())?.[1]
+    if (!p && added) return added.models?.length
+      ? `【系统】${a} 刚加上，要等正在进行的这一轮聊完才生效，稍后再试。`
+      : `【系统】${a} 的模型列表还没拉到，暂时不能切过去。先 /provider refresh ${a}。`
     if (!p) return `【系统】没有 ${a} 这个供应商。用 /provider 看有哪些。`
     if (p === cur.provider) return `【系统】现在用的就是 ${p}（模型 ${cur.model}）。`
     // 配置文件里用的就是这个供应商：换回配置文件里的模型；否则用它的第一个模型
@@ -1211,6 +1222,85 @@ export class Engine {
     if (k.status === 'missing') return `【系统】${c.provider} 还没配密钥（凭据文件里填 ${k.env}），先不换。`
     this.setOverride(c)
     return `【系统】已换成 ${c.provider} / ${c.model}，下一条消息起生效。这个 bot 的所有聊天都换，重启后保持；/model default 换回配置文件里的。`
+  }
+
+  // ─── /provider add：主人在私聊里新建供应商（消息带密钥：poller 在写账本之前拦下，交到这里） ───
+
+  /** 带密钥的命令。不写账本、不写聊天日志、不交给模型；先删掉原消息，再做事，最后只回名字和模型数 */
+  async secretCommand(msg: TgMessage): Promise<void> {
+    const chatId = String(msg.chat.id)
+    const parsed = parseAddArgs(msg.text ?? '')
+    const key = 'ok' in parsed ? parsed.ok.key : parsed.key
+    registerSecret(key) // 万一哪条日志带上了，也会被替换成 ***
+    const deleted = await this.api.deleteMessage(chatId, msg.message_id).then(() => true, e => { this.log.warn('provider.delete_failed', { chat: chatId, err: safeError(e) }); return false })
+    const delNote = deleted ? '你发的那条（带密钥）已经删掉了。' : '⚠️ 你发的那条带着密钥，我没能删掉，请马上手动删除。'
+    const reply = (t: string) => this.sender.send({ chatId, turnId: null, callSeq: 0, text: `【系统】${t}\n${delNote}`, kind: 'system' }).catch(() => {})
+    const owner = msg.chat.type === 'private' && this.isOwner(msg.from ? String(msg.from.id) : null)
+    this.log.info('provider.add_received', { chat: chatId, owner, deleted })
+    if (!owner) {
+      this.log.warn('command.not_owner', { chat: chatId, name: 'provider add' })
+      await reply(`/provider add 只有主人在私聊里能用，这次什么都没做。${msg.chat.type === 'private' ? '' : '密钥已经发到群里了，建议去供应商那里换一个新密钥。'}`)
+      return
+    }
+    if ('error' in parsed) { await reply(`${parsed.error}什么都没做。\n用法：/provider add <名字> <接口地址> <密钥> [openai]（末尾写 openai 是 OpenAI 兼容接口，不写按 Anthropic 接口）`); return }
+    const a = parsed.ok
+    if (reloadBrain(this.cfg.configPath)?.routes[a.name]) { await reply(`这个 bot 的配置文件里已经有叫 ${a.name} 的供应商，换个名字。什么都没做。`); return }
+    const env = envNameFor(a.name)
+    const existed = !!loadProviders(this.cfg.providersPath).providers[a.name]
+    const credErr = setCredential(this.cfg.credentialsPath, env, a.key)
+    if (credErr) { this.log.warn('provider.credential_failed', { provider: a.name }); await reply(`密钥没写进凭据文件：${credErr}。什么都没做。`); return }
+    const r = await fetchModels(a.api, a.baseURL, a.key)
+    const models = 'models' in r ? r.models : []
+    saveProvider(this.cfg.providersPath, a.name, {
+      displayName: a.displayName, api: a.api, baseURL: a.baseURL, apiKeyEnv: env, models,
+      fetchedAt: Date.now(), fetchError: 'error' in r ? r.error : null, addedBy: this.cfg.id, addedAt: Date.now(),
+    })
+    this.log.info('provider.added', { provider: a.name, api: a.api, models: models.length, updated: existed })
+    await this.applyProviders()
+    const verb = existed ? '已更新' : '已添加'
+    if ('error' in r) await reply(`${verb}供应商「${a.displayName}」，但模型列表没拉到：${r.error}。暂时还不能切过去；之后在管理台的模型页点"刷新模型列表"，或者发 /provider refresh ${a.displayName}。`)
+    else await reply(`${verb}供应商「${a.displayName}」，拉到 ${models.length} 个模型。切过去：/provider ${a.displayName}`)
+  }
+
+  /** 重新拉一个供应商的模型列表（/provider refresh、管理台的刷新按钮）。密钥从凭据文件里取 */
+  async providerRefresh(nameRaw: string): Promise<{ ok: boolean; text: string; models: number }> {
+    const name = nameRaw.toLowerCase()
+    const p = loadProviders(this.cfg.providersPath).providers[name]
+    if (!p) return { ok: false, text: `【系统】没有用 /provider add 建过叫 ${nameRaw} 的供应商。`, models: 0 }
+    const key = this.credRef(p.apiKeyEnv)
+    if (!key) return { ok: false, text: `【系统】凭据文件里没有 ${p.displayName} 的密钥（${p.apiKeyEnv}），用 /provider add 重新建一次。`, models: 0 }
+    const r = await fetchModels(p.api, p.baseURL, key)
+    // 没拉到时保留上次的列表（不让已经能用的供应商因为一次网络问题消失）
+    saveProvider(this.cfg.providersPath, name, { ...p, models: 'models' in r ? r.models : p.models, fetchedAt: Date.now(), fetchError: 'error' in r ? r.error : null })
+    const n = 'models' in r ? r.models.length : p.models.length
+    this.log.info('provider.refreshed', { provider: name, ok: !('error' in r), models: n })
+    await this.applyProviders()
+    if ('error' in r) return { ok: false, text: `【系统】「${p.displayName}」的模型列表没拉到：${r.error}。${n ? `先沿用上次的 ${n} 个。` : ''}`, models: n }
+    return { ok: true, text: `【系统】「${p.displayName}」拉到 ${n} 个模型。切过去：/provider ${p.displayName}`, models: n }
+  }
+
+  private providerRemove(nameRaw: string): string {
+    const name = nameRaw.toLowerCase()
+    const p = loadProviders(this.cfg.providersPath).providers[name]
+    if (!p) return `【系统】没有用 /provider add 建过叫 ${nameRaw} 的供应商（配置文件里写的供应商要改配置文件）。`
+    if (this.brain.provider === name) this.setOverride(null)
+    removeProvider(this.cfg.providersPath, name)
+    removeCredential(this.cfg.credentialsPath, p.apiKeyEnv)
+    this.log.info('provider.removed', { provider: name })
+    void this.applyProviders()
+    return `【系统】已删除供应商「${p.displayName}」和它的密钥。所有 bot 都不再能用它；正在用它的 bot 会换回配置文件里的模型。`
+  }
+
+  /** 管理台：用 /provider add 建的供应商（名字、协议、模型数、上次拉列表的结果；不含密钥） */
+  providersInfo(): { name: string; displayName: string; api: string; models: number; fetchedAt: number; fetchError: string | null }[] {
+    return Object.entries(loadProviders(this.cfg.providersPath).providers).map(([name, p]) => ({ name, displayName: p.displayName || name, api: p.api, models: p.models?.length ?? 0, fetchedAt: p.fetchedAt, fetchError: p.fetchError }))
+  }
+
+  /** providers.json 改了：马上重读（别的 bot 靠定时检查），没有正在进行的回合就重启 dsh，让 /provider X 马上能用 */
+  private async applyProviders(): Promise<void> {
+    this.watchConfig() // 没有正在进行的回合时，它自己就会开始重启
+    if (this.restartPending && this.runningCount === 0) await this.restartIdle()
+    if (this.restarting) await this.restarting // 重启完再回话，主人马上发 /provider X 时看到的就是新列表
   }
 
   // ─── 管理台换模型（本机接口 /v1/model）：和 /model 命令同一套逻辑 ───
@@ -1236,9 +1326,10 @@ export class Engine {
     let o: { provider: string; model: string; configKey: string } | null = null
     try { o = JSON.parse(this.ledger.getMeta('brain_override') || 'null') } catch {}
     if (!o) return file
-    if (o.configKey !== brainKey(file)) {
+    // 换到的供应商被 /provider remove 删了：换回配置文件里的
+    if (o.configKey !== brainKey(file) || (o.provider !== 'deepseek-official' && !file.routes[o.provider])) {
       this.ledger.setMeta('brain_override', '')
-      this.log.info('brain.override_cleared', { reason: 'config changed' })
+      this.log.info('brain.override_cleared', { reason: file.routes[o.provider] || o.provider === 'deepseek-official' ? 'config changed' : 'provider removed' })
       return file
     }
     return { ...file, provider: o.provider, model: o.model }
@@ -1259,6 +1350,7 @@ export class Engine {
 
   /** 可选模型：用最近一次 dsh 回报的；还没有就开一个临时会话问一下（不发请求，不花钱） */
   private async modelChoicesNow(): Promise<ModelChoice[]> {
+    if (this.restarting) await this.restarting // 正在换路由重启：等它，别拿旧列表回答
     if (this.modelChoices.length) return this.modelChoices
     await this.ensureDsh()
     const conn = this.dsh.conn
@@ -1303,10 +1395,12 @@ export class Engine {
   private watchConfig(): void {
     const cm = mtime(this.cfg.configPath)
     const pm = mtime(this.personaPath())
-    if (cm === this.configMtime && pm === this.personaMtime) return
+    const vm = mtime(this.cfg.providersPath)
+    if (cm === this.configMtime && pm === this.personaMtime && vm === this.providersMtime) return
     this.configMtime = cm
     this.personaMtime = pm
-    const nb = reloadBrain(this.cfg.configPath)
+    this.providersMtime = vm
+    const nb = reloadBrain(this.cfg.configPath, this.cfg.providersPath)
     if (!nb) { this.log.warn('config.reload_failed', { path: 'configs/<bot>.yml' }); return }
     const before = brainKey(this.brain)
     const beforeCap = this.brain.maxInputTokens ?? null
@@ -1331,6 +1425,7 @@ export class Engine {
     this.restarting = (async () => {
       await this.dsh.stop()
       this.loaded.clear()
+      this.modelChoices = [] // 路由可能变了（/provider add），可选模型要重新问
     })().finally(() => { this.restarting = null })
     await this.restarting
     for (const c of this.ledger.chatsWithPending()) this.schedule(c)
