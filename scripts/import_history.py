@@ -9,7 +9,7 @@
 - 私聊记录：从旧的 Claude Code 会话文件里取出对方说的话和 bot 真正发出去的话（调用了 reply 的），
   只取主人私聊的、最近 --days 天的。写进账本里一个"已结束"的段：新网关第一次处理这个聊天时，
   会照常用账本给它补写一份摘要，新会话带着摘要和最近的原话开始（和崩溃恢复同一条路）。
-  这个聊天在新系统里已经聊过（账本里有段）就不导，免得新旧记录交错。
+  这个聊天在新系统里已经聊过（账本里有段）就跳过聊天记录，免得新旧交错（承诺照常导入）；试算时也会提示。
 - 承诺：旧频道目录的 .promises.json，只导还没到点、也没完成的，登记成新系统的承诺（来源记为 import）。
   旧文件的格式没有文档，脚本按常见字段名宽松识别；先用 --inspect-promises 看结构（只打印字段名和类型）。
 """
@@ -122,6 +122,20 @@ def _open_ledger(bot: str) -> sqlite3.Connection:
     return db
 
 
+def already_talked(bot: str, chat: str) -> bool:
+    """这个聊天在新系统的账本里有没有会话段。只读，不会创建账本（试算也用）"""
+    path = os.path.join(_home(), "bots", bot, "state", "ledger.sqlite")
+    if not os.path.exists(path):
+        return False
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return bool(db.execute("SELECT COUNT(*) FROM segments WHERE chat_id = ?", (chat,)).fetchone()[0])
+    except sqlite3.OperationalError:  # 还没有 segments 表
+        return False
+    finally:
+        db.close()
+
+
 def _gateway_running(bot: str) -> bool:
     hb = os.path.join(_home(), "bots", bot, "state", "heartbeat")
     try:
@@ -131,10 +145,8 @@ def _gateway_running(bot: str) -> bool:
 
 
 def import_dialog(db: sqlite3.Connection, chat: str, rows: list[tuple[str, str, int]]) -> int:
-    if not rows:
+    if not rows or db.execute("SELECT COUNT(*) FROM segments WHERE chat_id = ?", (chat,)).fetchone()[0]:
         return 0
-    if db.execute("SELECT COUNT(*) FROM segments WHERE chat_id = ?", (chat,)).fetchone()[0]:
-        raise SystemExit("这个聊天在新系统里已经聊过（账本里有会话段），不导入旧记录，免得新旧交错。")
     now = int(time.time() * 1000)
     first, last = rows[0][2], rows[-1][2]
     cur = db.cursor()
@@ -271,6 +283,9 @@ def main() -> None:
     items = pending_promises(promises, chat, int(time.time() * 1000)) if os.path.exists(promises) else []
     print(f"旧私聊记录（最近 {a.days} 天）：对方 {sum(1 for r in rows if r[0] == 'user')} 条，bot {sum(1 for r in rows if r[0] == 'bot')} 条")
     print(f"还没到点的旧承诺：{len(items)} 条")
+    talked = already_talked(a.bot, chat)
+    if talked:
+        print("⚠️  这个私聊在新系统里已经聊过（账本里有会话段）：正式导入会跳过聊天记录，免得新旧交错；承诺照常导入（重复的不会再导）")
     if a.dry_run:
         return
     db = _open_ledger(a.bot)
@@ -279,7 +294,10 @@ def main() -> None:
         m = import_promises(db, items)
     finally:
         db.close()
-    print(f"已导入：聊天记录 {n} 条，承诺 {m} 条。新网关第一次处理这个私聊时会用它们补写一份摘要。")
+    if talked:
+        print(f"已导入：承诺 {m} 条。聊天记录跳过（已经聊过）。")
+    else:
+        print(f"已导入：聊天记录 {n} 条，承诺 {m} 条。新网关第一次处理这个私聊时会用它们补写一份摘要。")
 
 
 if __name__ == "__main__":

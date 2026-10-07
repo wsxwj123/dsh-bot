@@ -6,7 +6,9 @@
 
 ## 一、切换一个 bot
 
-前提：dsh 和凭据文件已经准备好（M1 的 `setup.ts harness`、`setup.ts credentials`）。
+前提：
+- dsh 和凭据文件已经准备好（M1 的 `setup.ts harness`、`setup.ts credentials`）。
+- **新仓库放在家目录根下**，比如 `~/dsh-bot-work`。不要放在桌面、文稿、下载、iCloud 云盘下：macOS 的隐私保护会拦住开机自启直接拉起的 python 任务（主动消息、导演、共用服务），日志里是 `getcwd: Operation not permitted`。`autostart.ts` 安装时会检查，在这几个目录下就拒绝安装。已经放错的：先 `autostart.ts uninstall` 掉装过的项，挪走仓库，在新位置重新 `install`。
 
 1. **停旧 bot**：`bash ~/.claude/dispatcher/stop-bot.sh <旧名>`。它会写一个停用标记，旧系统的重启脚本以后不会再把它拉起来。
 2. **准备新 bot**（测试时已经迁过的跳过这一步）：
@@ -21,14 +23,14 @@
    - 有 `.promises.json` 的，先看结构：加 `--inspect-promises`。只打印字段名和类型。
    - 确认没问题再去掉 `--dry-run` 正式导入：最近 30 天的私聊（`--days` 可改）和还没到点的承诺。
    - 新网关第一次处理这个私聊时，会用导入的记录补写一份摘要，新会话带着摘要和最近的原话开始。
-   - 这个私聊在新系统里已经聊过的（比如测试用过的 bot5），脚本不导入，免得新旧记录交错。
+   - 这个私聊在新系统里已经聊过的（比如测试用过的 bot5），聊天记录不导入，免得新旧交错；承诺照常导入。试算时就会提示"正式导入会跳过"。
 4. **开机自启**：
    - `bun gateway/scripts/autostart.ts install ~/.dsh-bot/configs/<新名>.yml`：网关开机自启，退出了 10 秒后自动拉起；
    - `bun gateway/scripts/autostart.ts install-jobs ~/.dsh-bot/configs/<新名>.yml`：主动消息，每 10 分钟看一次要不要开口；
    - 要在设了代理的终端里运行：安装时会把代理设置带进去，launchd 启动的程序拿不到终端里的环境变量。
 5. **抽查**：
    - 给 bot 发一条消息；
-   - `bun gateway/scripts/autostart.ts status` 看运行状态；
+   - `bun gateway/scripts/autostart.ts status` 看运行状态：常驻的要"运行中"；定时任务平时"没在运行"是正常的，看"上次退出码"是不是 0。有问题的行标 ⚠️，并写了该看哪个日志；
    - `bun gateway/scripts/logs.ts --config ~/.dsh-bot/configs/<新名>.yml -f` 看实时日志；
    - `bun gateway/scripts/health.ts --config …` 看健康状态。
 6. **群聊**（用到的话）：
@@ -74,6 +76,7 @@ Telegram 会把旧程序还没确认的消息投给新网关，账本负责去�
 | `dsh.exited` 反复出现 | `~/.dsh-bot/bots/<名>/logs/dsh-stderr.log` | 跑 `setup.ts check`；dsh 没装好就再跑一次 `setup.ts harness` |
 | `turn.failed` 里有 `MISSING_CREDENTIAL` | `setup.ts check` | 凭据文件里缺对应的密钥 |
 | 开机后没起来 | `autostart.ts status`；`~/.dsh-bot/bots/<名>/logs/launchd.log` | 找不到 bun 或 python：在能运行它们的终端里重新 `install`。连不上 Telegram：在设了代理的终端里重新 `install` |
+| 定时任务的"上次退出码"不是 0 | `~/.dsh-bot/logs/<任务名>.log` 和 `<任务名>.launchd.log` | launchd.log 里有 `Operation not permitted`：仓库在桌面、文稿、下载下，挪到家目录下重装（见第一节"前提"） |
 | 回复很慢 | `logs.ts` 里 `turn.end` 前后的时间；`send.photo_shrunk`、`tool.reply_slow` | 发图慢看代理；模型慢可以用 `/model` 换 |
 | 语音转不成文字 | `media.transcribe_failed` 后面的状态码 | 401：voice-bridge 设了口令，凭据文件里要加 `VOICE_BRIDGE_TOKEN`；403：目录不在它的白名单里（网关会自动换目录再试一次） |
 | 群里没人说话 | 导演日志 `~/.dsh-bot/director/director.log`；网关日志里的 `inbound.dropped` | 导演开关文件在不在；`access.json` 的 `groups` 里有没有这个群；bot 的隐私模式关了没有 |

@@ -5,12 +5,13 @@
 //   bun gateway/scripts/autostart.ts install-shared [--botlife-db <朋友圈库>]
 //                                                                    全部 bot 切完以后：情绪、记忆整理、朋友圈网页、电话
 //   bun gateway/scripts/autostart.ts uninstall <bot 名 | director>   停掉并取消开机自启
-//   bun gateway/scripts/autostart.ts status                          列出新系统的开机自启项和状态
+//   bun gateway/scripts/autostart.ts status                          列出新系统的开机自启项、状态、定时任务上次的退出码
+// 仓库和 ~/.dsh-bot 都不能放在桌面、文稿、下载、iCloud 云盘下（macOS 的隐私保护会拦住 launchd 拉起的程序），安装时会检查
 // 看实时日志：bun gateway/scripts/logs.ts --config <配置文件> -f（导演：tail -f ~/.dsh-bot/director/director.log）
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
-import { baseEnv, directorAgent, gatewayAgent, plist, plistPath, PROXY_VARS, pythonAgent, SHARED, type Agent } from '../src/autostart'
+import { baseEnv, directorAgent, gatewayAgent, logHint, parseLaunchctl, plist, plistPath, protectedDir, PROXY_VARS, pythonAgent, SHARED, statusLine, type Agent } from '../src/autostart'
 import { loadAccess, loadBotConfig, rootDir } from '../src/config'
 
 const [cmd, ...rest] = process.argv.slice(2)
@@ -43,8 +44,22 @@ function install(a: Agent): number {
   return 0
 }
 
+/** 仓库或 ~/.dsh-bot 在桌面、文稿、下载、iCloud 云盘下时拒绝安装：macOS 的隐私保护会拦住 launchd 直接拉起的程序 */
+function blockedByPrivacy(): boolean {
+  for (const [what, p] of [['仓库', REPO], ['新系统目录', rootDir()]] as const) {
+    const d = protectedDir(p, HOME)
+    if (!d) continue
+    console.log(`  ❌ ${what}在 ~/${d} 下面（${p.replace(HOME, '~')}）。macOS 的隐私保护会拦住开机自启拉起的程序读这个目录，`)
+    console.log(`     主动消息、导演这类任务会一启动就失败（日志里是 getcwd: Operation not permitted）。`)
+    console.log(`     请先把它挪到家目录下（比如 ~/dsh-bot-work），在新位置重新运行这条命令。没有安装任何东西。`)
+    return true
+  }
+  return false
+}
+
 function main(): number {
   if (process.platform !== 'darwin') { console.log('开机自启目前只支持 macOS（launchd）。其他系统请用 tmux 或系统自己的服务管理。'); return 2 }
+  if (cmd?.startsWith('install') && blockedByPrivacy()) return 1
   if (cmd === 'install') {
     const cfgPath = rest[0]
     if (!cfgPath) { console.log('用法：autostart.ts install <配置文件>'); return 2 }
@@ -91,13 +106,16 @@ function main(): number {
     const dir = join(HOME, 'Library', 'LaunchAgents')
     const labels = existsSync(dir) ? readdirSync(dir).filter(f => f.startsWith('com.dsh-bot.') && f.endsWith('.plist')).map(f => f.slice(0, -6)) : []
     if (labels.length === 0) console.log('还没有设开机自启的项。')
+    let bad = 0
     for (const l of labels) {
       const r = launchctl('print', `gui/${uid()}/${l}`)
-      const state = r.out.match(/\bstate = (\S+)/)?.[1] ?? (r.code === 0 ? '?' : '没在运行')
-      const pid = r.out.match(/\bpid = (\d+)/)?.[1]
-      console.log(`  ${l}：${state}${pid ? `（pid ${pid}）` : ''}`)
+      const timed = /<key>Start(Calendar)?Interval<\/key>/.test(readFileSync(join(dir, `${l}.plist`), 'utf8'))
+      const line = statusLine(l, parseLaunchctl(r.out, r.code), timed, logHint(l.slice('com.dsh-bot.'.length)))
+      if (line.startsWith('⚠️')) bad++
+      console.log(line)
     }
-    return 0
+    if (bad) console.log(`\n${bad} 项有问题，见上面标 ⚠️ 的行。`)
+    return bad ? 1 : 0
   }
   console.log('用法：bun gateway/scripts/autostart.ts install <配置文件> | install-director --chat <群 id> | install-jobs <配置文件> | install-shared [--botlife-db <路径>] | uninstall <名字> | status')
   return 2

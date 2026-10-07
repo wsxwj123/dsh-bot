@@ -41,3 +41,40 @@ test('定时任务：每个 bot 的主动消息每 10 分钟；共用任务按�
   const web = SHARED.find(j => j.name === 'moments-web')!
   expect(plist(pythonAgent({ name: web.name, python: 'p', repo: '/r', script: web.script, root: '/h', env }))).toContain('<key>KeepAlive</key><true/>')
 })
+
+test('仓库在桌面、文稿、下载、iCloud 云盘下：认出来（安装会拒绝）；家目录下别的位置不算', () => {
+  const { protectedDir } = require('../../src/autostart') as typeof import('../../src/autostart')
+  expect(protectedDir('/Users/u/Desktop/claude/dshbot/dsh-bot-work', '/Users/u')).toBe('Desktop')
+  expect(protectedDir('/Users/u/Documents', '/Users/u')).toBe('Documents')
+  expect(protectedDir('/Users/u/Downloads/x/', '/Users/u')).toBe('Downloads')
+  expect(protectedDir('/Users/u/Library/Mobile Documents/com~apple~CloudDocs/r', '/Users/u')).toBe('Library/Mobile Documents')
+  expect(protectedDir('/Users/u/dsh-bot-work', '/Users/u')).toBeNull()
+  expect(protectedDir('/Users/u/DesktopStuff/r', '/Users/u')).toBeNull()
+  expect(protectedDir('/Users/u/.dsh-bot', '/Users/u')).toBeNull()
+})
+
+test('status：定时任务显示全"没在运行"、跑过几次、上次退出码；退出码不是 0 的标 ⚠️ 并指出日志', () => {
+  const { parseLaunchctl, statusLine, logHint } = require('../../src/autostart') as typeof import('../../src/autostart')
+  const timedOut = `gui/501/com.dsh-bot.self-initiate.bot5 = {\n\tactive count = 0\n\tstate = not running\n\n\truns = 33\n\tlast exit code = 1\n\trun interval = 600 seconds\n}`
+  const s = parseLaunchctl(timedOut, 0)
+  expect(s).toEqual({ state: '没在运行', pid: undefined, lastExit: '1', runs: '33' })
+  const line = statusLine('com.dsh-bot.self-initiate.bot5', s, true, logHint('self-initiate.bot5'))
+  expect(line.startsWith('⚠️')).toBe(true)
+  expect(line).toContain('定时任务，没在运行，跑过 33 次，上次退出码 1')
+  expect(line).toContain('~/.dsh-bot/logs/self-initiate.bot5.log')
+  const okTimed = statusLine('com.dsh-bot.self-initiate.bot5', parseLaunchctl('\tstate = not running\n\truns = 2\n\tlast exit code = 0\n', 0), true, 'x')
+  expect(okTimed.startsWith('⚠️')).toBe(false)
+  expect(okTimed).toContain('上次退出码 0')
+  expect(statusLine('l', parseLaunchctl('\tstate = not running\n\tlast exit code = (never exited)\n', 0), true, 'x')).toContain('还没跑过')
+  // 常驻的网关：在跑就没问题，被杀过一次又拉起来的不报
+  const gw = parseLaunchctl('\tstate = running\n\tpid = 78785\n\tlast terminating signal = Terminated: 15\n', 0)
+  const gl = statusLine('com.dsh-bot.bot5', gw, false, logHint('bot5'))
+  expect(gl.startsWith('⚠️')).toBe(false)
+  expect(gl).toContain('运行中（pid 78785）')
+  const down = statusLine('com.dsh-bot.bot5', parseLaunchctl('\tstate = not running\n\tlast exit code = 78\n', 0), false, logHint('bot5'))
+  expect(down.startsWith('⚠️')).toBe(true)
+  expect(down).toContain('~/.dsh-bot/bots/bot5/logs/launchd.log')
+  expect(statusLine('x', parseLaunchctl('Could not find service', 113), false, 'y').startsWith('⚠️')).toBe(true)
+  expect(logHint('director')).toBe('~/.dsh-bot/director/director.log')
+  expect(logHint('jiwen')).toContain('~/.dsh-bot/logs/jiwen.log')
+})

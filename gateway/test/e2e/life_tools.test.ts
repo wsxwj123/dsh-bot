@@ -3,7 +3,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { FakeTelegram } from '../fakes/fake-telegram'
-import { cleanup, Gateway, makeBot, OWNER, toolResults, until, writeConfig, type BotEnv } from '../harness'
+import { cleanup, Gateway, makeBot, OWNER, prompts, toolResults, until, writeConfig, type BotEnv } from '../harness'
 
 const REPO = join(import.meta.dir, '..', '..', '..')
 const PY = process.env.DSH_BOT_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
@@ -20,14 +20,15 @@ afterEach(async () => {
 })
 
 /** 假的 novelai-skill：脚本把收到的参数和"有没有令牌"记下来，按 --output-json 写出图片路径 */
-function fakeSkill(root: string): string {
+function fakeSkill(root: string, delaySec = 0): string {
   const dir = join(root, 'novelai-skill')
   mkdirSync(join(dir, 'scripts'), { recursive: true })
   mkdirSync(join(dir, 'assets'), { recursive: true })
   writeFileSync(join(dir, 'SKILL.md'), '# 假的生图说明\n写 intermediate.json。\n')
   writeFileSync(join(dir, 'assets', 'default_config.json'), '{}')
   writeFileSync(join(dir, 'scripts', 'generate_novelai_image.py'), [
-    'import json, os, sys',
+    'import json, os, sys, time',
+    `time.sleep(${delaySec})`,
     'a = sys.argv[1:]',
     'out = a[a.index("--output-json") + 1]',
     'im = json.load(open(a[a.index("--intermediate") + 1], encoding="utf-8"))',
@@ -78,6 +79,20 @@ test('image_guide 给出写法；generate_image 跑生图脚本：令牌只走�
   expect(call.skill_root).toBe(skill)
   // 模型进程的环境不整体传下去：没有 Telegram 令牌和 DeepSeek 密钥
   expect(call.env_keys.some((k: string) => /TELEGRAM_BOT_TOKEN|DEEPSEEK_API_KEY/.test(k))).toBe(false)
+})
+
+test('generate_image 生成得慢：先回"还在生成"；好了以后的系统消息写明这张就是刚才要的，直接用 reply 发，不要再生成', async () => {
+  const b = await setup({ image_wait_ms: 200 })
+  b.gw.image_skill_dir = fakeSkill(b.root, 1.5)
+  await start()
+  tg!.pushText(OWNER, '!tool:generate_image|{"intermediate":{"scene":"海边"}}')
+  await until(() => !!resultOf(b, 'generate_image'), 'generate')
+  expect(resultOf(b, 'generate_image')!.text).toContain('还在生成')
+  const ready = await until(() => prompts(b).find(p => p.text.includes('⟦系统·生图⟧')), 'image ready prompt', 20_000)
+  expect(ready.text).toContain('fake.png')
+  expect(ready.text).toContain('这张就是刚才那次请求生成的')
+  expect(ready.text).toContain('reply 的 files')
+  expect(ready.text).toContain('不要再生成')
 })
 
 test('generate_image：生图关掉时不跑脚本，告诉模型没开', async () => {

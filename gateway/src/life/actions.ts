@@ -1,7 +1,7 @@
 // 生图和朋友圈（M4）：旧系统里模型用 Bash 跑仓库里的脚本，新系统的模型没有 Bash，
 // 改成网关替它跑同一批脚本（不重写），结果交回给模型。
 //   generate_image：novelai-skill 的生图脚本（模型按 image_guide 写好结构化描述）或 ComfyUI 脚本；
-//                   10 秒内生成好就直接返回路径，没好就先返回"还在生成"，好了以后程序再告诉它
+//                   短等一下（默认 10 秒），生成好就直接返回路径；没好就先返回"还在生成"，好了以后程序再告诉它
 //   moments：查最近的朋友圈、点赞、回评论、发圈、给圈配图、删自己的评论
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
@@ -9,8 +9,8 @@ import { dirname, join, resolve } from 'path'
 import { safeError, type Logger } from '../log'
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..', '..')
-// 生图一般要一分钟左右（真机 M4：7 次都超过 45 秒），久等只是让这一轮干等。短等一下，没好就先让模型回话，好了再通知它
-const SYNC_WAIT_MS = 10_000
+// 生图一般要一分钟左右（真机 M4：7 次都超过 45 秒），久等只是让这一轮干等。短等一下（默认 10 秒，gateway.image_wait_ms），
+// 没好就先让模型回话，好了再通知它
 
 export type ActionsDeps = {
   /** 朋友圈、画风里用的名字（旧系统里的 bot 名） */
@@ -26,8 +26,9 @@ export type ActionsDeps = {
   stateDb: () => string | undefined
   /** 凭据文件里的值（NOVELAI_BEARER_TOKEN 等），只传给对应脚本 */
   credRef: (name: string) => string | null
-  /** 生图超过 10 秒才好：把结果作为系统消息塞回这个聊天 */
+  /** 生图没在 syncWaitMs 内好：把结果作为系统消息塞回这个聊天 */
   notify: (chatId: string, text: string, key: string) => void
+  syncWaitMs: () => number
 }
 
 type Result = { text: string; isError?: boolean }
@@ -108,13 +109,16 @@ export class LifeActions {
       }
       return { text: `图片生成好了：${r.path}\n用 reply 的 files 发给对方，或者用 moments 工具的 set_image 配到朋友圈。` }
     }
-    const timeout = new Promise<'wait'>(r => setTimeout(() => r('wait'), SYNC_WAIT_MS))
+    const timeout = new Promise<'wait'>(r => setTimeout(() => r('wait'), this.d.syncWaitMs()))
     const first = await Promise.race([run, timeout])
     if (first !== 'wait') return done(first)
-    // 没在 10 秒内好：先回"还在生成"，好了以后塞一条系统消息
+    // 没等到：先回"还在生成"，好了以后塞一条系统消息。到那时已经是下一轮了，
+    // 人设里"只能发这一轮新生成的图"这类说法会让模型不敢发、转头再生成一张，所以写明这张就是刚才要的那张
     void run.then(r => {
       const res = done(r)
-      this.d.notify(chatId, `⟦系统·生图⟧ ${res.text}`, `image:${stamp}`)
+      this.d.notify(chatId, res.isError ? `⟦系统·生图⟧ ${res.text}`
+        : `⟦系统·生图⟧ 你刚才那次 generate_image 请求的图生成好了：${r.path}\n这张就是刚才那次请求生成的（算新生成的图），直接用 reply 的 files 发给对方；要配朋友圈就用 moments 的 set_image。不要再生成一张。`,
+        `image:${stamp}`)
     })
     return { text: '图片还在生成，大概还要一会儿。先回对方一句（比如"等我一下"），生成好了程序会告诉你图片路径。' }
   }

@@ -28,13 +28,20 @@
 
 ## 第 0 步：准备
 
+仓库要放在家目录下（比如 `~/dsh-bot-work`），**不要放在桌面、文稿、下载、iCloud 云盘下**：macOS 的隐私保护会拦住开机自启拉起的 python 任务（`autostart.ts` 安装时会检查并拒绝）。
+
 ```bash
-git fetch origin claude/nice-brahmagupta-dtjsma && git checkout claude/nice-brahmagupta-dtjsma && git pull
+git fetch origin claude/nice-brahmagupta-dtjsma && git checkout claude/nice-brahmagupta-dtjsma && git pull --ff-only
 cd gateway && bun install && bun run typecheck && bun run test
 DSH_BOT_HARNESS=~/.dsh-bot/harness bun test --timeout 90000 test/e2e/real-dsh.test.ts
 cd ../tests && python3 -m pytest -q unit/test_chat_history_ledger.py unit/test_chat_history_namespace.py unit/test_project_slug.py unit/test_m3_life.py unit/test_m4_dsh.py unit/test_m5_director.py unit/test_m6_import.py
 cd ..
 ```
+
+`git pull --ff-only` 如果报"无法快进"（远端分支被改写过；以后不会再改写，这里只是兜底）：
+1. 先看本地多出来的提交：`git log --oneline origin/claude/nice-brahmagupta-dtjsma..HEAD`；
+2. 本地没有自己的改动（多出来的都是以前拉下来的旧版本）：`git branch backup/old-$(date +%Y%m%d) && git reset --hard origin/claude/nice-brahmagupta-dtjsma`，旧的留在备份分支上；
+3. 有自己的改动：停下来问用户，不要 reset。
 
 预期：
 - 网关 223 项（通过 218，跳过 5）；
@@ -81,7 +88,7 @@ cd ..
 先只数一数（不显示内容）：
 
 ```bash
-grep -c -E 'Bash|python3|telegram-worker|novelai-skill|comfyui-skill|intermediate\.json|download_attachment|add_group_alias|MEDIA:|chat_id|\[self-initiate\]|\[director\]|【群聊】|【私聊】' ~/.dsh-bot/bots/<新名>/channel/CLAUDE.md
+grep -c -E 'Bash|python3|telegram-worker|novelai-skill|comfyui-skill|intermediate\.json|download_attachment|add_group_alias|MEDIA:|chat_id|\[self-initiate\]|\[director\]|【群聊】|【私聊】|新生成|本轮|这一轮.*图|生图|发图' ~/.dsh-bot/bots/<新名>/channel/CLAUDE.md
 ```
 
 **是 0：** 这一步跳过。
@@ -93,6 +100,7 @@ grep -c -E 'Bash|python3|telegram-worker|novelai-skill|comfyui-skill|intermediat
    mkdir -p ~/.dsh-bot/backup/<新名> && cp -p ~/.dsh-bot/bots/<新名>/channel/CLAUDE.md ~/.dsh-bot/backup/<新名>/CLAUDE.md.$(date +%Y%m%d-%H%M%S)
    ```
 2. 打开新副本，找到命中的那几处，按下面的对照表起草改法。只改技术操作的那几句；同一段里描述角色的话保持原样。
+   关键词只是帮你找：讲生图、发图、朋友圈、群聊怎么操作的段落，没命中的句子也按对照表看一遍（bot5 切换时就漏了两句讲发哪张图的）。
 3. 在对话里把每一处的"原文 → 改后"给用户看，用户逐处同意后再写入。用户说某处不改，就不改。
 4. 写入后，用 `diff` 只数改了几行，不打印内容：`diff <备份> <新副本> | grep -c '^[<>]'`。
 5. 再跑一次上面的计数命令。剩下的命中如果是角色设定里正常的用词，就保持原样；记在报告里，只写类别和次数。
@@ -113,6 +121,8 @@ grep -c -E 'Bash|python3|telegram-worker|novelai-skill|comfyui-skill|intermediat
 | 以 `[self-initiate]` 开头的消息 | 改成以 `⟦系统·主动开口⟧` 开头的消息 |
 | 以 `[director]` 开头的消息 | 改成以 `⟦群聊·导演点到你了⟧` 开头的消息 |
 | 按【群聊】/【私聊】标注区分场景 | 新系统不加这个标注：以 `⟦群聊·导演点到你了⟧` 开头的是群聊，其余都是私聊 |
+| "只能发本轮（这一轮）新生成的图"、"不要发旧图"之类限制发哪张图的说法 | 改成"只发自己刚用 `generate_image` 生成的图（包括程序随后用 `⟦系统·生图⟧` 告诉你生成好的那张）"。原因：生图要一分钟左右，没在 10 秒内生成好时，图是在下一轮由系统消息送到的；照原话模型会觉得那张不是"这一轮"的，不敢发，转头再生成一张 |
+| "先生成图再回复"、"生成完马上发"之类讲生图和回复先后的说法 | 改成"生成慢的时候先回对方一句，等程序告诉你图好了，再用 `reply` 的 `files` 发那张图" |
 
 **这些新系统照旧支持，不用改：**
 - reply 的 `text`、`files`、`reply_to`、`as_voice`、`voice_text`、`voice_emotion`、`voice_instruct`；

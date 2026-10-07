@@ -74,8 +74,14 @@ def test_导入私聊记录和没到点的承诺_只出数字(tmp_path):
     assert db.execute("SELECT text, state, turn_id FROM outbound").fetchall() == [("嗨，在呢", "sent", turn[0])]
     assert sorted(t for (t,) in db.execute("SELECT text FROM commitments WHERE source = 'import' AND state = 'pending'")) == ["周五提醒看电影", "明早叫醒对方"]
     db.close()
+    # 已经聊过：试算就提示正式导入会跳过；正式导入跳过聊天记录，承诺不重复导
+    dry2 = run(env, "--from", str(old), "--dry-run")
+    assert dry2.returncode == 0 and "已经聊过" in dry2.stdout and "会跳过" in dry2.stdout
     again = run(env, "--from", str(old))
-    assert again.returncode != 0 and "已经聊过" in (again.stderr + again.stdout)
+    assert again.returncode == 0 and "聊天记录跳过" in again.stdout and "承诺 0 条" in again.stdout
+    db = sqlite3.connect(ledger)
+    assert db.execute("SELECT COUNT(*) FROM segments").fetchone()[0] == 1 and db.execute("SELECT COUNT(*) FROM commitments").fetchone()[0] == 2
+    db.close()
 
 
 def test_只看承诺文件的结构_不打印内容(tmp_path):

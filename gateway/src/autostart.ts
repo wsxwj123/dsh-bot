@@ -108,5 +108,49 @@ ${Object.entries(a.calendar).map(([k, v]) => `    <key>${esc(k)}</key><integer>$
 `
 }
 
+/** macOS 的隐私保护会拦住 launchd 直接拉起的程序访问这几个目录（桌面、文稿、下载、iCloud 云盘）。
+ *  仓库放在里面时，python 任务一启动就报 getcwd: Operation not permitted。返回命中的目录名，没命中返回 null */
+export function protectedDir(path: string, home: string): string | null {
+  const p = path.replace(/\/+$/, '')
+  for (const d of ['Desktop', 'Documents', 'Downloads', join('Library', 'Mobile Documents')]) {
+    const base = join(home, d)
+    if (p === base || p.startsWith(base + '/')) return d
+  }
+  return null
+}
+
+/** 从 launchctl print 的输出里取出状态、pid、上次退出码。定时任务平时不在运行，"not running" 要显示全 */
+export function parseLaunchctl(out: string, code: number): { state: string; pid?: string; lastExit?: string; runs?: string } {
+  if (code !== 0) return { state: '没装上（launchctl 找不到它）' }
+  const m = (re: RegExp) => out.match(re)?.[1]?.trim()
+  const state = m(/^\s*state = (.+)$/m) ?? '?'
+  const exit = m(/^\s*last exit code = (.+)$/m)
+  const sig = m(/^\s*last terminating signal = (.+)$/m)
+  return {
+    state: state === 'running' ? '运行中' : state === 'not running' ? '没在运行' : state,
+    pid: m(/^\s*pid = (\d+)/m),
+    lastExit: sig ? `被信号结束（${sig}）` : exit === undefined || exit.startsWith('(never') ? undefined : exit,
+    runs: m(/^\s*runs = (\d+)/m),
+  }
+}
+
+/** status 的一行：常驻的看在不在跑；定时任务看跑过几次、上次退出码。有问题的标出来，并给出看哪个日志 */
+export function statusLine(label: string, s: ReturnType<typeof parseLaunchctl>, timed: boolean, logHint: string): string {
+  const bad = s.lastExit !== undefined && s.lastExit !== '0'
+  const parts = [s.state + (s.pid ? `（pid ${s.pid}）` : '')]
+  if (timed) parts.push(s.runs ? `跑过 ${s.runs} 次` : '还没跑过')
+  if (s.lastExit !== undefined) parts.push(`上次退出码 ${s.lastExit}`)
+  // 常驻的：在跑就行（被杀过一次又拉起来的不算问题）；定时任务：上次没正常退出就要看
+  const warn = s.state.startsWith('没装上') || (timed ? bad : s.state !== '运行中')
+  return `${warn ? '⚠️' : '  '} ${label}：${timed ? '定时任务，' : ''}${parts.join('，')}${warn ? `。看日志：${logHint}` : ''}`
+}
+
+/** 每个任务的日志在哪（status 出问题时提示） */
+export function logHint(name: string, root = '~/.dsh-bot'): string {
+  if (name === 'director') return `${root}/director/director.log`
+  if (name.includes('.') || SHARED.some(j => j.name === name)) return `${root}/logs/${name}.log 和 ${name}.launchd.log`
+  return `${root}/bots/${name}/logs/launchd.log`
+}
+
 export const plistPath = (home: string, label: string) => join(home, 'Library', 'LaunchAgents', `${label}.plist`)
 export const binDir = (p: string) => dirname(p)
