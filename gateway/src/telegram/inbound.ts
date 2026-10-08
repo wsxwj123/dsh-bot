@@ -1,6 +1,7 @@
 // 收到的 Telegram 消息 → 白名单闸门 → 账本记录。纯函数，方便测试。
 import type { Access } from '../config'
 import type { NewInbound } from '../ledger'
+import { redactSecrets } from '../log'
 import type { TgMessage } from './api'
 
 /** deliver: 'observe' = 群消息，只记进群聊记录（谁说话由导演决定，见 director.py），不直接触发回复 */
@@ -55,6 +56,20 @@ function placeholder(msg: TgMessage): string | null {
 export function senderName(u: TgMessage['from']): string {
   if (!u) return ''
   return [u.first_name, u.last_name].filter(Boolean).join(' ') || u.username || String(u.id)
+}
+
+/**
+ * 入账前把登记过的机密值换成 ***（方案 3.12）：主人引用回复一条含密钥的消息（删除失败或还没来得及删）时，
+ * 引用文字里也带着密钥。要在 toInbound 截断引用文字之前换，否则截出的半截密钥就认不出来了。
+ */
+export function redactMessage(msg: TgMessage): TgMessage {
+  const clean = (m: TgMessage): TgMessage => ({
+    ...m,
+    ...(m.text !== undefined ? { text: redactSecrets(m.text) } : {}),
+    ...(m.caption !== undefined ? { caption: redactSecrets(m.caption) } : {}),
+  })
+  const r = msg.reply_to_message
+  return { ...clean(msg), ...(r ? { reply_to_message: clean(r) } : {}) }
 }
 
 /**
