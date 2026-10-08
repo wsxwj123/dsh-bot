@@ -75,6 +75,9 @@ export function checkProviderName(name: string): string | null {
   return null
 }
 
+/** 只判名字**格式**（不含保留字）：本机接口与管理台按 3.1.1 的规则先筛掉不合法的名字（方案 3.8、3.9） */
+export const isProviderName = (name: string): boolean => NAME_RE.test(name)
+
 /** 本机地址：URL 解析后的主机名（小写）精确等于这三个之一（http://127.0.0.1.nip.io 之类都不算） */
 export const isLocalHost = (hostname: string) => ['127.0.0.1', 'localhost', '[::1]'].includes(hostname.toLowerCase())
 

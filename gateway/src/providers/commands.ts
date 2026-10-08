@@ -8,6 +8,9 @@ import { registerSecret, safeError, type Logger } from '../log'
 import { fetchFailText, TRUNCATED_NOTE } from './models'
 import type { ProviderService, RefreshResult, SaveResult } from './service'
 
+/** 本机接口 `POST /v1/provider/refresh` 的返回（方案 3.8）：HTTP 状态码 + 机读错误码 + 文案 */
+export type ApiRefreshResult = { status: number; body: { ok: boolean; error?: string; reason?: string; count?: number; added?: number; removed?: number; kept_manual?: number; text: string } }
+
 /** `/provider add …` 的识别（文字或图片/文件附言，去首尾空白后）：`^/provider(@\S+)?\s+add(\s|$)`，不分大小写 */
 export function isProviderAdd(text: string | undefined | null): boolean {
   return !!text && /^\/provider(@\S+)?\s+add(\s|$)/i.test(text.trim())
@@ -150,6 +153,62 @@ export class ProviderCommands {
   /** 3.4.5 的刷新结果文案（无按钮） */
   refreshText(name: string, r: RefreshResult): string {
     return refreshResultText(this.root(), name, r)
+  }
+
+  /**
+   * 本机接口的 `POST /v1/provider/refresh`（方案 3.8）：与 `/provider refresh` 同一套流程，
+   * 但把结果翻成 HTTP 状态码 + 机读错误码的契约。text 去掉「【系统】」前缀，其余同 3.6 的回复。
+   */
+  async apiRefresh(name: string): Promise<ApiRefreshResult> {
+    const noPrefix = (t: string) => t.replace(/^【系统】/, '')
+    const root = this.root()
+    let snap
+    try {
+      snap = readProviders(`${root}/providers.json`)
+    } catch (e) {
+      if (e instanceof ProvidersUnreadable) {
+        return { status: 503, body: { ok: false, error: 'providers_unreadable', text: noPrefix(`【系统】共用供应商文件读不了（格式坏了），先修好 ${root}/providers.json`) } }
+      }
+      throw e
+    }
+    const found = this.findValid(snap, name)
+    if (!found) {
+      if (snap.invalid.some(i => normName(i.name) === normName(name))) {
+        return { status: 409, body: { ok: false, error: 'disabled', text: noPrefix(`【系统】「${name}」配置有误，未启用，不能刷新。`) } }
+      }
+      if (normName(name) === 'deepseek-official') {
+        return { status: 400, body: { ok: false, error: 'not_custom', text: noPrefix(`【系统】只有自建供应商能刷新模型；${name} 是内置的。`) } }
+      }
+      if (this.d.configRouteNames().map(normName).includes(normName(name))) {
+        return { status: 400, body: { ok: false, error: 'not_custom', text: noPrefix(`【系统】只有自建供应商能刷新模型；${name} 是配置文件里的。`) } }
+      }
+      return { status: 404, body: { ok: false, error: 'not_found', text: noPrefix(`【系统】没有 ${name} 这个供应商。用 /provider 看有哪些。`) } }
+    }
+    if (!this.d.service.credential(found.entry.route.apiKeyEnv)) {
+      return { status: 409, body: { ok: false, error: 'key_missing', text: noPrefix(`【系统】「${found.name}」缺密钥，先用 /provider →「修改」→「密钥」补上。`) } }
+    }
+    const r = await this.d.service.refresh(found.name)
+    const t = noPrefix(this.refreshText(found.name, r))
+    switch (r.status) {
+      case 'ok':
+        return { status: 200, body: { ok: true, count: r.count, added: r.added, removed: r.removed.length, kept_manual: r.keptManual, text: t } }
+      case 'failed':
+        return { status: 502, body: { ok: false, error: 'fetch_failed', reason: r.reason, text: t } }
+      case 'gone':
+      case 'changed':
+        return { status: 409, body: { ok: false, error: 'changed', text: t } }
+      case 'busy':
+      case 'lock_timeout':
+        return { status: 409, body: { ok: false, error: 'busy', text: t } }
+      case 'key_missing':
+        return { status: 409, body: { ok: false, error: 'key_missing', text: t } }
+      case 'unreadable':
+        return { status: 503, body: { ok: false, error: 'providers_unreadable', text: t } }
+      case 'not_found':
+        return { status: 404, body: { ok: false, error: 'not_found', text: t } }
+      case 'disabled':
+        return { status: 409, body: { ok: false, error: 'disabled', text: t } }
+    }
   }
 
   private root(): string { return this.d.root }

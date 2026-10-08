@@ -160,6 +160,8 @@ async function main(): Promise<void> {
     onInbound: chatId => engine!.onInbound(chatId),
     callPromises: (chatId, lines) => engine!.commitments.fromCall(chatId, lines),
     model: { info: () => engine!.modelInfo(), set: spec => engine!.modelSet(spec) },
+    // 自建供应商（方案 3.8）：GET /v1/model 的 providers 现读 providers.json；刷新走 ProviderService
+    provider: { views: () => engine!.providerViews(), refresh: name => commands.apiRefresh(name) },
   })
   apiServer.start()
   engine.start()

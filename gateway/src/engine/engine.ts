@@ -1478,8 +1478,26 @@ export class Engine {
     return { status: this.credRef(env) ? 'ok' : 'missing', env }
   }
 
+  /**
+   * 现读 providers.json 刷新快照与合并结果（方案 3.8：GET /v1/model 的 providers 每次请求都现读）。
+   * 与 checkProviders 的区别：不写日志、不重算 configBrain/覆盖、不触发重启，只让视图看到最新文件。
+   * 读坏时与 checkProviders 一致：保留上一次读到的内容。
+   */
+  private reloadProvidersForView(): void {
+    try {
+      const snap = readProviders(this.providersPath())
+      this.sharedProviders = snap
+      this.providersReadable = true
+      this.providerMerge = mergeRoutes(this.fileRoutes, snap)
+    } catch (e) {
+      if (!(e instanceof ProvidersUnreadable)) throw e
+      this.providersReadable = false
+    }
+  }
+
   /** 供应商视图（/provider 列表、GET /v1/model 的 providers 都用它；绝不含密钥、地址） */
   async providerViews(): Promise<ProviderView[]> {
+    this.reloadProvidersForView()
     try { await this.modelChoicesNow() } catch (e) { this.log.warn('api.model_choices_failed', { err: safeError(e) }) }
     const countOf = (p: string) => this.modelChoices.filter(c => c.provider === p).length
     const known = this.modelChoices.length > 0

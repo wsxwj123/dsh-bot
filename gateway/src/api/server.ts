@@ -5,6 +5,7 @@ import type { Server } from 'bun'
 import { loadAccess } from '../config'
 import type { Ledger } from '../ledger'
 import { safeError, type Logger } from '../log'
+import { isProviderName } from '../providers/store'
 import { allowedFile, describeResults, type Sender } from '../telegram/sender'
 import { randomToken, safeEqual } from '../util'
 
@@ -21,7 +22,27 @@ export type ApiDeps = {
   health: () => { ok: boolean } & Record<string, unknown>
   /** 管理台看模型、换模型（和 /model 命令同一套逻辑） */
   model?: { info: () => Promise<unknown>; set: (spec: string) => Promise<{ ok: boolean }> }
+  /**
+   * 自建供应商（方案 3.8）：`views` 每次请求现读 providers.json；`refresh` 走 ProviderService 的刷新。
+   * 由 main.ts 装配注入。views 的返回与 engine 的 ProviderView 结构兼容（多带的字段在这里丢掉）。
+   */
+  provider?: {
+    views: () => Promise<ProviderViewLike[]>
+    refresh: (name: string) => Promise<{ status: number; body: unknown }>
+  }
   onInbound: (chatId: string) => void
+}
+
+/** engine.ProviderView 的结构子集：本接口只投这些字段（绝不含密钥、地址） */
+type ProviderViewLike = {
+  name: string
+  source: string
+  api: string | null
+  models: number | null
+  key: string
+  enabled: boolean
+  note: string | null
+  lastRefresh: { at: number; ok: boolean; count: number; reason: string | null } | null
 }
 
 const MAX_BODY = 1024 * 1024
@@ -49,7 +70,7 @@ export class ApiServer {
       return json(h, h.ok ? 200 : 503)
     }
     if (req.method === 'GET' && url.pathname === '/v1/model' && this.d.model) {
-      try { return json(await this.d.model.info()) } catch (e) {
+      try { return json(await this.modelResponse()) } catch (e) {
         this.d.log.error('api.failed', { path: url.pathname, err: safeError(e) })
         return json({ error: 'internal error' }, 500)
       }
@@ -79,12 +100,31 @@ export class ApiServer {
           const r = await this.d.model.set(spec)
           return json(r, r.ok ? 200 : 400)
         }
+        case '/v1/provider/refresh': return await this.providerRefresh(body)
         default: return json({ error: 'not found' }, 404)
       }
     } catch (e) {
       this.d.log.error('api.failed', { path: url.pathname, err: safeError(e) })
       return json({ error: 'internal error' }, 500)
     }
+  }
+
+  /** GET /v1/model：原有 current/config/choices + providers（方案 3.8）；providers 每次请求现读 */
+  private async modelResponse(): Promise<Record<string, unknown>> {
+    const info = (await this.d.model!.info()) as Record<string, unknown>
+    const providers = this.d.provider ? (await this.d.provider.views()).map(providerJson) : []
+    return { ...info, providers }
+  }
+
+  /** POST /v1/provider/refresh：名字先按 3.1.1 的格式筛掉，再交给 ProviderCommands 的刷新 */
+  private async providerRefresh(body: Record<string, unknown>): Promise<Response> {
+    const name = body.name
+    if (typeof name !== 'string' || !isProviderName(name)) {
+      return json({ ok: false, error: 'bad_name', text: '供应商名字不合法' }, 400)
+    }
+    if (!this.d.provider) return json({ ok: false, error: 'internal error' }, 500)
+    const r = await this.d.provider.refresh(name)
+    return json(r.body, r.status)
   }
 
   private chatAllowed(chatId: string): boolean {
@@ -125,4 +165,13 @@ export class ApiServer {
 
 function json(o: unknown, status = 200): Response {
   return new Response(JSON.stringify(o), { status, headers: { 'content-type': 'application/json' } })
+}
+
+/** ProviderView → 3.8 的字段形状：只投这些字段，丢掉内部的 keyEnv（绝不含密钥、地址） */
+function providerJson(v: ProviderViewLike): Record<string, unknown> {
+  return {
+    name: v.name, source: v.source, api: v.api, models: v.models, key: v.key,
+    enabled: v.enabled, note: v.note,
+    last_refresh: v.lastRefresh ? { at: v.lastRefresh.at, ok: v.lastRefresh.ok, count: v.lastRefresh.count, reason: v.lastRefresh.reason } : null,
+  }
 }
