@@ -33,6 +33,8 @@ export const NEW_BTN: Btn = { label: '新建', action: 'new' }
 export const SWITCH_BTN: Btn = { label: '切到这家', action: 'swone' }
 export const SWITCH_ONE_BTN: Btn = { label: '切过去', action: 'swone' }
 export const REFRESH_BTN: Btn = { label: '刷新模型', action: 'ref' }
+/** 结果步的「刷新模型」：刷新这一步的这一个供应商（方案 3.4.2 没拉到模型的结果），不是主菜单的选谁刷新 */
+export const REFRESH_ONE_BTN: Btn = { label: '刷新模型', action: 'refone' }
 
 /** 主菜单按钮（顺序固定，验收逐字核对） */
 export const MAIN_BUTTONS: Btn[] = [

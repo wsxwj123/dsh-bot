@@ -531,7 +531,7 @@ export class Wizard {
     let text = `${base}${note}`
     if (st.strippedV1) text += '\n已去掉地址末尾的 /v1（Anthropic 格式会自动加）'
     st.step = PF.P.result
-    const buttons: Btn[] = r.reason === null ? [PF.SWITCH_ONE_BTN, PF.CLOSE] : [PF.REFRESH_BTN, PF.CLOSE]
+    const buttons: Btn[] = r.reason === null ? [PF.SWITCH_ONE_BTN, PF.CLOSE] : [PF.REFRESH_ONE_BTN, PF.CLOSE]
     await this.sendMenu(chatId, st, text, buttons)
   }
 
