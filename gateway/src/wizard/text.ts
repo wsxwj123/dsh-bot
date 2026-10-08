@@ -22,6 +22,22 @@ export function looksLikeSecret(input: string | undefined | null): boolean {
 }
 
 /**
+ * 迟到密钥防护窗口里的判定（方案 3.3.5 的取舍）：在 looksLikeSecret 之外，再收一种"含斜杠的真密钥"——
+ * 少数网关的 token 带 /，被普通判定排除后既不会被删、也不会被登记（防护等于漏掉）。
+ * 只在防护窗口用；仍排除网址（http(s)://），并把门槛提高到 ≥20 个可见 ASCII 且含字母和数字，
+ * 避免把地址/路径当密钥误删。
+ */
+export function looksLikeLateSecret(input: string | undefined | null): boolean {
+  if (looksLikeSecret(input)) return true
+  const s = (input ?? '').trim()
+  if (s.length < 20 || s.length > 512) return false
+  if (!VISIBLE.test(s)) return false
+  if (!s.includes('/')) return false
+  if (/^https?:\/\//i.test(s)) return false
+  return HAS_LETTER.test(s) && HAS_DIGIT.test(s)
+}
+
+/**
  * 上下文长度写法（方案 3.5.3）：纯整数，或数字（可带小数）后接 k/K（×1000）、m/M（×1000000），四舍五入。
  * 合格返回整数，不合格返回 null（调用方套「上下文长度要是 1024 到 100000000 之间的整数，可以写 128k 或 1.5m」）。
  */

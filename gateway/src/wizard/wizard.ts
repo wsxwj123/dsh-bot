@@ -263,7 +263,7 @@ export class Wizard {
       if (until !== undefined) {
         if (until > this.now()) {
           // 防护窗口里：像密钥的删除并提示；/cancel 接走；其余照常（/provider、/model 会开新菜单）
-          if (T.looksLikeSecret(body)) { this.takeAtomic(chatId, updateId, null); void this.dropLate(chatId, msg); return true }
+          if (T.looksLikeLateSecret(body)) { this.takeAtomic(chatId, updateId, null); void this.dropLate(chatId, msg); return true }
           if (isCancel(body)) { this.takeAtomic(chatId, updateId, null); return true }
         } else {
           this.protection.delete(chatId)
