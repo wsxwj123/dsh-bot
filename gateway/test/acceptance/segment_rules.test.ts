@@ -23,7 +23,9 @@ async function cmd(tg: any, text: string) {
   return waitSentText(tg, OWNER, '【系统】', k)
 }
 /** 含某句话的那一轮（不含写摘要轮） */
-const turnOf = (b: BotEnv, text: string) => chatPrompts(b).filter(p => p.text.includes(text)).pop()
+// 取发出这句话的那一轮：以这句话结尾的那一次请求，才是这句话被送出的轮次。
+// 不能用 includes —— 换段后新会话的第一轮会把上一句当前情带上，那样取到的是新会话的种子。
+const turnOf = (b: BotEnv, text: string) => chatPrompts(b).filter(p => p.text.trimEnd().endsWith(text)).pop()
 const summaries = (b: BotEnv) => readJsonl<{ sessionId: string; mode?: string }>(join(b.acpState, 'summaries.jsonl'))
 const order = (b: BotEnv, names: string[]) => names.map(n => logEvents(b).findIndex(e => e.event === n && (n === 'segment.provider_changed' || e.reason === 'provider-changed')))
 
