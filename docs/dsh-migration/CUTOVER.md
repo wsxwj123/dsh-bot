@@ -23,12 +23,13 @@
    - 新网关第一次处理这个私聊时，会用导入的记录补写一份摘要，新会话带着摘要和最近的原话开始。
    - 这个私聊在新系统里已经聊过的（比如测试用过的 bot5），脚本不导入，免得新旧记录交错。
 4. **开机自启**：
+   - 仓库要放在家目录根下（例如 `~/dsh-bot`），不要放在桌面、文稿、下载或 iCloud 云盘里：macOS 的隐私保护会拦住 launchd 直接拉起的 python 任务，开机自启会失败。安装命令发现仓库在这些目录下会直接拒绝（退出码 1），什么都不装；
    - `bun gateway/scripts/autostart.ts install ~/.dsh-bot/configs/<新名>.yml`：网关开机自启，退出了 10 秒后自动拉起；
    - `bun gateway/scripts/autostart.ts install-jobs ~/.dsh-bot/configs/<新名>.yml`：主动消息，每 10 分钟看一次要不要开口；
    - 要在设了代理的终端里运行：安装时会把代理设置带进去，launchd 启动的程序拿不到终端里的环境变量。
 5. **抽查**：
    - 给 bot 发一条消息；
-   - `bun gateway/scripts/autostart.ts status` 看运行状态；
+   - `bun gateway/scripts/autostart.ts status` 看运行状态和上次退出码；
    - `bun gateway/scripts/logs.ts --config ~/.dsh-bot/configs/<新名>.yml -f` 看实时日志；
    - `bun gateway/scripts/health.ts --config …` 看健康状态。
 6. **群聊**（用到的话）：
