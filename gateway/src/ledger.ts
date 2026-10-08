@@ -203,6 +203,15 @@ export class Ledger {
   setMeta(k: string, v: string): void {
     this.db.query('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').run(k, v)
   }
+  deleteMeta(k: string): void {
+    this.db.query('DELETE FROM meta WHERE k = ?').run(k)
+  }
+  /** 所有以 prefix 开头的 meta（引导状态按聊天分开存，重启后一次取回用） */
+  metaByPrefix(prefix: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const r of this.db.query<{ k: string; v: string }, [string]>('SELECT k, v FROM meta WHERE k LIKE ?').all(`${prefix}%`)) out[r.k] = r.v
+    return out
+  }
 
   // ─── inbound ───
   insertInbound(m: NewInbound): { inserted: boolean; id: number } {

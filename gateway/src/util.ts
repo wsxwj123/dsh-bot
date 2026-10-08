@@ -84,3 +84,17 @@ export function crashPoint(name: string): void {
   if (process.platform === 'win32') process.exit(137)
   process.kill(process.pid, 'SIGKILL')
 }
+
+/**
+ * 把本机地址加进 NO_PROXY / no_proxy（方案 D16）：保留原有值、追加而不是覆盖。
+ * 这样拉模型列表时 127.0.0.1 / localhost / ::1 不绕代理，本机服务没开就如实报"连不上"；外网照旧走代理。
+ * 就地改 env；返回 env 便于测试。
+ */
+export function addNoProxyHosts(env: Record<string, string | undefined>, hosts: string[] = ['127.0.0.1', 'localhost', '::1']): Record<string, string | undefined> {
+  for (const key of ['NO_PROXY', 'no_proxy']) {
+    const set = new Set((env[key] ?? '').split(',').map(s => s.trim()).filter(Boolean))
+    for (const h of hosts) set.add(h)
+    env[key] = [...set].join(',')
+  }
+  return env
+}

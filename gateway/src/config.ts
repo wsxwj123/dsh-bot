@@ -90,6 +90,18 @@ export type GatewayOpts = {
   configPollMs: number
   heartbeatMs: number
   probeMs: number
+  /** 引导超时（INTERFACE 3.13.4）；到点结束引导 */
+  wizardTimeoutMs: number
+  /** 引导非正常结束后，多久内把"像密钥"的消息当作迟到密钥删掉（不能关） */
+  lateSecretWindowMs: number
+  /** 改 providers.json / 凭据文件时等锁的上限 */
+  providerLockWaitMs: number
+  /** 拉模型列表时每个请求的超时 */
+  modelFetchTimeoutMs: number
+  /** 删供应商后，多久才从凭据文件删掉它的密钥（给别的 bot 切走的时间；0 = 下一次轮询就删） */
+  providerKeyGraceMs: number
+  /** 跨供应商换段时，在旧会话里写交接摘要最多等多久 */
+  providerSwitchSummaryMs: number
 }
 
 export type BotConfig = {
@@ -229,7 +241,21 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     configPollMs: num(g.config_poll_ms, 5_000, 'gateway.config_poll_ms'),
     heartbeatMs: num(g.heartbeat_ms, 10_000, 'gateway.heartbeat_ms'),
     probeMs: num(g.probe_ms, 60_000, 'gateway.probe_ms'),
+    wizardTimeoutMs: msNum(g.wizard_timeout_ms, 600_000, 'gateway.wizard_timeout_ms', 1_000, 86_400_000),
+    lateSecretWindowMs: msNum(g.late_secret_window_ms, 600_000, 'gateway.late_secret_window_ms', 1_000, 86_400_000),
+    providerLockWaitMs: msNum(g.provider_lock_wait_ms, 10_000, 'gateway.provider_lock_wait_ms', 100, 60_000),
+    modelFetchTimeoutMs: msNum(g.model_fetch_timeout_ms, 15_000, 'gateway.model_fetch_timeout_ms', 1_000, 120_000),
+    providerKeyGraceMs: msNum(g.provider_key_grace_ms, 600_000, 'gateway.provider_key_grace_ms', 0, 86_400_000),
+    providerSwitchSummaryMs: msNum(g.provider_switch_summary_ms, 30_000, 'gateway.provider_switch_summary_ms', 1_000, 600_000),
   }
+}
+
+/** 带范围校验的毫秒配置（INTERFACE 3.13.4）：不是整数或超出范围 → 启动时报配置错误 */
+function msNum(v: unknown, def: number, name: string, min: number, max: number): number {
+  if (v === undefined || v === null || v === '') return def
+  const n = Number(v)
+  if (!Number.isInteger(n) || n < min || n > max) throw new ConfigError(`${name} 必须是 ${min} 到 ${max} 之间的整数`)
+  return n
 }
 
 export function readYaml(path: string): Record<string, unknown> {
