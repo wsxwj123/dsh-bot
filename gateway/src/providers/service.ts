@@ -6,7 +6,7 @@ import { safeError, type Logger } from '../log'
 import {
   apiKeyEnvFor, CredentialsUnsupported, DEFAULT_CONTEXT, hostOf, isProviderKeyEnv, normName, readCredentialRefs,
   readProviders, setCredentialRef, writeProviders, ProvidersLockTimeout, ProvidersUnreadable, withProvidersLock,
-  type ProviderApi, type ProviderEntry, type PendingKeyRemoval, type ProviderModel, type ProvidersSnapshot,
+  type ProviderApi, type ProviderEntry, type PendingKeyRemoval, type ProviderMeta, type ProviderModel, type ProviderRoute, type ProvidersSnapshot,
 } from './store'
 import type { FetchedModel, FetchFailReason, FetchModelsFn, FetchModelsResult } from './models'
 
@@ -62,6 +62,17 @@ export class ProviderService {
   constructor(private readonly d: ServiceDeps) { this.now = d.now ?? Date.now }
 
   private providersPath(): string { return `${this.d.root}/providers.json` }
+
+  /**
+   * 写回一个条目时保留文件里原来不认识的字段（条目级与 route 级，如主人手写的 note、route.timeoutMs），
+   * 只覆盖本次真正要改的 route 已知字段与 meta（方案 3.1.1「其它字段留在文件里」、store.ts 头注释）。
+   * 不这么做会把主人手写字段静默丢掉。
+   */
+  private withKnownEntry(prev: unknown, known: { route: ProviderRoute; meta: ProviderMeta }): Record<string, unknown> {
+    const p = (prev && typeof prev === 'object' && !Array.isArray(prev) ? prev : {}) as Record<string, unknown>
+    const pr = (p.route && typeof p.route === 'object' && !Array.isArray(p.route) ? p.route : {}) as Record<string, unknown>
+    return { ...p, route: { ...pr, ...known.route }, meta: known.meta }
+  }
 
   private read(): ProvidersSnapshot { return readProviders(this.providersPath()) }
 
@@ -164,7 +175,7 @@ export class ProviderService {
     const route = { api: o.api, baseURL: o.baseURL, apiKeyEnv: keyEnv, models: built.models }
     const pending: PendingKeyRemoval[] = [...snap.pendingKeyRemovals]
     if (entry && epochChanged && isProviderKeyEnv(entry.route.apiKeyEnv)) pending.push({ key: entry.route.apiKeyEnv, after: t + this.d.keyGraceMs })
-    writeProviders(this.providersPath(), { ...snap.raw, providers: { ...providers, [entryName]: { route, meta } }, pendingKeyRemovals: pending })
+    writeProviders(this.providersPath(), { ...snap.raw, providers: { ...providers, [entryName]: this.withKnownEntry(providers[entryName], { route, meta }) }, pendingKeyRemovals: pending })
     this.d.log.info(kind === 'created' ? 'provider.created' : 'provider.updated', { name: entryName, api: o.api })
     this.d.onChanged?.() // providers.json 已写成：立刻让本 bot 重算路由
 
@@ -264,7 +275,8 @@ export class ProviderService {
         const removed = e.entry.route.models.filter(m => !afterIds.has(m.id)).map(m => m.id)
         const meta = { ...e.entry.meta, updatedAt: this.now(), guessedContext: built.guessed, lastRefresh: { at: this.now(), ok: true, count: fetchedCount, reason: null } }
         const route = { ...e.entry.route, models: built.models }
-        const raw = { ...cur.raw, providers: { ...(cur.raw.providers as Record<string, unknown>), [e.name]: { route, meta } } }
+        const rawList = cur.raw.providers as Record<string, unknown>
+        const raw = { ...cur.raw, providers: { ...rawList, [e.name]: this.withKnownEntry(rawList[e.name], { route, meta }) } }
         writeProviders(this.providersPath(), raw)
         this.d.onChanged?.()
         return { status: 'ok', name: e.name, count: fetchedCount, added, removed, keptManual: e.entry.meta.manualModels.length } as RefreshResult
@@ -354,7 +366,8 @@ export class ProviderService {
         if (!found) return { ok: false as const, why: 'gone' as const }
         const r = fn(found.entry)
         if (r.why) return { ok: false as const, why: r.why === 'exists' ? 'exists' : 'not_found' }
-        const raw = { ...snap.raw, providers: { ...(snap.raw.providers as Record<string, unknown>), [found.name]: r.entry } }
+        const rawList = snap.raw.providers as Record<string, unknown>
+        const raw = { ...snap.raw, providers: { ...rawList, [found.name]: this.withKnownEntry(rawList[found.name], r.entry!) } }
         writeProviders(this.providersPath(), raw)
         this.d.onChanged?.()
         return r.result ?? { ok: true as const }
