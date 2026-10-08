@@ -61,6 +61,9 @@ export class ProviderCommands {
 
   private async handleAdd(msg: TgMessage, body: string): Promise<void> {
     const chatId = String(msg.chat.id)
+    // 先把正文里的密钥字段登记为机密（方案 3.11）：这条消息可能因超时等原因删不掉，之后主人引用它时，
+    // 入账前替换机密那一步要认得出它。放在最前面，任何分支（非主人、群里、参数不合规）都先登记过。
+    this.registerKeyFromBody(body)
     const isPrivate = msg.chat.type === 'private'
     const owner = this.d.isOwner(msg.from ? String(msg.from.id) : null)
     const deleted = await this.deleteMessage(chatId, msg.message_id)
@@ -96,6 +99,19 @@ export class ProviderCommands {
     await this.d.reply(chatId, `${this.saveText(r, parsed.name)}${note}`)
     this.d.log.info('command.provider_add', { chat: chatId, ok: r.status === 'saved', ...(r.status !== 'saved' ? { reason: r.status } : {}) })
   }
+  /**
+   * 从 `/provider add` 的正文里认出密钥字段（第 3 个参数）并立即登记为机密，不依赖其它参数是否合法、
+   * 也不管这条消息删没删掉（方案 3.11）。判定用 cleanSecret 的形态、并排除地址（含 :// 或斜杠），
+   * 避免把填错位置的地址当成密钥。含斜杠的真密钥这里不登记（见 3.3.5"像密钥"判定的取舍）。
+   */
+  private registerKeyFromBody(body: string): void {
+    const args = body.replace(/^\/provider(@\S+)?\s+add(\s|$)/i, '').trim()
+    const raw = args.split(/\s+/).filter(Boolean)[2]
+    if (!raw) return
+    const key = cleanSecret(raw)
+    if (key && !/^https?:\/\//i.test(key) && !key.includes('/')) registerSecret(key)
+  }
+
   /** 解析 `/provider add` 的参数：`<名字> <地址> <密钥> [openai|anthropic]`（第 4 个不写 = Anthropic） */
   private parseAdd(args: string): { name: string; api: ProviderApi; baseURL: string; key: string } | { error: string; reason: string } {
     const parts = args.split(/\s+/).filter(Boolean)
