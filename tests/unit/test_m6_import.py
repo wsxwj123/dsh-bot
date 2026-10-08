@@ -84,3 +84,24 @@ def test_只看承诺文件的结构_不打印内容(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "识别出 4 条" in r.stdout and "due_at: int" in r.stdout and "会导入 2 条" in r.stdout
     assert "明早" not in r.stdout and "电影" not in r.stdout
+
+
+def test_聊过的聊天_没有旧聊天记录只有新承诺_正式导入也整个跳过_和试算说的一致(tmp_path):
+    old, env, ledger = make_old(tmp_path)
+    assert run(env, "--from", str(old)).returncode == 0
+    promises = json.loads((old / ".promises.json").read_text(encoding="utf-8"))
+    promises.append({"text": "后来新加的承诺", "due_at": int((time.time() + 86400) * 1000)})
+    (old / ".promises.json").write_text(json.dumps(promises, ensure_ascii=False), encoding="utf-8")
+    def count():
+        db = sqlite3.connect(ledger)
+        try:
+            return db.execute("SELECT COUNT(*) FROM commitments").fetchone()[0]
+        finally:
+            db.close()
+    before = count()
+    # --days 0：旧聊天记录一条都不取，只剩承诺
+    dry = run(env, "--from", str(old), "--days", "0", "--dry-run")
+    assert dry.returncode == 0 and "正式导入会跳过：聊天记录和承诺都不会导入" in dry.stdout
+    r = run(env, "--from", str(old), "--days", "0")
+    assert r.returncode != 0 and "已经聊过" in (r.stderr + r.stdout)
+    assert count() == before

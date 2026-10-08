@@ -24,6 +24,7 @@ import sqlite3
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -112,10 +113,13 @@ def read_old_dialog(old_dir: str, old_bot: str | None, chat: str, days: int) -> 
     return uniq
 
 
+def _ledger_path(bot: str) -> str:
+    return os.path.join(_home(), "bots", bot, "state", "ledger.sqlite")
+
+
 def _open_ledger(bot: str) -> sqlite3.Connection:
-    state = os.path.join(_home(), "bots", bot, "state")
-    os.makedirs(state, mode=0o700, exist_ok=True)
-    db = sqlite3.connect(os.path.join(state, "ledger.sqlite"))
+    os.makedirs(os.path.dirname(_ledger_path(bot)), mode=0o700, exist_ok=True)
+    db = sqlite3.connect(_ledger_path(bot))
     db.execute("PRAGMA busy_timeout = 5000")
     with open(SCHEMA, encoding="utf-8") as f:
         db.executescript(f.read())
@@ -130,11 +134,38 @@ def _gateway_running(bot: str) -> bool:
         return False
 
 
+def _has_segments(db: sqlite3.Connection, chat: str) -> bool:
+    """这个聊天在新系统里聊过没有（账本里有会话段）。试算和正式导入共用这一个判断，两边结论才一致。"""
+    return db.execute("SELECT 1 FROM segments WHERE chat_id = ? LIMIT 1", (chat,)).fetchone() is not None
+
+
+SEEN_EXIT = "这个聊天在新系统里已经聊过（账本里有会话段），不导入旧记录，免得新旧交错。"
+
+
+def dry_run_seen(bot: str, chat: str) -> None:
+    """试算时也查"聊过没有"（方案 3.10.2）。只读打开：不建目录、不建文件、不改账本；账本不存在就什么都不说。"""
+    path = _ledger_path(bot)
+    if not os.path.exists(path):
+        return
+    try:
+        # as_uri() 会转义路径里的 ? # 和空格：直接拼 file:<路径>?mode=ro 时，路径里带 ? 会让 mode=ro 失效、变成可写打开
+        db = sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            seen = _has_segments(db, chat)
+        finally:
+            db.close()
+    except Exception as e:  # 文件坏了、被锁、不是账本：只报类名，不带路径和内容
+        print(f"读不了账本（{type(e).__name__}），没法判断这个聊天在新系统里有没有聊过。")
+        return
+    if seen:
+        print("这个聊天在新系统里已经聊过（账本里有会话段），正式导入会跳过：聊天记录和承诺都不会导入。")
+
+
 def import_dialog(db: sqlite3.Connection, chat: str, rows: list[tuple[str, str, int]]) -> int:
     if not rows:
         return 0
-    if db.execute("SELECT COUNT(*) FROM segments WHERE chat_id = ?", (chat,)).fetchone()[0]:
-        raise SystemExit("这个聊天在新系统里已经聊过（账本里有会话段），不导入旧记录，免得新旧交错。")
+    if _has_segments(db, chat):
+        raise SystemExit(SEEN_EXIT)
     now = int(time.time() * 1000)
     first, last = rows[0][2], rows[-1][2]
     cur = db.cursor()
@@ -272,9 +303,13 @@ def main() -> None:
     print(f"旧私聊记录（最近 {a.days} 天）：对方 {sum(1 for r in rows if r[0] == 'user')} 条，bot {sum(1 for r in rows if r[0] == 'bot')} 条")
     print(f"还没到点的旧承诺：{len(items)} 条")
     if a.dry_run:
+        dry_run_seen(a.bot, chat)
         return
     db = _open_ledger(a.bot)
     try:
+        # 聊过就整个不导（承诺也不导），和试算说的一致；放在最前面，没有旧聊天记录时也照样拦住
+        if _has_segments(db, chat):
+            raise SystemExit(SEEN_EXIT)
         n = import_dialog(db, chat, rows)
         m = import_promises(db, items)
     finally:
