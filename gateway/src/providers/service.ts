@@ -101,8 +101,8 @@ export class ProviderService {
     return snap.invalid.some(i => normName(i.name) === want)
   }
 
-  /** 新建/更新：锁外拉列表 → 锁内重读判断新建还是更新 → 先写 providers.json 再写凭据 */
-  async save(o: { name: string; api: ProviderApi; baseURL: string; key: string }): Promise<SaveResult> {
+  /** 新建/更新：锁外拉列表 → 锁内重读判断新建还是更新 → 先写 providers.json 再写凭据。mode='modify' 时供应商已不在就返回 gone，不复活 */
+  async save(o: { name: string; api: ProviderApi; baseURL: string; key: string; mode?: 'create' | 'modify' }): Promise<SaveResult> {
     const fetched = await this.d.fetchModels({ api: o.api, baseURL: o.baseURL, key: o.key })
     const fetchOk = fetched.ok
     const storedURL = fetched.ok ? fetched.baseURL : o.baseURL
@@ -120,7 +120,7 @@ export class ProviderService {
 
     try {
       return await withProvidersLock(this.d.root, { waitMs: this.d.lockWaitMs, log: this.d.log, now: this.now }, () =>
-        this.writeEntry(this.read(), { name: o.name, api: o.api, baseURL: storedURL, key: o.key, models, failReason, failStatus, failSeconds, v1Added, truncated, seenBefore }))
+        this.writeEntry(this.read(), { name: o.name, api: o.api, baseURL: storedURL, key: o.key, models, failReason, failStatus, failSeconds, v1Added, truncated, seenBefore, mode: o.mode ?? 'create' }))
     } catch (e) {
       if (e instanceof ProvidersLockTimeout) return { status: 'lock_timeout' }
       if (e instanceof ProvidersUnreadable) return { status: 'unreadable' }
@@ -130,9 +130,12 @@ export class ProviderService {
   }
 
   /** 锁内：在锁里重读出的文件上写这个供应商（新建或更新），再写凭据。任何失败返回对应状态 */
-  private writeEntry(snap: ProvidersSnapshot, o: { name: string; api: ProviderApi; baseURL: string; key: string; models: FetchedModel[]; failReason: FetchFailReason | null; failStatus: number | null; failSeconds?: number; v1Added: boolean; truncated: boolean; seenBefore: boolean }): SaveResult {
+  private writeEntry(snap: ProvidersSnapshot, o: { name: string; api: ProviderApi; baseURL: string; key: string; models: FetchedModel[]; failReason: FetchFailReason | null; failStatus: number | null; failSeconds?: number; v1Added: boolean; truncated: boolean; seenBefore: boolean; mode: 'create' | 'modify' }): SaveResult {
     const providers = snap.raw.providers as Record<string, unknown>
     const existing = this.byNorm(snap, o.name)
+
+    // 修改：拉列表期间被别处删掉了 → 这次修改没保存，不复活（方案 3.4.3 第 5 条）
+    if (o.mode === 'modify' && !existing) return { status: 'gone', name: o.name }
 
     let entryName = existing?.name ?? o.name
     let entry: ProviderEntry | undefined = existing?.entry
@@ -294,12 +297,17 @@ export class ProviderService {
     }
   }
 
-  /** 加一个手动模型（id 已校验过；ctx 为 null = 未知按 131072 算并计入 manualModels） */
+  /** 加一个手动模型（id 已校验过；ctx 为 null = 未知按 131072 算并计入 manualModels + guessedContext，否则计入 ownerContext） */
   async addModel(name: string, id: string, ctx: number | null): Promise<ModelEditResult> {
     return this.edit(name, (e) => {
       if (e.route.models.some(m => m.id === id)) return { why: 'exists' as const }
       const models = [...e.route.models, { id, contextWindow: ctx ?? DEFAULT_CONTEXT }]
-      const meta = { ...e.meta, updatedAt: this.now(), manualModels: e.meta.manualModels.includes(id) ? e.meta.manualModels : [...e.meta.manualModels, id] }
+      const meta = {
+        ...e.meta, updatedAt: this.now(),
+        manualModels: e.meta.manualModels.includes(id) ? e.meta.manualModels : [...e.meta.manualModels, id],
+        ownerContext: ctx !== null && !e.meta.ownerContext.includes(id) ? [...e.meta.ownerContext, id] : e.meta.ownerContext,
+        guessedContext: ctx === null && !e.meta.guessedContext.includes(id) ? [...e.meta.guessedContext, id] : e.meta.guessedContext,
+      }
       return { entry: { route: { ...e.route, models }, meta }, result: { ok: true as const, ctx: ctx ?? DEFAULT_CONTEXT } }
     })
   }

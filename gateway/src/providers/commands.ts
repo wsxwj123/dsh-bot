@@ -118,23 +118,7 @@ export class ProviderCommands {
   }
 
   private saveText(r: SaveResult, name: string): string {
-    if (r.status === 'saved') {
-      const extra = r.v1Added ? `（地址补成了 ${r.baseURL}）` : ''
-      const trunc = r.truncated ? TRUNCATED_NOTE : ''
-      if (r.reason !== null) {
-        const verb = r.kind === 'created' ? '已添加' : '已更新'
-        return `【系统】${verb}供应商「${r.name}」，但没拉到模型：${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}。之后可以在 /provider 里点「刷新模型」，或用 /model →「管理自建供应商的模型」手动加。${extra}${trunc}`
-      }
-      if (r.kind === 'collided') return `【系统】「${r.name}」刚被别处新建，已改为更新它，拉到 ${r.count} 个模型。${extra}${trunc}`
-      const verb = r.kind === 'created' ? '已添加' : '已更新'
-      return `【系统】${verb}供应商「${r.name}」，拉到 ${r.count} 个模型。${extra}${trunc}`
-    }
-    if (r.status === 'cred_failed') return `【系统】供应商「${r.name}」已保存，但密钥没写进去（${r.why}）。请用 /provider →「修改」→「密钥」重试。`
-    if (r.status === 'lock_timeout') return '【系统】没保存成功：别的 bot 正在改供应商，请稍后再试。密钥没有写入。'
-    if (r.status === 'unreadable') return '【系统】没保存成功：共用供应商文件读不了（格式坏了）。密钥没有写入。'
-    if (r.status === 'save_failed') return `【系统】没保存成功：${r.why}。密钥没有写入。`
-    if (r.status === 'gone') return `【系统】「${r.name}」已经不在了，这次没保存。`
-    return `【系统】没添加：${name} 没保存成功。`
+    return saveResultText(r, name)
   }
 
   /**
@@ -165,22 +149,7 @@ export class ProviderCommands {
 
   /** 3.4.5 的刷新结果文案（无按钮） */
   refreshText(name: string, r: RefreshResult): string {
-    switch (r.status) {
-      case 'ok': {
-        let t = `【系统】「${name}」拉到 ${r.count} 个模型（新增 ${r.added} 个，去掉 ${r.removed.length} 个；手动加的 ${r.keptManual} 个保留）。`
-        if (r.removed.length) t += `\n去掉了：${r.removed.slice(0, 10).join('、')}`
-        return t
-      }
-      case 'failed': return `【系统】「${name}」没拉到模型：${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}。模型列表保持不变。`
-      case 'gone': return `【系统】「${name}」已经不在了，这次结果没保存。`
-      case 'changed': return `【系统】「${name}」刚被别处改过，这次结果没保存，请再刷新一次。`
-      case 'busy': return `【系统】「${name}」正在刷新，请稍候。`
-      case 'key_missing': return `【系统】「${name}」缺密钥，先用 /provider →「修改」→「密钥」补上。`
-      case 'lock_timeout': return '【系统】别的 bot 正在改供应商，请稍后再试。'
-      case 'unreadable': return `【系统】共用供应商文件读不了（格式坏了），先修好 ${this.root()}/providers.json`
-      case 'disabled': return `【系统】「${name}」配置有误，未启用，不能刷新。`
-      case 'not_found': return `【系统】没有 ${name} 这个供应商。用 /provider 看有哪些。`
-    }
+    return refreshResultText(this.root(), name, r)
   }
 
   private root(): string { return this.d.root }
@@ -200,3 +169,44 @@ export class ProviderCommands {
 }
 
 function escapeRe(s: string): string { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
+
+/** 新建/更新（或 /provider add）的结果文案（方案 3.4.2；不含删除说明与按钮）。引导与快捷命令共用 */
+export function saveResultText(r: SaveResult, name: string): string {
+  if (r.status === 'saved') {
+    const extra = r.v1Added ? `（地址补成了 ${r.baseURL}）` : ''
+    const trunc = r.truncated ? TRUNCATED_NOTE : ''
+    if (r.reason !== null) {
+      const verb = r.kind === 'created' ? '已添加' : '已更新'
+      return `【系统】${verb}供应商「${r.name}」，但没拉到模型：${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}。之后可以在 /provider 里点「刷新模型」，或用 /model →「管理自建供应商的模型」手动加。${extra}${trunc}`
+    }
+    if (r.kind === 'collided') return `【系统】「${r.name}」刚被别处新建，已改为更新它，拉到 ${r.count} 个模型。${extra}${trunc}`
+    const verb = r.kind === 'created' ? '已添加' : '已更新'
+    return `【系统】${verb}供应商「${r.name}」，拉到 ${r.count} 个模型。${extra}${trunc}`
+  }
+  if (r.status === 'cred_failed') return `【系统】供应商「${r.name}」已保存，但密钥没写进去（${r.why}）。请用 /provider →「修改」→「密钥」重试。`
+  if (r.status === 'lock_timeout') return '【系统】没保存成功：别的 bot 正在改供应商，请稍后再试。密钥没有写入。'
+  if (r.status === 'unreadable') return '【系统】没保存成功：共用供应商文件读不了（格式坏了）。密钥没有写入。'
+  if (r.status === 'save_failed') return `【系统】没保存成功：${r.why}。密钥没有写入。`
+  if (r.status === 'gone') return `【系统】「${r.name}」已经不在了，这次没保存。`
+  return `【系统】没添加：${name} 没保存成功。`
+}
+
+/** 刷新模型的结果文案（方案 3.4.5）；root 用来在"读不了"时指出文件位置 */
+export function refreshResultText(root: string, name: string, r: RefreshResult): string {
+  switch (r.status) {
+    case 'ok': {
+      let t = `【系统】「${name}」拉到 ${r.count} 个模型（新增 ${r.added} 个，去掉 ${r.removed.length} 个；手动加的 ${r.keptManual} 个保留）。`
+      if (r.removed.length) t += `\n去掉了：${r.removed.slice(0, 10).join('、')}`
+      return t
+    }
+    case 'failed': return `【系统】「${name}」没拉到模型：${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}。模型列表保持不变。`
+    case 'gone': return `【系统】「${name}」已经不在了，这次结果没保存。`
+    case 'changed': return `【系统】「${name}」刚被别处改过，这次结果没保存，请再刷新一次。`
+    case 'busy': return `【系统】「${name}」正在刷新，请稍候。`
+    case 'key_missing': return `【系统】「${name}」缺密钥，先用 /provider →「修改」→「密钥」补上。`
+    case 'lock_timeout': return '【系统】别的 bot 正在改供应商，请稍后再试。'
+    case 'unreadable': return `【系统】共用供应商文件读不了（格式坏了），先修好 ${root}/providers.json`
+    case 'disabled': return `【系统】「${name}」配置有误，未启用，不能刷新。`
+    case 'not_found': return `【系统】没有 ${name} 这个供应商。用 /provider 看有哪些。`
+  }
+}

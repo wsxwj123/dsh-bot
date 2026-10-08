@@ -31,7 +31,7 @@ import {
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, summaryPrompt,
 } from './format'
 import { formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, type KeyStatus, type ModelChoice, type ProviderView } from './commands'
-import { mergeRoutes, normName, readProviders, ProvidersUnreadable, type ProvidersSnapshot, type MergedProviders, type ProviderEntry } from '../providers/store'
+import { mergeRoutes, normName, readProviders, ProvidersUnreadable, type ProvidersSnapshot, type MergedProviders, type ProviderEntry, type ProviderApi } from '../providers/store'
 
 /**
  * 被晾追问等多久的倍数：按关系数值（好感 + 信任）调，越亲近追得越快（用户在 M3 真机验收后定的）。
@@ -1311,7 +1311,8 @@ export class Engine {
     }
     const views = await this.providerViews()
     const cur = { provider: this.brain.provider, model: this.brain.model }
-    if (a === '' || a === 'list' || a === 'status') return formatProviders(views, cur)
+    if (a === 'help') return HELP_TEXT
+    if (a === '' || a === 'list' || a === 'status') return formatProviders(views, cur, { inGroup: isGroupChat(chatId) })
     const p = providersOf(this.modelChoices).find(x => x.toLowerCase() === a.toLowerCase()) ?? this.viewName(a, views, true)
     if (!p) return `【系统】没有 ${a} 这个供应商。用 /provider 看有哪些。`
     if (p === cur.provider) return `【系统】现在用的就是 ${p}（模型 ${cur.model}）。`
@@ -1334,7 +1335,7 @@ export class Engine {
     const k = this.keyStatus(c.provider)
     if (k.status === 'missing') {
       const hint = k.env && this.fileRoutes[c.provider] ? `凭据文件里填 ${k.env}` : '点「修改」→「密钥」补上'
-      return `【系统】${c.provider} 还没配密钥，先不换（${hint}）。`
+      return `【系统】${c.provider} 还没配密钥，先不换。${hint}`
     }
     const crossProvider = this.identityOfProvider(c.provider) !== this.identity(this.brain)
     this.setOverride(c)
@@ -1511,6 +1512,78 @@ export class Engine {
       return values
     } finally {
       void conn.request('session/close', { sessionId: s.sessionId }, 15_000).catch(() => {})
+    }
+  }
+
+  // ─── 给按钮引导（/provider、/model）的门面：只暴露引导需要的整体状态操作 ───
+
+  /** 自建供应商（校验通过的）对外视图：名字、格式、地址、键名、模型（含上下文与是否猜的）、是否启用 */
+  private customAll(): { name: string; api: ProviderApi; baseURL: string; keyEnv: string; models: { id: string; ctx: number; guessed: boolean }[]; manualIds: string[]; enabled: boolean }[] {
+    const shadow = new Set(this.providerMerge?.shadowed ?? [])
+    const invalid = new Set((this.providerMerge?.invalid ?? []).map(i => normName(i.name)))
+    const out: { name: string; api: ProviderApi; baseURL: string; keyEnv: string; models: { id: string; ctx: number; guessed: boolean }[]; manualIds: string[]; enabled: boolean }[] = []
+    for (const [name, e] of Object.entries(this.sharedProviders?.valid ?? {})) {
+      out.push({
+        name, api: e.route.api, baseURL: e.route.baseURL, keyEnv: e.route.apiKeyEnv,
+        models: e.route.models.map(m => ({ id: m.id, ctx: m.contextWindow, guessed: e.meta.guessedContext.includes(m.id) })),
+        manualIds: [...e.meta.manualModels],
+        enabled: !shadow.has(name) && !invalid.has(normName(name)),
+      })
+    }
+    return out
+  }
+
+  /** /model 主菜单的文字（和 /model status 相同） */
+  private cmdModelStatus(chatId: string): string {
+    const b = this.brain
+    const file = this.configBrain
+    const seg = this.ledger.activeSegment(chatId)
+    const budget = seg ? this.budgetFor(seg) : null
+    return [
+      `【系统】现在用的模型：${b.provider} / ${b.model}${b.reasoningEffort ? `（思考 ${b.reasoningEffort}）` : ''}`,
+      b.provider === file.provider && b.model === file.model ? '来自配置文件。' : `这是用命令换的；配置文件里是 ${file.provider} / ${file.model}，/model default 换回去。`,
+      ...(seg?.used_tokens ? [`这段对话已用 ${seg.used_tokens} token${budget ? `，到 ${budget} 换段` : ''}。`] : []),
+      '看能换哪些：/model list；换模型：/model <模型名>。',
+    ].join('\n')
+  }
+
+  /** 只改思考强度：目标档位在当前模型支持的档位里才设（方案 3.5.2、S9） */
+  private async setEffortForWizard(v: string): Promise<{ ok: boolean }> {
+    let opts: string[] = []
+    try { opts = await this.effortChoicesNow() } catch { return { ok: false } }
+    if (!opts.includes(v)) return { ok: false }
+    this.setOverride(null, v)
+    return { ok: true }
+  }
+
+  /** 「换回配置文件里的」（方案 3.5.2） */
+  private revertToConfigForWizard(): string {
+    const file = this.configBrain
+    if (!this.currentOverride()?.provider) return `【系统】现在用的就是配置文件里的模型：${file.provider} / ${file.model}。`
+    const cross = this.identityOfProvider(this.brain.provider) !== this.identityOfProvider(file.provider)
+    this.setOverride(null)
+    const fe = file.reasoningEffort ? `（思考 ${file.reasoningEffort}）` : ''
+    let text = `【系统】已换回配置文件里的模型：${file.provider} / ${file.model}${fe}，下一条消息起生效。`
+    if (cross) text += '\n换到了另一家供应商：下一条消息会先让现在的模型写一份交接摘要，再在新供应商上开新会话。'
+    return text
+  }
+
+  /** 给按钮引导注入的门面（T5）。返回的对象满足 wizard 的 WizardEngine 结构 */
+  wizardFacade() {
+    return {
+      views: () => this.providerViews(),
+      choices: () => this.modelChoicesNow(),
+      efforts: () => this.effortChoicesNow(),
+      switchTo: (c: ModelChoice) => this.switchTo(c),
+      setEffort: (v: string) => this.setEffortForWizard(v),
+      revert: () => this.revertToConfigForWizard(),
+      current: () => ({ provider: this.brain.provider, model: this.brain.model, effort: this.brain.reasoningEffort ?? null }),
+      config: () => ({ provider: this.configBrain.provider, model: this.configBrain.model, effort: this.configBrain.reasoningEffort ?? null }),
+      clearOverride: () => { this.setOverride(null); return { provider: this.brain.provider, model: this.brain.model } },
+      configRoutes: () => Object.keys(this.fileRoutes),
+      providersReadable: () => this.providersReadable,
+      customAll: () => this.customAll(),
+      modelStatusText: (chatId: string) => this.cmdModelStatus(chatId),
     }
   }
 

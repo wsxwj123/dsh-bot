@@ -19,6 +19,7 @@ import { fetchModels } from './providers/models'
 import { ProviderService } from './providers/service'
 import { ProviderCommands } from './providers/commands'
 import { registerCredentialSecrets } from './providers/store'
+import { Wizard } from './wizard/wizard'
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`)
@@ -98,6 +99,14 @@ async function main(): Promise<void> {
     configRouteKeys: () => Object.values(cfg.brain.routes).map(r => r.apiKeyEnv).filter((k): k is string => !!k),
     onChanged: () => engine!.reloadProvidersNow(),
   })
+  // 按钮引导（/provider、/model 无参）：接走主人的私聊消息与按钮回调；先 recover 再拉更新（方案 3.3.5）
+  const wizard = new Wizard({
+    api, ledger, log, root: cfg.root,
+    isOwner: id => id !== null && cfg.gw.owners.includes(id),
+    timeoutMs: cfg.gw.wizardTimeoutMs, lateSecretMs: cfg.gw.lateSecretWindowMs,
+    modelFetchTimeoutMs: cfg.gw.modelFetchTimeoutMs, lockWaitMs: cfg.gw.providerLockWaitMs,
+    service, engine: engine.wizardFacade(),
+  })
   const commands = new ProviderCommands({
     service, api, log, root: cfg.root,
     isOwner: id => id !== null && cfg.gw.owners.includes(id),
@@ -105,6 +114,7 @@ async function main(): Promise<void> {
     configRouteNames: () => Object.keys(cfg.brain.routes),
     reply: (chatId, text) => void sender.send({ chatId, turnId: null, callSeq: 0, text, kind: 'system' }).catch(() => {}),
     recordUpdate: updateId => { ledger.recordUpdate(updateId, null) },
+    endWizardForAdd: (chatId: string) => wizard.endForAdd(chatId),
   })
   engine.providerCommand = (_name, args) => commands.runRefresh(args)
   engine.onPoll = () => { void service.processPendingKeys().catch(e => log.warn('provider.key_removal_failed', { err: safeError(e) })) }
@@ -130,6 +140,9 @@ async function main(): Promise<void> {
     onFatal: why => { log.error('gateway.fatal', { why }); void shutdown(1) },
     // /provider add 含密钥：在闸门之前接走（方案 3.6）
     interceptBeforeGate: (msg, updateId) => commands.interceptBeforeGate(msg, updateId),
+    // 引导：闸门放行后、入账之前接走（方案 3.3.1）；按钮回调交给引导
+    intercept: (msg, updateId) => wizard.intercept(msg, updateId),
+    onCallback: cq => wizard.onCallback(cq),
     onHumanMessage: (msg, observed) => {
       if (observed) { transcript.observe(msg); return }
       // 私聊"刚聊过"标记：导演不点正在私聊的 bot 去群里说话（格式同旧系统：整数秒）
@@ -150,6 +163,8 @@ async function main(): Promise<void> {
   })
   apiServer.start()
   engine.start()
+  wizard.recover() // 先从账本恢复引导与防护窗口，再开始拉 Telegram 更新（方案 3.3.5）
+  wizard.start()
   poller.start()
 
   const heartbeatFile = join(cfg.stateDir, 'heartbeat')
@@ -164,6 +179,7 @@ async function main(): Promise<void> {
     log.info('gateway.stopping')
     engine!.beginStop()
     clearInterval(hb)
+    wizard.stop()
     await poller.stop()
     await engine!.stop()
     await apiServer.stop()
