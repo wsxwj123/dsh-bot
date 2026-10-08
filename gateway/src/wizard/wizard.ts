@@ -622,6 +622,7 @@ export class Wizard {
       return true
     }
     void this.stripButtons(chatId, st.menuMessageId)
+    void this.reply(chatId, T.EXITED)
     this.openProtection(chatId)
     return false
   }
