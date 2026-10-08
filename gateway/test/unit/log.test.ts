@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { Logger, redact, registerSecret, RotatingFile, safeError } from '../../src/log'
+import { Logger, redact, redactSecrets, registerSecret, registerSecrets, RotatingFile, safeError } from '../../src/log'
 
 test('脱敏：Telegram 令牌、sk- 密钥、Bearer 口令、x-api-key、URL 里的口令', () => {
   const tok = '123456789:TESTONLY_not_a_real_token_0000000000'
@@ -17,6 +17,33 @@ test('脱敏：Telegram 令牌、sk- 密钥、Bearer 口令、x-api-key、URL �
 test('脱敏：登记过的确切机密值，无论什么格式都会被替换', () => {
   registerSecret('my-very-own-secret-value')
   expect(redact('xx my-very-own-secret-value yy')).toBe('xx *** yy')
+})
+
+test('批量登记：凭据文件 refs 的值都会被替换；不是字符串、少于 8 个字符的不登记', () => {
+  registerSecrets(['batch-secret-AAAA1111', 'batch-secret-BBBB2222', 42, null, 'short7x'])
+  expect(redact('a batch-secret-AAAA1111 b batch-secret-BBBB2222')).toBe('a *** b ***')
+  expect(redactSecrets('short7x 42')).toBe('short7x 42')
+})
+
+test('一个机密是另一个的一部分：长的先换，不留半截', () => {
+  registerSecret('nested-key-0001')
+  registerSecret('nested-key-0001-and-more-9z')
+  expect(redactSecrets('[nested-key-0001-and-more-9z] [nested-key-0001]')).toBe('[***] [***]')
+})
+
+test('只换确切值（不套通用规则）；日志整行是 JSON 时，含引号和反斜杠的密钥也换掉', () => {
+  registerSecret('qu"ote\\back5lash')
+  expect(redactSecrets('普通聊天 sk-abcdefghijklmnop1234 原样保留')).toBe('普通聊天 sk-abcdefghijklmnop1234 原样保留')
+  expect(redactSecrets('x qu"ote\\back5lash y')).toBe('x *** y')
+  const line = JSON.stringify({ err: 'boom qu"ote\\back5lash' })
+  expect(redact(line)).not.toContain('ote')
+})
+
+test('safeError：先替换机密再截断，截断处不会留下半截机密', () => {
+  const key = `cut-${'k'.repeat(60)}-tail`
+  registerSecret(key)
+  const s = safeError(new Error(`${'x'.repeat(170)}${key}`))
+  expect(s).not.toContain('kkkkk')
 })
 
 test('safeError 不带出请求地址里的令牌', () => {

@@ -16,15 +16,38 @@ const PATTERNS: RegExp[] = [
 ]
 
 const secrets = new Set<string>()
+/** 替换顺序：长的在前。一个机密是另一个的一部分时，先换短的会把长的剩下半截留在外面 */
+let ordered: string[] = []
 
 /** 登记一个确切的机密值（令牌、密钥、本机口令），之后任何日志里出现都会被替换。 */
 export function registerSecret(value: string | undefined | null): void {
-  if (value && value.length >= 8) secrets.add(value)
+  if (!value || value.length < 8 || secrets.has(value)) return
+  secrets.add(value)
+  ordered = [...secrets].sort((a, b) => b.length - a.length)
 }
 
-export function redact(s: string): string {
+/** 批量登记：凭据文件 refs 的全部值等（方案 3.11：启动时、每次写凭据文件后都登记一遍）。不是字符串或太短的跳过 */
+export function registerSecrets(values: Iterable<unknown>): void {
+  for (const v of values) if (typeof v === 'string') registerSecret(v)
+}
+
+/**
+ * 只把登记过的确切值换成 ***，不套通用规则：入账前处理正文和引用文字用（方案 3.12），不误伤普通聊天内容。
+ * 日志整行是 JSON，含 " 或 \ 的值在里面是转义后的样子，所以转义形式也换。
+ */
+export function redactSecrets(s: string): string {
   let out = s
-  for (const v of secrets) if (out.includes(v)) out = out.split(v).join('***')
+  for (const v of ordered) {
+    if (out.includes(v)) out = out.split(v).join('***')
+    const escaped = JSON.stringify(v).slice(1, -1)
+    if (escaped !== v && out.includes(escaped)) out = out.split(escaped).join('***')
+  }
+  return out
+}
+
+/** 写日志前的统一脱敏：先换登记过的确切值，再套通用规则（调用方截断要在这之后，免得半截机密漏出去） */
+export function redact(s: string): string {
+  let out = redactSecrets(s)
   for (const re of PATTERNS) out = out.replace(re, (_m, p1?: string) => (typeof p1 === 'string' && p1.length < 40 && /[:=\s/]$/.test(p1) ? `${p1}***` : '***'))
   return out
 }
