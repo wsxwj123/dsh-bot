@@ -59,6 +59,21 @@ def model_set(channel_dir: str, spec: str) -> tuple[bool, dict]:
     return code == 200 and bool(r.get("ok")), r
 
 
+# 刷新的超时：INTERFACE 3.9 = gateway.model_fetch_timeout_ms×3 + 10 秒，默认 55 秒。
+# 门户读不到各 bot 网关的配置，用默认值这台机器上就是对的。
+PROVIDER_REFRESH_TIMEOUT = 55.0
+
+
+def provider_refresh(channel_dir: str, name: str) -> tuple[int, dict]:
+    """刷新一个自建供应商的模型列表（管理台用）。
+
+    原样把网关的状态码与正文带回去（网关按 INTERFACE 3.8 返回 200/400/404/409/502/503）；
+    连不上网关（URLError）或超时（TimeoutError）由调用方接住。
+    """
+    return _call(channel_dir, "POST", "/v1/provider/refresh", {"name": name},
+                 timeout=PROVIDER_REFRESH_TIMEOUT)
+
+
 def inject(channel_dir: str, chat_id: str, text: str, source: str, key: str,
            port: int | None = None, bot_lines: list[str] | None = None, timeout: float = 10) -> bool:
     """写一条系统消息进网关的账本，模型在下一轮处理。key 相同的只算一次。
