@@ -26,7 +26,14 @@
 // 程序发来的"⟦系统·承诺到期⟧"：回复一句；state 目录里 due-mode=mute 时改为 stay_silent（模拟没兑现），=cancel 时取消这件承诺
 // 程序发来的"⟦系统·整理记忆⟧"：先试着调一次 react（应被锁），再输出一份假摘要（state 目录里 summary-mode=empty 时输出空）
 // 没有指令时回复"收到：<对方最后一句>"；补救提示（⟦系统…）回复"接着刚才的说"。
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+// 补丁层（行为依据：对真 dsh 0.2.0-rc.2 的实测，见供应商引导 INTERFACE 3.13.2）：
+//   新会话默认模型取 acp 行；供应商既不是 deepseek-official、也不在 llm-pi-ai 路由里 → session/new、session/resume 报 -32603
+//   （data.details = no adapter registered for provider "<名>"）；set_config_option(model) 的值不在可选模型里 → 报错；
+//   reasoning_effort：内置给 ["", off, low, high, max]，路由模型声明了 reasoningEfforts（对象）→ [""] + 它的键，否则没有这个选项；
+//   路由 models 为空的不出现在可选模型里；路由的 apiKeyEnv 每轮现读凭据文件，没有值 → 这一轮 -32603 no credential for provider route "<名>"。
+// 测试开关（state 目录里的文件）：next-error.txt（下一次 prompt 以 -32603 "turn failed: <内容>" 失败，用一次就删）；
+//   summary-delay-ms（写摘要那一轮延迟这么多毫秒）；summary-fail（写摘要那一轮失败）。
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 
 const argv = process.argv.slice(2)
@@ -57,19 +64,46 @@ function send(f: object) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0',
 function update(sessionId: string, u: object) { send({ method: 'session/update', params: { sessionId, update: u } }) }
 
 const MODELS = ['deepseek-flash', 'deepseek-v4-pro', 'other-model']
-// 和真 dsh 一样，补丁层里 llm-pi-ai 配的路由也列进可选模型
-const ROUTE_GROUPS: { group: string; options: { value: string; name: string }[] }[] = (() => {
-  try {
-    const rows = JSON.parse(readFileSync(patchPath!, 'utf8')) as { id: string; config?: { providers?: Record<string, { models?: { id: string }[] }> } }[]
-    const providers = rows.find(r => r.id === 'llm-pi-ai')?.config?.providers ?? {}
-    return Object.entries(providers).map(([name, r]) => ({ group: name, options: (r.models ?? []).map(m => ({ value: JSON.stringify([name, m.id]), name: m.id })) }))
-  } catch { return [] }
-})()
+// 补丁层（行为依据：对真 dsh 0.2.0-rc.2 的实测，INTERFACE 3.13.2）
+type RouteModel = { id: string; contextWindow?: number; reasoningEfforts?: Record<string, unknown> | false }
+type Route = { api?: string; baseURL?: string; apiKeyEnv?: string; models?: RouteModel[] }
+const PATCH_ROWS: { id: string; config?: any }[] = (() => { try { const r = JSON.parse(readFileSync(patchPath!, 'utf8')); return Array.isArray(r) ? r : [] } catch { return [] } })()
+const patchRow = (id: string) => PATCH_ROWS.find(r => r?.id === id)?.config
+const ROUTES: Record<string, Route> = patchRow('llm-pi-ai')?.providers ?? {}
+const CRED_PATH: string | undefined = patchRow('credentials')?.path
+/** 新会话默认模型取补丁层 acp 行 */
+const ACP_DEFAULT: [string, string] = [String(patchRow('acp')?.provider ?? 'deepseek-official'), String(patchRow('acp')?.model ?? 'deepseek-flash')]
+/** 有没有这个供应商的适配器：内置，或补丁层 llm-pi-ai 里配了路由 */
+const hasAdapter = (p: string) => p === 'deepseek-official' || Object.prototype.hasOwnProperty.call(ROUTES, p)
+const noAdapter = (p: string) => ({ code: -32603, message: 'Internal error', data: { details: `no adapter registered for provider "${p}"` } })
+const splitModel = (v: string): [string, string] => { try { const a = JSON.parse(v); return [String(a[0]), String(a[1])] } catch { return ['', ''] } }
+// 和真 dsh 一样，补丁层里 llm-pi-ai 配的路由也列进可选模型；models 为空的路由不出现
+const ROUTE_GROUPS: { group: string; options: { value: string; name: string }[] }[] = Object.entries(ROUTES)
+  .map(([name, r]) => ({ group: name, options: (r.models ?? []).map(m => ({ value: JSON.stringify([name, m.id]), name: m.id })) }))
+  .filter(g => g.options.length > 0)
+const MODEL_OPTIONS = [{ group: 'deepseek-official', options: MODELS.map(m => ({ value: JSON.stringify(['deepseek-official', m]), name: m })) }, ...ROUTE_GROUPS]
+const MODEL_VALUES = new Set(MODEL_OPTIONS.flatMap(g => g.options.map(o => o.value)))
+/** 当前模型支持的思考档位：内置给 ["", off, low, high, max]；路由模型声明了 reasoningEfforts（对象）→ [""] + 它的键；否则没有这个选项 */
+function effortValues(modelValue: string): string[] | null {
+  const [p, m] = splitModel(modelValue)
+  if (p === 'deepseek-official') return ['', 'off', 'low', 'high', 'max']
+  const re = ROUTES[p]?.models?.find(x => x.id === m)?.reasoningEfforts
+  return re && typeof re === 'object' ? ['', ...Object.keys(re)] : null
+}
 function configOptions(s: Sess) {
-  return [
-    { id: 'model', name: 'Model', type: 'select', currentValue: s.model, options: [{ group: 'deepseek-official', options: MODELS.map(m => ({ value: JSON.stringify(['deepseek-official', m]), name: m })) }, ...ROUTE_GROUPS] },
-    { id: 'reasoning_effort', name: 'Effort', type: 'select', currentValue: s.effort, options: ['off', 'low', 'high', 'max'].map(v => ({ value: v, name: v })) },
-  ]
+  const opts: object[] = [{ id: 'model', name: 'Model', type: 'select', currentValue: s.model, options: MODEL_OPTIONS }]
+  const ev = effortValues(s.model)
+  if (ev) opts.push({ id: 'reasoning_effort', name: 'Effort', type: 'select', currentValue: s.effort, options: ev.map(v => ({ value: v, name: v || 'default' })) })
+  return opts
+}
+/** 每轮现读凭据文件：路由的 apiKeyEnv 在 refs 里有没有非空值（只判断有无，不记录、不输出值） */
+function hasCredential(env?: string): boolean {
+  if (!env || !CRED_PATH || !existsSync(CRED_PATH)) return false
+  const safe = env.replace(/[^A-Za-z0-9_]/g, '')
+  const m = readFileSync(CRED_PATH, 'utf8').match(new RegExp(`^[ \\t]+${safe}[ \\t]*:[ \\t]*(.*)$`, 'm'))
+  if (!m) return false
+  const v = m[1]!.trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1')
+  return v.length > 0
 }
 
 let mcpSeq = 1
@@ -121,8 +155,29 @@ async function prompt(id: number, sessionId: string, all0: { type: string; text?
   log('prompts.jsonl', { sessionId, text: all, blocks: texts.length, images, model: s.model })
   update(sessionId, { sessionUpdate: 'usage_update', used: s.history.join('').length, size: 1_000_000 })
 
+  // 测试开关 next-error.txt：下一次请求以 -32603 失败，消息 = "turn failed: <文件内容>"（和真 dsh 透传上游回包正文的形状一致），用一次就删
+  if (existsSync(P('next-error.txt'))) {
+    const t = readFileSync(P('next-error.txt'), 'utf8').trim()
+    rmSync(P('next-error.txt'), { force: true })
+    log('errors.jsonl', { sessionId, kind: 'next-error' })
+    return send({ id, error: { code: -32603, message: `turn failed: ${t}` } })
+  }
+  // 路由供应商：每轮现读凭据文件，apiKeyEnv 没有值 → 这一轮失败
+  const [curP] = splitModel(s.model)
+  if (curP !== 'deepseek-official' && !hasCredential(ROUTES[curP]?.apiKeyEnv)) {
+    log('errors.jsonl', { sessionId, kind: 'no-credential', provider: curP })
+    return send({ id, error: { code: -32603, message: `turn failed: no credential for provider route "${curP}"` } })
+  }
+
   // 写交接摘要：先试着调一次工具（应该被锁住），再直接输出摘要文字。summary-mode 文件写 empty 时输出空摘要
   if (last.startsWith('⟦系统·整理记忆⟧')) {
+    // 测试开关：summary-delay-ms 让这一轮延迟指定毫秒；summary-fail 让这一轮失败
+    const delay = existsSync(P('summary-delay-ms')) ? Number(readFileSync(P('summary-delay-ms'), 'utf8').trim()) || 0 : 0
+    if (delay > 0) await sleep(delay)
+    if (existsSync(P('summary-fail'))) {
+      log('summaries.jsonl', { sessionId, n: bump('summary'), mode: 'fail', withTools: !!s.mcp, chars: 0 })
+      return send({ id, error: { code: -32603, message: 'turn failed: summary-fail' } })
+    }
     if (s.mcp) await callTool(s, sessionId, 'react', { message_id: 1, emoji: '❤️' })
     const mode = existsSync(P('summary-mode')) ? readFileSync(P('summary-mode'), 'utf8').trim() : ''
     const n = bump('summary')
@@ -211,9 +266,11 @@ async function handle(f: any) {
     case 'initialize':
       return send({ id: f.id, result: { protocolVersion: 1, agentInfo: { name: 'fake-acp', version: '0.0.0' }, agentCapabilities: { loadSession: false } } })
     case 'session/new': {
+      // 新会话默认模型取补丁层 acp 行；没有这个供应商的适配器 → -32603
+      if (!hasAdapter(ACP_DEFAULT[0])) return send({ id: f.id, error: noAdapter(ACP_DEFAULT[0]) })
       const sid = `fake-${process.pid}-${++sessionSeq}`
       const http = (p.mcpServers ?? []).find((m: any) => m.type === 'http')
-      sessions[sid] = { cwd: p.cwd, history: [], mcp: http ? { url: http.url, headers: http.headers ?? [] } : null, model: JSON.stringify(['deepseek-official', 'deepseek-flash']), effort: 'off' }
+      sessions[sid] = { cwd: p.cwd, history: [], mcp: http ? { url: http.url, headers: http.headers ?? [] } : null, model: JSON.stringify(ACP_DEFAULT), effort: 'off' }
       loadedHere.add(sid)
       saveSessions()
       log('sessions.jsonl', { event: 'new', sessionId: sid })
@@ -224,6 +281,8 @@ async function handle(f: any) {
       if (!s || s.closed) return send({ id: f.id, error: { code: -32602, message: 'session not found' } })
       if (s.cwd !== p.cwd) return send({ id: f.id, error: { code: -32602, message: 'cwd mismatch' } })
       if (loadedHere.has(p.sessionId)) return send({ id: f.id, error: { code: -32602, message: 'already loaded' } })
+      // 会话最后用的供应商不在当前补丁层 → 和 session/new 一样报错
+      if (!hasAdapter(splitModel(s.model)[0])) return send({ id: f.id, error: noAdapter(splitModel(s.model)[0]) })
       const http = (p.mcpServers ?? []).find((m: any) => m.type === 'http')
       s.mcp = http ? { url: http.url, headers: http.headers ?? [] } : null
       loadedHere.add(p.sessionId)
@@ -234,8 +293,22 @@ async function handle(f: any) {
     case 'session/set_config_option': {
       const s = sessions[p.sessionId]
       if (!s) return send({ id: f.id, error: { code: -32602, message: 'unknown session' } })
+      if (p.configId === 'model' && !MODEL_VALUES.has(p.value)) {
+        log('config.jsonl', { sessionId: p.sessionId, configId: p.configId, value: p.value, ok: false })
+        return send({ id: f.id, error: { code: -32602, message: `unknown model: ${p.value}` } })
+      }
+      if (p.configId === 'reasoning_effort' && !(effortValues(s.model) ?? []).includes(String(p.value))) {
+        const [ep, em] = splitModel(s.model)
+        log('config.jsonl', { sessionId: p.sessionId, configId: p.configId, value: p.value, ok: false })
+        return send({ id: f.id, error: { code: -32602, message: `unknown reasoning effort for ${ep}/${em}: ${p.value}` } })
+      }
       log('config.jsonl', { sessionId: p.sessionId, configId: p.configId, value: p.value })
-      if (p.configId === 'model') s.model = p.value
+      if (p.configId === 'model') {
+        s.model = p.value
+        // 换到不支持当前档位的模型：档位回到模型默认
+        const ev = effortValues(s.model)
+        if (ev && !ev.includes(s.effort)) s.effort = ''
+      }
       if (p.configId === 'reasoning_effort') s.effort = p.value
       saveSessions()
       return send({ id: f.id, result: { configOptions: configOptions(s) } })
