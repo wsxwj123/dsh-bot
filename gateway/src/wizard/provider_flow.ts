@@ -121,6 +121,4 @@ export const switchModelsStep = (name: string, models: string[], current: string
   return { text: `【系统】「${name}」的模型（✅ 是现在用的）：`, buttons: withPaging(buttons, p, totalPages, [BACK, CANCEL]) }
 }
 
-export const resultStep = (text: string, buttons: Btn[]): StepRender => ({ text, buttons })
-
 export { ROLL_NOTE }

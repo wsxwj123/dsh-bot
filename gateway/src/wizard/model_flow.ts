@@ -75,6 +75,3 @@ export function effortStep(options: string[], currentEffort: string | null, o: {
 }
 
 export { CLOSE }
-
-/** /model 主菜单（新消息）：文字与旧 /model 状态文字相同，另有按钮 */
-export const modelMainStep = (text: string): StepRender => ({ text, buttons: MAIN_BUTTONS })
