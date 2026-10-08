@@ -17,6 +17,7 @@ export const M = {
   ctxPick: 'm.ctxPick',
   ctxInput: 'm.ctxInput',
   done: 'm.done',
+  effortResult: 'm.effortResult',
 } as const
 
 /** 主菜单按钮（顺序固定） */

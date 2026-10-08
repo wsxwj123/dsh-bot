@@ -27,7 +27,7 @@ export function looksLikeSecret(input: string | undefined | null): boolean {
  */
 export function parseContext(input: string | undefined | null): number | null {
   const s = (input ?? '').trim()
-  const m = s.match(/^(\d+(?:\.\d+)?)\s*([kKmM]?)$/)
+  const m = s.match(/^(\d+(?:\.\d+)?)([kKmM]?)$/)
   if (!m) return null
   const num = Number(m[1])
   if (!Number.isFinite(num)) return null

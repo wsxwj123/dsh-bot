@@ -30,7 +30,8 @@ export const CANCEL: Btn = { label: '取消', action: 'cancel' }
 export const BACK: Btn = { label: '返回', action: 'back' }
 export const CLOSE: Btn = { label: '关闭', action: 'close' }
 export const NEW_BTN: Btn = { label: '新建', action: 'new' }
-export const SWITCH_BTN: Btn = { label: '切到这家', action: 'sw' }
+export const SWITCH_BTN: Btn = { label: '切到这家', action: 'swone' }
+export const SWITCH_ONE_BTN: Btn = { label: '切过去', action: 'swone' }
 export const REFRESH_BTN: Btn = { label: '刷新模型', action: 'ref' }
 
 /** 主菜单按钮（顺序固定，验收逐字核对） */

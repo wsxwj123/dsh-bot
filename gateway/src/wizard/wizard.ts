@@ -79,10 +79,12 @@ type St = {
   savingName?: string
   pendingKeyMessageId?: number | null
   /** 结果步：文字不再被引导接走（照常交给角色），按钮仍可点（不能开防护：正常完成） */
-  freeText?: boolean
   expiresAt: number
   lateSecretUntil?: number
 }
+
+/** 结果步（文字直接交给角色）：引导已正常完成，只是留了几个按钮 */
+const FREE_STEPS = new Set<string>([PF.P.result, MF.M.effortResult])
 
 const metaKey = (chatId: string) => `wizard:${chatId}`
 
@@ -274,7 +276,7 @@ export class Wizard {
     }
 
     // 结果步：文字照常交给角色（正常完成，不开防护）；按钮仍由 onCallback 处理
-    if (st.freeText) return false
+    if (FREE_STEPS.has(st.step ?? '')) return false
 
     if (st.busy) {
       const del = isProviderAdd(body) || T.looksLikeSecret(body)
@@ -299,10 +301,14 @@ export class Wizard {
       st.savingName = st.name
       st.pendingKeyMessageId = msg.message_id
     }
+    this.touch(st)
     this.takeAtomic(chatId, updateId, st)
     void this.handleInput(chatId, st, msg, body, key)
     return true
   }
+
+  /** 一次有效操作：超时重新计时 */
+  private touch(st: St): void { st.expiresAt = this.now() + this.d.timeoutMs }
 
   /** 被别的东西打断重开：旧引导非正常结束（去按钮 + 开防护），随后开新的 */
   private endOldToProtection(chatId: string, st: St): void {
@@ -383,6 +389,16 @@ export class Wizard {
       return
     }
     await this.reply(chatId, `【系统】${why}。请重新输入：`)
+  }
+
+  /** 管理页/上下文步的输入不合格：把当前菜单编辑成原因并重问（保持这一步的按钮） */
+  private async stepError(chatId: string, st: St, msg: TgMessage, why: string, hint: string, buttons: Btn[]): Promise<void> {
+    if (T.looksLikeSecret(msg.text ?? msg.caption ?? '')) {
+      await this.deleteMsg(chatId, msg.message_id)
+      await this.reply(chatId, `${T.KEY_AS_ANSWER_BAD}\n${hint}`)
+      return
+    }
+    await this.editMenu(chatId, st, `【系统】${why}。请重新输入：`, buttons)
   }
 
   private async onNameInput(chatId: string, st: St, msg: TgMessage, body: string): Promise<void> {
@@ -507,16 +523,15 @@ export class Wizard {
       if (o.field === '接口格式') text += `地址改成了 ${st.baseURL}`
       if (r.epochChanged) text += `\n${T.ROLL_NOTE}`
       st.step = PF.P.result
-      st.freeText = true
-      await this.sendMenu(chatId, st, text, [PF.SWITCH_BTN, PF.CLOSE])
+      await this.sendMenu(chatId, st, text, [PF.SWITCH_ONE_BTN, PF.CLOSE])
       return
     }
     // 新建
     const base = saveResultText(r, name)
-    const text = `${base}${note}`
+    let text = `${base}${note}`
+    if (st.strippedV1) text += '\n已去掉地址末尾的 /v1（Anthropic 格式会自动加）'
     st.step = PF.P.result
-    st.freeText = true
-    const buttons: Btn[] = r.reason === null ? [PF.SWITCH_BTN, PF.CLOSE] : [PF.REFRESH_BTN, PF.CLOSE]
+    const buttons: Btn[] = r.reason === null ? [PF.SWITCH_ONE_BTN, PF.CLOSE] : [PF.REFRESH_BTN, PF.CLOSE]
     await this.sendMenu(chatId, st, text, buttons)
   }
 
@@ -524,10 +539,10 @@ export class Wizard {
 
   private async onAddIdInput(chatId: string, st: St, msg: TgMessage, body: string): Promise<void> {
     const id = cleanModelId(body)
-    if (!id) { await this.inputError(chatId, msg, T.MODEL_NAME_BAD, T.modelNameHint); return }
+    if (!id) { await this.stepError(chatId, st, msg, T.MODEL_NAME_BAD, T.modelNameHint, MF.addIdStep().buttons); return }
     const entry = this.customBy(st.manageName ?? '')
-    if (!entry) { await this.reply(chatId, `【系统】「${st.manageName ?? ''}」已经不在了。`); return }
-    if (entry.models.some(m => m.id === id)) { await this.reply(chatId, `【系统】「${entry.name}」里已经有 ${id} 了。请重新输入：`); return }
+    if (!entry) { await this.editMenu(chatId, st, `【系统】「${st.manageName ?? ''}」已经不在了。`, []); return }
+    if (entry.models.some(m => m.id === id)) { await this.editMenu(chatId, st, `【系统】「${entry.name}」里已经有 ${id} 了。请重新输入：`, MF.addIdStep().buttons); return }
     st.addId = id
     st.step = MF.M.addCtx
     await this.sendMenu(chatId, st, MF.addCtxStep().text, MF.addCtxStep().buttons)
@@ -535,7 +550,7 @@ export class Wizard {
 
   private async onAddCtxInput(chatId: string, st: St, msg: TgMessage, body: string): Promise<void> {
     const ctx = parseCtxOrError(body)
-    if (ctx === 'bad') { await this.inputError(chatId, msg, T.CONTEXT_BAD, T.ctxStepHint); return }
+    if (ctx === 'bad') { await this.stepError(chatId, st, msg, T.CONTEXT_BAD, T.ctxStepHint, MF.addCtxStep().buttons); return }
     await this.doAddModel(chatId, st, ctx)
   }
 
@@ -557,7 +572,7 @@ export class Wizard {
 
   private async onCtxInput(chatId: string, st: St, msg: TgMessage, body: string): Promise<void> {
     const ctx = parseCtxOrError(body)
-    if (ctx === 'bad') { await this.inputError(chatId, msg, T.CONTEXT_BAD, T.ctxStepHint); return }
+    if (ctx === 'bad') { await this.stepError(chatId, st, msg, T.CONTEXT_BAD, T.ctxStepHint, MF.ctxInputStep(st.pendingModelId ?? '', 0, false).buttons); return }
     await this.doSetContext(chatId, st, st.pendingModelId ?? '', ctx)
   }
 
@@ -568,24 +583,25 @@ export class Wizard {
     const r = await this.d.service.setContext(name, id, ctx)
     this.finishOp(chatId, st)
     st.step = MF.M.done
-    if (!r.ok) { await this.editMenu(chatId, st, T.modelEditError(r.why, name), []); return }
+    if (!r.ok) { await this.editMenu(chatId, st, T.modelEditError(r.why, r.why === 'gone' ? name : id), []); return }
     await this.editMenu(chatId, st, `【系统】已把 ${id} 的上下文长度改成 ${ctx}。几秒后生效。`, [PF.BACK, PF.CLOSE])
   }
 
   private async doRemoveModel(chatId: string, st: St, id: string): Promise<void> {
     const name = st.manageName ?? ''
     const manual = this.customBy(name)?.manualIds.includes(id) ?? false
+    const before = this.d.engine.current() // 删掉正在用的模型会让覆盖失效，先记下删除前在用的
     st.busy = true; st.busySince = this.now(); st.op = 'modeledit'
     this.persist(chatId, st)
     const r = await this.d.service.removeModel(name, id)
     this.finishOp(chatId, st)
     st.step = MF.M.done
-    if (!r.ok) { await this.editMenu(chatId, st, T.modelEditError(r.why, name), []); return }
+    if (!r.ok) { await this.editMenu(chatId, st, T.modelEditError(r.why, r.why === 'gone' ? name : id), []); return }
     let text = `【系统】已从「${name}」删掉模型 ${id}。`
     if (!manual) text += '下次「刷新模型」时，对方列表里还有的话它会重新出现。'
     const after = this.customBy(name)
     if (!after || after.models.length === 0) text += `「${name}」没有模型了，暂时不会出现在可选模型里。`
-    if (this.d.engine.current().provider === name && this.d.engine.current().model === id) {
+    if (before.provider === name && before.model === id) {
       const c = this.d.engine.clearOverride()
       text += `这个 bot 正在用它，已换回配置文件里的模型：${c.provider} / ${c.model}。`
     }
@@ -629,6 +645,7 @@ export class Wizard {
       return
     }
     if (st!.busy) { await this.answer(cq, T.BUSY_TEXT); this.d.log.info('wizard.callback_rejected', { reason: 'busy' }); return }
+    this.touch(st!)
     const ans = cb.action === 'cancel' ? '已退出引导'
       : (cb.action === 'refone' || (st!.step === PF.P.refreshPick && cb.action === 'pv')) ? '正在拉取模型列表…'
       : undefined
@@ -829,12 +846,18 @@ export class Wizard {
     if (st.step === PF.P.switchModels) {
       const list = await this.switchList()
       const p = list.find(x => x.name === st.name)
-      if (!p) { await this.reply(chatId, `【系统】「${st.name ?? ''}」已经不在了，请重新选。`); return this.rerenderSwitchPick(chatId, st) }
+      if (!p) {
+        // 整个供应商已不在：回到第 1 步，菜单编辑为结果文案
+        const names = list.map(x => x.name)
+        st.list = names; st.page = 0; st.step = PF.P.switchPick
+        const r = PF.switchPickStep(names, this.d.engine.current().provider, 0)
+        await this.editMenu(chatId, st, `【系统】「${st.name ?? ''}」已经不在了，请重新选。`, r.buttons)
+        return
+      }
       if (!p.models.includes(id)) {
-        await this.reply(chatId, '【系统】这个模型已经不在列表里了，请重新选。')
         st.list = p.models
         const r = PF.switchModelsStep(p.name, p.models, this.currentModelFor(p.name), st.page ?? 0)
-        await this.editMenu(chatId, st, r.text, r.buttons)
+        await this.editMenu(chatId, st, '【系统】这个模型已经不在列表里了，请重新选。', r.buttons)
         return
       }
       const text = this.d.engine.switchTo({ provider: p.name, model: id })
@@ -870,7 +893,7 @@ export class Wizard {
   private async actBack(chatId: string, st: St): Promise<void> {
     switch (st.step) {
       case PF.P.switchModels: return this.rerenderSwitchPick(chatId, st)
-      case MF.M.effort: case MF.M.manage: return this.showModelMainEdit(chatId, st)
+      case MF.M.effort: case MF.M.effortResult: case MF.M.manage: return this.showModelMainEdit(chatId, st)
       case MF.M.delPick: case MF.M.ctxPick: case MF.M.done: return this.showManage(chatId, st)
       default: return
     }
@@ -916,7 +939,8 @@ export class Wizard {
     if (st.step === MF.M.main) {
       const options = await this.d.engine.efforts()
       const cur = this.d.engine.current()
-      st.flow = 'model'; st.list = options; st.step = MF.M.effort
+      st.flow = 'model'; st.list = options
+      st.step = options.length === 0 ? MF.M.effortResult : MF.M.effort
       const r = MF.effortStep(options, cur.effort, { provider: cur.provider, model: cur.model, custom: this.customBy(cur.provider) !== null })
       await this.editMenu(chatId, st, r.text, r.buttons)
       return
@@ -925,9 +949,11 @@ export class Wizard {
     const value = options[idx]
     if (!value) return
     const cur = this.d.engine.current()
+    st.step = MF.M.effortResult
     if (value === cur.effort) { await this.editMenu(chatId, st, `【系统】现在就是「${T.effortLabel(value)}」。`, [PF.BACK, PF.CLOSE]); return }
     const res = await this.d.engine.setEffort(value)
     if (!res.ok) {
+      st.step = MF.M.effort
       await this.reply(chatId, `【系统】这个模型现在不支持「${T.effortLabel(value)}」了，请重新选。`)
       const r = MF.effortStep(options, cur.effort, { provider: cur.provider, model: cur.model, custom: this.customBy(cur.provider) !== null })
       await this.editMenu(chatId, st, r.text, r.buttons)
@@ -1048,17 +1074,17 @@ export class Wizard {
       return
     }
     st.name = e.name; st.busy = true; st.busySince = this.now(); st.op = 'refresh'
+    const before = this.d.engine.current() // 刷新会让"被去掉的模型"覆盖失效，先记下刷新前在用的
     await this.editMenu(chatId, st, `【系统】正在拉取「${e.name}」的模型列表…`, [])
     const r = await this.d.service.refresh(e.name)
     this.finishOp(chatId, st)
     if (r.status === 'ok') {
       let text = refreshResultText(this.d.root, e.name, r)
-      const cur = this.d.engine.current()
-      if (cur.provider === e.name && r.removed.includes(cur.model)) {
+      if (before.provider === e.name && r.removed.includes(before.model)) {
         this.d.engine.clearOverride()
-        text += `这个 bot 正在用的 ${cur.model} 不在新列表里，已换回配置文件里的模型。`
+        text += `这个 bot 正在用的 ${before.model} 不在新列表里，已换回配置文件里的模型。`
       }
-      st.step = PF.P.result; st.freeText = true
+      st.step = PF.P.result
       await this.editMenu(chatId, st, text, [PF.SWITCH_BTN, PF.CLOSE])
       return
     }
@@ -1129,6 +1155,7 @@ const ALLOW: Record<string, string[]> = {
   [PF.P.result]: ['swone', 'refone', 'close'],
   [MF.M.main]: ['swmodel', 'eff', 'mg', 'rev', 'close'],
   [MF.M.effort]: ['eff', 'back', 'cancel', 'close'],
+  [MF.M.effortResult]: ['back', 'close'],
   [MF.M.managePick]: ['mgr', 'pg', 'cancel', 'new'],
   [MF.M.manage]: ['mgadd', 'mgdel', 'mgctx', 'back', 'cancel'],
   [MF.M.addId]: ['cancel'],
@@ -1142,6 +1169,7 @@ const ALLOW: Record<string, string[]> = {
 function idxOk(st: St, action: string, idx: number | null): boolean {
   if (action === 'fmt') return idx === 0 || idx === 1
   if (action === 'pg') return true
+  if (action === 'eff' && st.step === MF.M.main) return true // 打开思考强度页，没有序号
   if (action === 'pv' || action === 'm' || action === 'mgr' || action === 'eff') return idx !== null && idx >= 0 && idx < (st.list?.length ?? 0)
   return true
 }

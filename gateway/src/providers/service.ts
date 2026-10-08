@@ -4,7 +4,7 @@
 // 每次写完调注入的 onChanged()（Engine.reloadProvidersNow）让本 bot 立刻用上新路由。
 import { safeError, type Logger } from '../log'
 import {
-  apiKeyEnvFor, DEFAULT_CONTEXT, hostOf, isProviderKeyEnv, normName, readCredentialRefs,
+  apiKeyEnvFor, CredentialsUnsupported, DEFAULT_CONTEXT, hostOf, isProviderKeyEnv, normName, readCredentialRefs,
   readProviders, setCredentialRef, writeProviders, ProvidersLockTimeout, ProvidersUnreadable, withProvidersLock,
   type ProviderApi, type ProviderEntry, type PendingKeyRemoval, type ProviderModel, type ProvidersSnapshot,
 } from './store'
@@ -172,9 +172,12 @@ export class ProviderService {
     try {
       setCredentialRef(this.d.credentialsPath, keyEnv, o.key)
     } catch (e) {
+      if (e instanceof CredentialsUnsupported) {
+        this.d.log.warn('provider.credentials_unsupported', { why: e.why })
+        return { status: 'cred_failed', name: entryName, why: `${e.message}，请手动编辑凭据文件` }
+      }
       this.d.log.error('provider.write_failed', { file: 'credentials', err: safeError(e) })
-      const why = e instanceof Error && /refs 写法不常见/.test(e.message) ? e.message : `写文件失败（${(e as Error)?.name ?? 'Error'}）`
-      return { status: 'cred_failed', name: entryName, why }
+      return { status: 'cred_failed', name: entryName, why: `写文件失败（${(e as Error)?.name ?? 'Error'}）` }
     }
     return {
       status: 'saved', kind, name: entryName, api: o.api, baseURL: route.baseURL, count: built.models.length,
@@ -233,7 +236,10 @@ export class ProviderService {
             const e = this.byNorm(cur, found.name)
             if (!e) return
             const meta = { ...e.entry.meta, lastRefresh: { at: this.now(), ok: false, count: e.entry.route.models.length, reason: res.reason } }
-            const raw = { ...cur.raw, providers: { ...(cur.raw.providers as Record<string, unknown>), [e.name]: { route: e.entry.route, meta } } }
+            // 刷新失败：模型列表保持不变。原样保留文件里的 route（键序、不认识的字段都不动），只换 meta
+            const rawList = cur.raw.providers as Record<string, unknown>
+            const rawEntry = (rawList[e.name] && typeof rawList[e.name] === 'object' ? rawList[e.name] : {}) as Record<string, unknown>
+            const raw = { ...cur.raw, providers: { ...rawList, [e.name]: { ...rawEntry, route: rawEntry.route ?? e.entry.route, meta } } }
             writeProviders(this.providersPath(), raw)
             this.d.onChanged?.()
           })

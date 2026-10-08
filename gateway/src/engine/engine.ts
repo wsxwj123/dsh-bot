@@ -1312,15 +1312,22 @@ export class Engine {
     const views = await this.providerViews()
     const cur = { provider: this.brain.provider, model: this.brain.model }
     if (a === 'help') return HELP_TEXT
+    if (a === 'default') {
+      const file = this.configBrain
+      if (cur.provider === file.provider && cur.model === file.model) return `【系统】现在用的就是配置文件里的模型：${file.provider} / ${file.model}。`
+      this.setOverride(null)
+      return `【系统】已换回配置文件里的模型：${file.provider} / ${file.model}，下一条消息起生效。`
+    }
     if (a === '' || a === 'list' || a === 'status') return formatProviders(views, cur, { inGroup: isGroupChat(chatId) })
-    const p = providersOf(this.modelChoices).find(x => x.toLowerCase() === a.toLowerCase()) ?? this.viewName(a, views, true)
-    if (!p) return `【系统】没有 ${a} 这个供应商。用 /provider 看有哪些。`
+    const p = providersOf(this.modelChoices).find(x => normName(x) === normName(a)) ?? this.viewName(a, views, true)
+    if (!p) return `【系统】没有 ${a} 这个可用的供应商。用 /provider 看有哪些。`
     if (p === cur.provider) return `【系统】现在用的就是 ${p}（模型 ${cur.model}）。`
     // 配置文件里用的就是这个供应商：换回配置文件里的模型；否则用它的第一个模型
     const file = this.configBrain
     const choices = await this.modelChoicesNow()
-    const pick = choices.find(c => c.provider === p && p === file.provider && c.model === file.model) ?? choices.find(c => c.provider === p)
-    if (!pick) return `【系统】「${p}」还没有可用的模型。`
+    const pick = choices.find(c => normName(c.provider) === normName(p) && p === file.provider && c.model === file.model)
+      ?? choices.find(c => normName(c.provider) === normName(p))
+    if (!pick) return `【系统】没有 ${a} 这个可用的供应商。用 /provider 看有哪些。`
     return this.switchTo(pick)
   }
 
@@ -1430,13 +1437,14 @@ export class Engine {
   private setOverride(c: ModelChoice | null, effort?: string): void {
     const file = this.configBrain
     const base = c ?? { provider: this.brain.provider, model: this.brain.model }
-    const same = !c || (base.provider === file.provider && base.model === file.model && !effort && !this.currentOverride())
     const rec = c
       ? { provider: c.provider, model: c.model, ...(effort ? { effort } : {}), configKey: brainKey(file) }
       : effort ? { provider: base.provider, model: base.model, effort, configKey: brainKey(file) } : null
-    this.ledger.setMeta('brain_override', same || !rec ? '' : JSON.stringify(rec))
+    // 切到配置文件里那个模型、且不设强度 = 不需要覆盖
+    const same = !rec || (base.provider === file.provider && base.model === file.model && !effort)
+    this.ledger.setMeta('brain_override', same ? '' : JSON.stringify(rec))
     this.brain = this.withOverride(file)
-    this.log.info('brain.override', { provider: this.brain.provider, model: this.brain.model, effort: this.brain.reasoningEffort ?? null, from_config: same || !rec })
+    this.log.info('brain.override', { provider: this.brain.provider, model: this.brain.model, effort: this.brain.reasoningEffort ?? null, from_config: same })
   }
 
   private currentOverride(): { provider?: string; model?: string; effort?: string } | null {

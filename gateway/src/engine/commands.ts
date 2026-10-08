@@ -32,15 +32,16 @@ export function parseModelChoices(configOptions: unknown): ModelChoice[] {
   return out
 }
 
-/** 按 /model 后面写的内容找模型：先按"供应商/模型"找，再按模型名在所有供应商里找（模型名本身可以带斜杠） */
+/** 按 /model 后面写的内容找模型：供应商名按规整名匹配，再按模型名在所有供应商里找（模型名本身可以带斜杠） */
 export function resolveModel(spec: string, choices: ModelChoice[]): { ok: ModelChoice } | { error: string } {
   const s = spec.trim()
   const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
+  const reg = (a: string) => a.toLowerCase().replace(/_/g, '-')
   const slash = s.indexOf('/')
   if (slash > 0) {
     const p = s.slice(0, slash)
     const m = s.slice(slash + 1)
-    const hit = choices.find(c => eq(c.provider, p) && eq(c.model, m))
+    const hit = choices.find(c => reg(c.provider) === reg(p) && eq(c.model, m))
     if (hit) return { ok: hit }
   }
   const byModel = choices.filter(c => eq(c.model, s))
