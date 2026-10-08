@@ -14,7 +14,11 @@ import { TelegramApi } from './telegram/api'
 import { isGroupChat } from './telegram/inbound'
 import { Poller } from './telegram/poller'
 import { Sender } from './telegram/sender'
-import { ensureSecretFile, sleep, writeAtomic } from './util'
+import { addNoProxyHosts, ensureSecretFile, sleep, writeAtomic } from './util'
+import { fetchModels } from './providers/models'
+import { ProviderService } from './providers/service'
+import { ProviderCommands } from './providers/commands'
+import { registerCredentialSecrets } from './providers/store'
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`)
@@ -44,6 +48,8 @@ async function takeGatewayLock(cfg: BotConfig): Promise<() => void> {
 async function main(): Promise<void> {
   const configPath = arg('config')
   if (!configPath) { process.stderr.write('用法：bun src/main.ts --config configs/<bot>.yml\n'); process.exit(2) }
+  // 本机地址拉模型列表不绕代理（方案 3.7、D16）：保留原有 NO_PROXY 值，追加 127.0.0.1 / localhost / ::1
+  addNoProxyHosts(process.env)
   const cfg = loadBotConfig(configPath)
   // bot 目录里有私密对话（账本、日志、dsh 会话），只给本用户读写
   mkdirSync(cfg.botDir, { recursive: true, mode: 0o700 })
@@ -83,6 +89,28 @@ async function main(): Promise<void> {
   mcp.start()
   engine = new Engine(cfg, ledger, log, api, sender, dsh, mcp)
 
+  // 自建供应商：ProviderService（读写 <根>/providers.json + 凭据）+ ProviderCommands（/provider add、refresh）。
+  // 拉模型列表在锁外、写入在锁内；写完通知 Engine 立刻重算路由（方案 1.1、Q1）。依赖单向，Engine 不 import 这两个。
+  const service = new ProviderService({
+    root: cfg.root, credentialsPath: cfg.credentialsPath, log,
+    fetchModels: req => fetchModels(req, { timeoutMs: cfg.gw.modelFetchTimeoutMs }),
+    lockWaitMs: cfg.gw.providerLockWaitMs, keyGraceMs: cfg.gw.providerKeyGraceMs,
+    configRouteKeys: () => Object.values(cfg.brain.routes).map(r => r.apiKeyEnv).filter((k): k is string => !!k),
+    onChanged: () => engine!.reloadProvidersNow(),
+  })
+  const commands = new ProviderCommands({
+    service, api, log, root: cfg.root,
+    isOwner: id => id !== null && cfg.gw.owners.includes(id),
+    botUsername: () => engine!.botUsername,
+    configRouteNames: () => Object.keys(cfg.brain.routes),
+    reply: (chatId, text) => void sender.send({ chatId, turnId: null, callSeq: 0, text, kind: 'system' }).catch(() => {}),
+    recordUpdate: updateId => { ledger.recordUpdate(updateId, null) },
+  })
+  engine.providerCommand = (_name, args) => commands.runRefresh(args)
+  engine.onPoll = () => { void service.processPendingKeys().catch(e => log.warn('provider.key_removal_failed', { err: safeError(e) })) }
+  // 凭据文件 refs 的全部值登记为机密（方案 3.11：启动时）
+  registerCredentialSecrets(cfg.credentialsPath)
+
   for (let i = 0; !me; i++) {
     try { me = await api.getMe() } catch (e) {
       log.warn('telegram.get_me_failed', { err: safeError(e) })
@@ -100,6 +128,8 @@ async function main(): Promise<void> {
     channelDir: cfg.channelDir, botId: me.id, pollTimeoutS: cfg.gw.pollTimeoutS,
     onInbound: chatId => engine!.onInbound(chatId),
     onFatal: why => { log.error('gateway.fatal', { why }); void shutdown(1) },
+    // /provider add 含密钥：在闸门之前接走（方案 3.6）
+    interceptBeforeGate: (msg, updateId) => commands.interceptBeforeGate(msg, updateId),
     onHumanMessage: (msg, observed) => {
       if (observed) { transcript.observe(msg); return }
       // 私聊"刚聊过"标记：导演不点正在私聊的 bot 去群里说话（格式同旧系统：整数秒）
