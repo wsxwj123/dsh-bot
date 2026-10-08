@@ -1150,7 +1150,7 @@ const ALLOW: Record<string, string[]> = {
   [PF.P.modifyOpenAIAsk]: ['u1', 'cancel'],
   [PF.P.deletePick]: ['pv', 'pg', 'cancel', 'new'],
   [PF.P.deleteConfirm]: ['dc', 'cancel'],
-  [PF.P.refreshPick]: ['pv', 'pg', 'cancel'],
+  [PF.P.refreshPick]: ['pv', 'pg', 'cancel', 'new'],
   [PF.P.switchPick]: ['pv', 'pg', 'cancel'],
   [PF.P.switchModels]: ['m', 'back', 'cancel', 'pg'],
   [PF.P.result]: ['swone', 'refone', 'close'],
