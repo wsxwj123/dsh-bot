@@ -22,10 +22,25 @@
     </table>
     <div class="empty" id="empty" hidden>没有在跑的新系统 bot。</div>
   </div>
+  <div class="card" style="margin-top:14px">
+    <h2 style="margin:0">自建供应商</h2>
+    <table style="margin-top:8px">
+      <thead><tr><th>名字</th><th>格式</th><th>模型数</th><th>密钥</th><th>启用</th><th>上次刷新</th><th></th></tr></thead>
+      <tbody id="prows"></tbody>
+    </table>
+    <div class="empty" id="pempty" hidden>没有自建供应商。</div>
+  </div>
 </div>
 <script>
 const msg = document.getElementById('msg');
 function el(tag, text, cls) { const e = document.createElement(tag); if (text) e.textContent = text; if (cls) e.className = cls; return e; }
+const API_LABEL = {'openai-completions': 'OpenAI 格式', 'anthropic-messages': 'Anthropic 格式', 'openai-responses': 'OpenAI Responses 格式', 'deepseek-official': 'DeepSeek 官方'};
+const KEY_LABEL = {ok: '已配', missing: '缺密钥', none: '不需要', unknown: '不明'};
+function lastRefreshText(lr) {
+  if (!lr) return '—';
+  if (!lr.ok) return '失败：' + (lr.reason || '未知');
+  return '成功（' + (lr.count != null ? lr.count + ' 个' : '?') + '）';
+}
 async function load() {
   hubSay(msg, '读取中…');
   const r = await hubApi('/hub/api/dsh-model');
@@ -62,6 +77,29 @@ async function load() {
     };
     const td2 = el('td'); td2.appendChild(btn); tr.appendChild(td2);
     rows.appendChild(tr);
+  }
+  const prowss = document.getElementById('prows');
+  prowss.textContent = '';
+  const provs = (r.body && r.body.custom_providers) || [];
+  document.getElementById('pempty').hidden = provs.length > 0;
+  for (const p of provs) {
+    const tr = document.createElement('tr');
+    tr.appendChild(el('td', p.name, 'mono'));
+    tr.appendChild(el('td', API_LABEL[p.api] || p.api || '?'));
+    tr.appendChild(el('td', p.models != null ? String(p.models) : '?'));
+    tr.appendChild(el('td', KEY_LABEL[p.key] || p.key || '?'));
+    tr.appendChild(el('td', p.enabled ? '是' : '否' + (p.note ? '（' + p.note + '）' : '')));
+    tr.appendChild(el('td', lastRefreshText(p.last_refresh), 'muted'));
+    const btn = el('button', '刷新模型列表', 'btn mini'); btn.type = 'button';
+    btn.onclick = async () => {
+      btn.disabled = true;
+      const s = await hubApi('/hub/api/dsh-model/provider/' + encodeURIComponent(p.name) + '/refresh', {method: 'POST', body: JSON.stringify({})});
+      btn.disabled = false;
+      hubSay(msg, p.name + '：' + ((s.body && (s.body.text || s.body.detail || s.body.error)) || ('失败（' + s.status + '）')));
+      if (s.status === 200) load();
+    };
+    const td = el('td'); td.appendChild(btn); tr.appendChild(td);
+    prowss.appendChild(tr);
   }
 }
 document.getElementById('refresh').onclick = load;

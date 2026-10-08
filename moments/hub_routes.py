@@ -1448,6 +1448,8 @@ import config_loader                                    # noqa: E402
 import gateway_client                                   # noqa: E402
 
 _DM_BOT_RE = _dm_re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# §3.9：自建供应商名字规则（同网关 3.1.1）—— 不合规则的请求直接 400 bad_provider
+_DM_PROVIDER_RE = _dm_re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 
 
 def _dm_bots():
@@ -1458,6 +1460,23 @@ def _dm_bots():
         if ch and gateway_client.available(ch):
             out.append((cfg["_bot_id"], cfg.get("display_name") or cfg["_bot_id"], ch))
     return out
+
+
+def _dm_custom_providers():
+    """§3.9：取**第一个能连上**的新系统网关 `providers` 里 source==custom 的项；都连不上时 []。"""
+    for _bot_id, _name, ch in _dm_bots():
+        try:
+            info = gateway_client.model_info(ch)
+        except Exception:
+            continue                                     # 连不上：换下一个，最后都没有就回 []
+        provs = info.get("providers") if isinstance(info, dict) else None
+        if not isinstance(provs, list):
+            continue
+        return [{"name": p.get("name"), "api": p.get("api"), "models": p.get("models"),
+                 "key": p.get("key"), "enabled": p.get("enabled"), "note": p.get("note"),
+                 "last_refresh": p.get("last_refresh")}
+                for p in provs if isinstance(p, dict) and p.get("source") == "custom"]
+    return []
 
 
 @hub_bp.get("/hub/dsh-model")
@@ -1475,7 +1494,7 @@ def dsh_model_list():
         except Exception as e:                          # 网关没起来：页面照样出，这一行报错
             row["error"] = redact.scrub_text(str(e))[:200] or "网关没响应"
         bots.append(row)
-    return jsonify({"bots": bots})
+    return jsonify({"bots": bots, "custom_providers": _dm_custom_providers()})
 
 
 @hub_bp.post("/hub/api/dsh-model/<bot_id>")
@@ -1492,3 +1511,34 @@ def dsh_model_set(bot_id):
         raise HubError(404, "bot_not_found", "没有这个新系统的 bot（或它的网关没在跑）")
     ok, r = gateway_client.model_set(hit[0][2], spec.strip())
     return jsonify({"ok": ok, "text": r.get("text") or r.get("error") or "", "current": r.get("current")}), (200 if ok else 400)
+
+
+@hub_bp.post("/hub/api/dsh-model/provider/<name>/refresh")
+@_api
+def dsh_model_provider_refresh(name):
+    """§3.9：刷新一个自建供应商的模型列表，转发到第一个能连上的新系统网关。
+
+    没有在跑的新系统网关 → 503 no_gateway；连上网关但超时/断开 → 504 gateway_timeout；
+    否则原样返回网关的状态码 + 正文 {ok, text}。
+    """
+    _require_json_object(request.get_json(silent=True))
+    if not _DM_PROVIDER_RE.match(name):
+        raise HubError(400, "bad_provider", "供应商名字不合法")
+    bots = _dm_bots()
+    if not bots:
+        return jsonify({"ok": False, "error": "no_gateway", "text": "没有在运行的新系统 bot"}), 503
+    saw_timeout = False
+    for _bot_id, _name, ch in bots:
+        try:
+            code, body = gateway_client.provider_refresh(ch, name)
+        except TimeoutError:                              # 连上了但 55 秒没有回应
+            saw_timeout = True
+            continue
+        except Exception:                                 # 连不上（拒连等）：换下一个网关
+            continue
+        if not isinstance(body, dict):
+            body = {}
+        return jsonify({"ok": bool(body.get("ok")), "text": body.get("text") or ""}), code
+    if saw_timeout:
+        return jsonify({"ok": False, "error": "gateway_timeout", "text": "网关没有及时响应，稍后刷新页面看结果"}), 504
+    return jsonify({"ok": False, "error": "no_gateway", "text": "没有在运行的新系统 bot"}), 503
