@@ -1458,6 +1458,9 @@ export class Engine {
 
   /** 可选模型：用最近一次 dsh 回报的；还没有就开一个临时会话问一下（不发请求，不花钱） */
   private async modelChoicesNow(): Promise<ModelChoice[]> {
+    // 正在换新 dsh 进程（或正要换）：旧进程的模型表不能再用，否则「刚建好/刚切过来」
+    // 的供应商会拿不到它那条新路由（3.8 现读让「看到新供应商」早于「dsh 里真有了它」）。
+    if (this.restarting || this.restartPending) this.modelChoices = []
     if (this.modelChoices.length) return this.modelChoices
     await this.ensureDsh()
     const conn = this.dsh.conn
@@ -1479,21 +1482,12 @@ export class Engine {
   }
 
   /**
-   * 现读 providers.json 刷新快照与合并结果（方案 3.8：GET /v1/model 的 providers 每次请求都现读）。
-   * 与 checkProviders 的区别：不写日志、不重算 configBrain/覆盖、不触发重启，只让视图看到最新文件。
-   * 读坏时与 checkProviders 一致：保留上一次读到的内容。
+   * 现读 providers.json（方案 3.8：GET /v1/model 的 providers 每次请求都现读）。
+   * 与 watchConfig 同样在发现变化时重算路由、按需空闲重启 dsh —— 否则「看到新供应商」与
+   * 「dsh 里真的有了这条路由」会脱节，紧接着的 /model <供应商>/<模型> 会用到旧 dsh 的模型表。
+   * 用 force=false：文件没变时只做一次 statSync，不写日志、不重启。
    */
-  private reloadProvidersForView(): void {
-    try {
-      const snap = readProviders(this.providersPath())
-      this.sharedProviders = snap
-      this.providersReadable = true
-      this.providerMerge = mergeRoutes(this.fileRoutes, snap)
-    } catch (e) {
-      if (!(e instanceof ProvidersUnreadable)) throw e
-      this.providersReadable = false
-    }
-  }
+  private reloadProvidersForView(): void { this.reloadProvidersNow(false) }
 
   /** 供应商视图（/provider 列表、GET /v1/model 的 providers 都用它；绝不含密钥、地址） */
   async providerViews(): Promise<ProviderView[]> {
@@ -1710,9 +1704,12 @@ export class Engine {
     return true
   }
 
-  /** 收到 providers.json 改动的通知（ProviderService.onChanged）：立刻重读、重算、必要时空闲重启（方案 Q1） */
-  reloadProvidersNow(): void {
-    if (this.checkProviders(true)) this.brain = this.withOverride(this.configBrain)
+  /**
+   * 收到 providers.json 改动的通知（ProviderService.onChanged）：立刻重读、重算、必要时空闲重启（方案 Q1）。
+   * force=false 供「读接口现读」用：文件没变就什么都不做。
+   */
+  reloadProvidersNow(force = true): void {
+    if (this.checkProviders(force)) this.brain = this.withOverride(this.configBrain)
     const fp = restartFingerprint(this.patchInput())
     if (fp !== this.fingerprint && this.dsh.running) {
       this.log.info('config.restart_needed', { reason: 'routes changed' })
