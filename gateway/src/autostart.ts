@@ -110,3 +110,53 @@ ${Object.entries(a.calendar).map(([k, v]) => `    <key>${esc(k)}</key><integer>$
 
 export const plistPath = (home: string, label: string) => join(home, 'Library', 'LaunchAgents', `${label}.plist`)
 export const binDir = (p: string) => dirname(p)
+
+// ─── 安装前检查与状态解析（方案 3.10.1） ───
+
+/**
+ * 受保护目录：macOS 的隐私保护（TCC）不让 launchd 直接拉起的 python 读这些目录，
+ * 仓库放在这里时开机自启的 python 任务会起不来（M6 真机：仓库在桌面上，jiwen 等任务全部失败）。
+ */
+export function defaultProtectedDirs(home: string): { name: string; path: string }[] {
+  return [
+    { name: '~/Desktop', path: join(home, 'Desktop') },
+    { name: '~/Documents', path: join(home, 'Documents') },
+    { name: '~/Downloads', path: join(home, 'Downloads') },
+    { name: 'iCloud 云盘', path: join(home, 'Library', 'Mobile Documents') },
+  ]
+}
+
+/**
+ * 仓库在哪个受保护目录之下（含目录本身），返回那一项的 name；都不在返回 null。
+ * 参数都是已解析好软链的 POSIX 绝对路径。macOS 默认文件系统不分大小写，所以比较也不分；
+ * 按"整段目录"比较，~/Desktop2 不算 ~/Desktop 之下。
+ */
+export function protectedRepoDir(repo: string, protectedDirs: { name: string; path: string }[]): string | null {
+  const norm = (p: string) => p.toLowerCase().replace(/\/+$/, '')
+  const r = norm(repo)
+  for (const d of protectedDirs) {
+    const p = norm(d.path)
+    if (r === p || r.startsWith(`${p}/`)) return d.name
+  }
+  return null
+}
+
+/**
+ * 解析 `launchctl print gui/<uid>/<label>` 的输出。只看顶层（行首恰好一个制表符）的第一条
+ * state / pid / last exit code：嵌套块（如 endpoints）里也有 state、pid，旧写法会误取。
+ * 取等号后的全文：旧写法 `(\S+)` 会把 `not running` 截成 `not`。
+ */
+export function parseLaunchctlPrint(out: string, code: number): { state: string; pid: string | null; lastExit: string | null } {
+  if (code !== 0) return { state: '没在运行（launchd 里没有这个任务）', pid: null, lastExit: null }
+  const top: Record<string, string> = {}
+  for (const line of out.split(/\r?\n/)) {
+    const m = /^\t(state|pid|last exit code) =(.*)$/.exec(line)
+    if (m && !(m[1]! in top)) top[m[1]!] = m[2]!.trim()
+  }
+  const last = top['last exit code']
+  return {
+    state: top.state ?? '?',
+    pid: top.pid ?? null,
+    lastExit: last === undefined ? null : last === '(never exited)' ? '从未退出' : last,
+  }
+}

@@ -7,10 +7,10 @@
 //   bun gateway/scripts/autostart.ts uninstall <bot 名 | director>   停掉并取消开机自启
 //   bun gateway/scripts/autostart.ts status                          列出新系统的开机自启项和状态
 // 看实时日志：bun gateway/scripts/logs.ts --config <配置文件> -f（导演：tail -f ~/.dsh-bot/director/director.log）
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
-import { baseEnv, directorAgent, gatewayAgent, plist, plistPath, PROXY_VARS, pythonAgent, SHARED, type Agent } from '../src/autostart'
+import { baseEnv, defaultProtectedDirs, directorAgent, gatewayAgent, parseLaunchctlPrint, plist, plistPath, protectedRepoDir, PROXY_VARS, pythonAgent, SHARED, type Agent } from '../src/autostart'
 import { loadAccess, loadBotConfig, rootDir } from '../src/config'
 
 const [cmd, ...rest] = process.argv.slice(2)
@@ -43,8 +43,23 @@ function install(a: Agent): number {
   return 0
 }
 
+/**
+ * 仓库在桌面、文稿、下载或 iCloud 云盘下时拒绝安装（方案 3.10.1）：macOS 的隐私保护会拦住 launchd 直接拉起的
+ * python 任务，装上了也起不来。两边都先解析软链再比，免得经软链绕过或误拦。
+ */
+function repoBlocked(): boolean {
+  const real = (p: string) => { try { return realpathSync(p) } catch { return p } }
+  const repo = real(REPO)
+  const hit = protectedRepoDir(repo, defaultProtectedDirs(HOME).map(d => ({ name: d.name, path: real(d.path) })))
+  if (!hit) return false
+  console.log(`  ⛔ 仓库在 ${hit} 下（${repo}）。macOS 的隐私保护会拦住 launchd 直接拉起的 python 任务，开机自启会失败。`)
+  console.log('     请把仓库移到家目录根下（例如 ~/dsh-bot），再重新安装。')
+  return true
+}
+
 function main(): number {
   if (process.platform !== 'darwin') { console.log('开机自启目前只支持 macOS（launchd）。其他系统请用 tmux 或系统自己的服务管理。'); return 2 }
+  if (['install', 'install-director', 'install-jobs', 'install-shared'].includes(cmd ?? '') && repoBlocked()) return 1
   if (cmd === 'install') {
     const cfgPath = rest[0]
     if (!cfgPath) { console.log('用法：autostart.ts install <配置文件>'); return 2 }
@@ -93,9 +108,8 @@ function main(): number {
     if (labels.length === 0) console.log('还没有设开机自启的项。')
     for (const l of labels) {
       const r = launchctl('print', `gui/${uid()}/${l}`)
-      const state = r.out.match(/\bstate = (\S+)/)?.[1] ?? (r.code === 0 ? '?' : '没在运行')
-      const pid = r.out.match(/\bpid = (\d+)/)?.[1]
-      console.log(`  ${l}：${state}${pid ? `（pid ${pid}）` : ''}`)
+      const s = parseLaunchctlPrint(r.out, r.code)
+      console.log(`  ${l}：${s.state}${s.pid ? `（pid ${s.pid}）` : ''}（上次退出码 ${s.lastExit ?? '未知'}）`)
     }
     return 0
   }
