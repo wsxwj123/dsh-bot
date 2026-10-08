@@ -114,7 +114,9 @@ export class LifeActions {
     // 没在 10 秒内好：先回"还在生成"，好了以后塞一条系统消息
     void run.then(r => {
       const res = done(r)
-      this.d.notify(chatId, `⟦系统·生图⟧ ${res.text}`, `image:${stamp}`)
+      // 晚到的成功通知要说清"这就是刚才那次请求的图"，免得模型以为是另一张、又调一次 generate_image（方案 3.10.3）；失败通知不变
+      this.d.notify(chatId, res.isError || !r.path ? `⟦系统·生图⟧ ${res.text}`
+        : `⟦系统·生图⟧ 刚才那次生图请求的图片生成好了：${r.path}\n这张就是刚才那次请求生成的图，直接用 reply 的 files 发给对方（不用再调用 generate_image）；要配到朋友圈就用 moments 的 set_image。`, `image:${stamp}`)
     })
     return { text: '图片还在生成，大概还要一会儿。先回对方一句（比如"等我一下"），生成好了程序会告诉你图片路径。' }
   }
