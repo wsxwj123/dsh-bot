@@ -2,8 +2,12 @@
 // 原因：错误要能精确分成"确定没送达 / 确定被拒 / 可能已送达"三类，且错误里绝不能带出含令牌的请求地址。
 import { readFileSync } from 'fs'
 import { basename } from 'path'
-import { redact } from '../log'
+import { redact, safeError } from '../log'
+import { sleep } from '../util'
 
+/** 内联按钮（按钮引导用，方案 3.3.2）。callback_data 的硬性上限是 64 字节，引导自己限 40 */
+export type TgInlineButton = { text: string; callback_data: string }
+export type TgInlineKeyboard = { inline_keyboard: TgInlineButton[][] }
 export type TgUser = { id: number; is_bot?: boolean; first_name?: string; last_name?: string; username?: string }
 export type TgChat = { id: number; type: 'private' | 'group' | 'supergroup' | 'channel'; title?: string; username?: string; first_name?: string }
 export type TgMessage = {
@@ -25,8 +29,14 @@ export type TgMessage = {
   animation?: unknown
   location?: unknown
   contact?: unknown
+  reply_markup?: TgInlineKeyboard
 }
-export type TgUpdate = { update_id: number; message?: TgMessage; edited_message?: TgMessage }
+/**
+ * 按钮点击。拿不到原消息时 message 是 InaccessibleMessage：只有 chat、message_id、date，且 date 固定为 0（TG调研第 2 题），
+ * 所以用 date === 0 区分。
+ */
+export type TgCallbackQuery = { id: string; from: TgUser; message?: TgMessage; inline_message_id?: string; chat_instance?: string; data?: string }
+export type TgUpdate = { update_id: number; message?: TgMessage; edited_message?: TgMessage; callback_query?: TgCallbackQuery }
 
 /** Telegram 明确回了 ok:false */
 export class TgApiError extends Error {
@@ -70,6 +80,11 @@ export function isReplyNotFound(e: unknown): boolean {
   return e instanceof TgApiError && e.status === 400 && /reply|replied/i.test(e.description) && /not found/i.test(e.description)
 }
 
+/** 编辑时文字和按钮都没变：Telegram 回 400 "message is not modified"，当成功处理（方案 3.11） */
+export function isNotModified(e: unknown): boolean {
+  return e instanceof TgApiError && e.status === 400 && /message is not modified/i.test(e.description)
+}
+
 export type FileUpload = { field: string; path: string; filename?: string }
 
 export class TelegramApi {
@@ -96,6 +111,8 @@ export class TelegramApi {
     let data: { ok?: boolean; result?: T; error_code?: number; description?: string; parameters?: { retry_after?: number } }
     try {
       data = await res.json() as typeof data
+      // 合法 JSON 但不是对象（如中间的代理回了 null）：同样当"回包读不出"，不能让下面的 data.ok 抛 TypeError 打乱错误分类
+      if (!data || typeof data !== 'object') throw new Error('not an object')
     } catch {
       // 回包读不出来：Telegram 可能已经处理了，按"可能已送达"
       throw new TgNetworkError(method, res.ok ? 'BadResponseBody' : `HTTP${res.status}`, '')
@@ -107,15 +124,37 @@ export class TelegramApi {
   getMe() { return this.call<TgUser>('getMe') }
 
   getUpdates(offset: number, timeoutS: number, signal?: AbortSignal) {
-    return this.call<TgUpdate[]>('getUpdates', { offset, timeout: timeoutS, allowed_updates: ['message'] }, { timeoutMs: (timeoutS + 15) * 1000, signal })
+    // 两类都要显式写：不写时 Telegram 沿用上一次的声明，旧网关声明过只要 message，按钮点击就永远收不到（TG调研第 2 题）
+    return this.call<TgUpdate[]>('getUpdates', { offset, timeout: timeoutS, allowed_updates: ['message', 'callback_query'] }, { timeoutMs: (timeoutS + 15) * 1000, signal })
   }
 
-  sendMessage(chatId: string, text: string, o: { replyTo?: number } = {}) {
+  sendMessage(chatId: string, text: string, o: { replyTo?: number; replyMarkup?: TgInlineKeyboard } = {}) {
     return this.call<TgMessage>('sendMessage', {
       chat_id: chatId,
       text,
       ...(o.replyTo ? { reply_parameters: { message_id: o.replyTo, allow_sending_without_reply: true } } : {}),
+      ...(o.replyMarkup ? { reply_markup: o.replyMarkup } : {}),
     })
+  }
+
+  /** 改 bot 自己发的一条消息的文字。不给 replyMarkup = 去掉按钮（Telegram 的行为，TG调研第 4 题） */
+  editMessageText(chatId: string, messageId: number, text: string, o: { replyMarkup?: TgInlineKeyboard } = {}) {
+    return this.call<TgMessage | true>('editMessageText', { chat_id: chatId, message_id: messageId, text, ...(o.replyMarkup ? { reply_markup: o.replyMarkup } : {}) })
+  }
+
+  /** 只改按钮。不给 replyMarkup = 去掉按钮 */
+  editMessageReplyMarkup(chatId: string, messageId: number, replyMarkup?: TgInlineKeyboard) {
+    return this.call<TgMessage | true>('editMessageReplyMarkup', { chat_id: chatId, message_id: messageId, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) })
+  }
+
+  /** 删一条消息。要带重试和"删没删掉"的结论时用 deleteMessageWithRetry */
+  deleteMessage(chatId: string, messageId: number) {
+    return this.call<boolean>('deleteMessage', { chat_id: chatId, message_id: messageId }, { timeoutMs: 10_000 })
+  }
+
+  /** 回应一次按钮点击；不给 text = 不显示文字。每个回调只能回一次，第二次 Telegram 报 400 */
+  answerCallbackQuery(callbackQueryId: string, text?: string) {
+    return this.call<boolean>('answerCallbackQuery', { callback_query_id: callbackQueryId, ...(text ? { text } : {}) }, { timeoutMs: 10_000 })
   }
 
   getFile(fileId: string) {
@@ -148,6 +187,27 @@ export class TelegramApi {
     return this.call<boolean>('setMessageReaction', {
       chat_id: chatId, message_id: messageId, reaction: emoji ? [{ type: 'emoji', emoji }] : [],
     }, { timeoutMs: 10_000 })
+  }
+}
+
+/**
+ * 删一条消息（含密钥的消息靠它清掉，方案 3.11）：网络错误或 429 最多再试 2 次（429 按 retry_after，单次最多等 5 秒）。
+ * 永不抛；ok:false 时 err 已脱敏，可以直接写日志。
+ */
+export async function deleteMessageWithRetry(api: TelegramApi, chatId: string, messageId: number, wait: (ms: number) => Promise<void> = sleep): Promise<{ ok: true } | { ok: false; err: string }> {
+  let maybeDone = false
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await api.deleteMessage(chatId, messageId)
+      return { ok: true }
+    } catch (e) {
+      // 上一次是"可能已送达"的网络错误，这次报找不到：多半上一次其实删成了，反正消息已经不在
+      if (maybeDone && e instanceof TgApiError && e.status === 400 && /message to delete not found/i.test(e.description)) return { ok: true }
+      const is429 = e instanceof TgApiError && e.status === 429
+      if (attempt >= 2 || !(is429 || e instanceof TgNetworkError)) return { ok: false, err: safeError(e) }
+      if (classifySendError(e).cls === 'ambiguous') maybeDone = true
+      await wait(is429 ? Math.min(5, (e as TgApiError).retryAfter ?? 1) * 1000 : 1_000)
+    }
   }
 }
 
