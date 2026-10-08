@@ -69,12 +69,52 @@ export function formatModelList(choices: ModelChoice[], current: ModelChoice): s
 export type KeyStatus = 'ok' | 'missing' | 'none' | 'unknown'
 const KEY_WORD: Record<KeyStatus, string> = { ok: '密钥已配', missing: '缺密钥', none: '不需要密钥', unknown: '密钥情况不明' }
 
-export function formatProviders(choices: ModelChoice[], current: ModelChoice, keyStatus: (provider: string) => { status: KeyStatus; env?: string }): string {
+/** 供应商来源（INTERFACE 3.4.1）：内置、本 bot 配置文件路由、自建 */
+export type ProviderSource = 'builtin' | 'config' | 'custom'
+/** 一个供应商的对外视图（/provider 列表、GET /v1/model 的 providers 都用它；绝不含密钥、地址） */
+export type ProviderView = {
+  name: string
+  source: ProviderSource
+  api: string | null
+  /** 内置/配置文件：dsh 回报的模型数，拿不到为 null；自建：providers.json 的模型数 */
+  models: number | null
+  key: KeyStatus
+  /** 缺密钥时提示要填的键名（配置文件来源才有），其它情况 null。绝不出现密钥值 */
+  keyEnv: string | null
+  enabled: boolean
+  note: string | null
+  lastRefresh: { at: number; ok: boolean; count: number; reason: string | null } | null
+}
+
+/** 格式名（INTERFACE 3.4.1） */
+export function apiLabel(api: string | null | undefined): string {
+  switch (api) {
+    case 'anthropic-messages': return 'Anthropic 格式'
+    case 'openai-completions': return 'OpenAI 格式'
+    case 'openai-responses': return 'OpenAI Responses 格式'
+    case 'deepseek-official': return 'DeepSeek 官方'
+    default: return api ? String(api) : '?'
+  }
+}
+
+const SOURCE_WORD: Record<ProviderSource, string> = { builtin: '内置', config: '配置文件', custom: '自建' }
+
+/**
+ * /provider 列表（INTERFACE 3.4.1）。顺序：内置 → 配置文件 → 自建（按名字）。
+ * 群里去掉"凭据文件里填…"提示（3.6）。
+ */
+export function formatProviders(views: ProviderView[], current: ModelChoice, o: { inGroup?: boolean } = {}): string {
   const lines = ['【系统】供应商（✅ 是现在用的）：']
-  for (const p of providersOf(choices)) {
-    const n = choices.filter(c => c.provider === p).length
-    const k = keyStatus(p)
-    lines.push(`${p === current.provider ? '✅' : '·'} ${p}：${n} 个模型，${KEY_WORD[k.status]}${k.status === 'missing' && k.env ? `（凭据文件里填 ${k.env}）` : ''}`)
+  const order: Record<ProviderSource, number> = { builtin: 0, config: 1, custom: 2 }
+  const sorted = [...views].sort((a, b) => order[a.source] - order[b.source] || a.name.localeCompare(b.name))
+  for (const v of sorted) {
+    const on = v.name === current.provider
+    const n = v.source === 'custom'
+      ? (v.models === 0 ? '0 个模型（未生效：先「刷新模型」或手动加）' : `${v.models ?? 0} 个模型`)
+      : `${v.models ?? '?'} 个模型`
+    const keyHint = v.key !== 'missing' || o.inGroup ? '' : (v.source === 'custom' ? '（点「修改」→「密钥」补上）' : v.keyEnv ? `（凭据文件里填 ${v.keyEnv}）` : '')
+    const note = v.note ? `，${v.note}` : ''
+    lines.push(`${on ? '✅' : '·'} ${v.name}：${n}，${KEY_WORD[v.key]}${keyHint}，${apiLabel(v.api)}，${SOURCE_WORD[v.source]}${note}`)
   }
   lines.push('换供应商：/provider <名字>（换到它的第一个模型）；看模型：/model list。')
   return lines.join('\n')
@@ -82,12 +122,16 @@ export function formatProviders(choices: ModelChoice[], current: ModelChoice, ke
 
 export const HELP_TEXT = [
   '【系统】可用的命令（只有主人能用）：',
+  '/provider、/model —— 不带参数是按钮引导（点按钮新建供应商、换模型、改思考强度）',
   '/model —— 看现在用的模型',
   '/model list —— 列出能换的模型',
   '/model <模型> —— 换模型，也可以写 <供应商>/<模型>。这个 bot 的所有聊天都换，重启后保持',
   '/model default —— 换回配置文件里的模型',
   '/provider —— 列出供应商，以及密钥配没配',
   '/provider <供应商> —— 换到这个供应商的第一个模型',
+  '/provider add <名字> <地址> <密钥> [openai|anthropic] —— 一行新建/更新自建供应商（不写格式按 Anthropic）',
+  '/provider refresh <名字> —— 重新拉这个自建供应商的模型列表',
+  '/cancel —— 退出正在进行的按钮引导',
   '/compact [要特别留意的事] —— 把这段对话压缩成摘要、换新会话，带着摘要和最近的原话',
   '/clear —— 清空这段对话的上下文，只留一份摘要',
   '/help —— 显示这份说明',

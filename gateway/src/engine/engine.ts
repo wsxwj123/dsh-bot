@@ -7,7 +7,7 @@
 //   卡住 → session/cancel；取消不掉就重启 dsh，按"进程死了"处理
 import { existsSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
-import { expandHome, loadAccess, reloadBrain, type Access, type Brain, type BotConfig } from '../config'
+import { expandHome, loadAccess, reloadBrain, type Access, type Brain, type BotConfig, type Route } from '../config'
 import { AcpError, AcpExited, AcpTimeout, type SessionUpdate } from '../dsh/acp'
 import { buildDshEnv, defaultDshCommand, type DshProcess, type DshSpec } from '../dsh/process'
 import { buildPatchRows, modelValue, patchText, promptFingerprint, restartFingerprint, type PatchInput } from '../dsh/profile'
@@ -30,7 +30,8 @@ import {
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, summaryPrompt,
 } from './format'
-import { formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, type KeyStatus, type ModelChoice } from './commands'
+import { formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, type KeyStatus, type ModelChoice, type ProviderView } from './commands'
+import { mergeRoutes, normName, readProviders, ProvidersUnreadable, type ProvidersSnapshot, type MergedProviders, type ProviderEntry } from '../providers/store'
 
 /**
  * 被晾追问等多久的倍数：按关系数值（好感 + 信任）调，越亲近追得越快（用户在 M3 真机验收后定的）。
@@ -113,6 +114,23 @@ export function brainKey(b: Brain): string {
   return `${b.provider}/${b.model}/${b.reasoningEffort ?? ''}`
 }
 
+/** 供应商身份：名字；自建的再加 @<epoch>（身份变了就换段，方案 3.2 第 6 条）。身份里不含 / */
+export function identityOf(key: string): string {
+  const i = key.indexOf('/')
+  return i < 0 ? key : key.slice(0, i)
+}
+
+/** 换段/超长重试要用的重试原因 */
+type RollReason = 'provider-changed' | 'context-overflow' | 'thinking-history'
+
+/** 从一轮的错误文字里认出"上游因上下文超长/历史思考被拒而拒绝"（方案 3.2 第 10、11 条；只看文字，不以状态码为条件） */
+export function classifyUpstreamError(text: string): RollReason | null {
+  const t = text.toLowerCase()
+  if (['context length', 'context_length', 'maximum context', 'prompt is too long', 'too many tokens', 'context_window'].some(k => t.includes(k))) return 'context-overflow'
+  if (t.includes('reasoning_content') || t.includes('thinking')) return 'thinking-history'
+  return null
+}
+
 export class Engine {
   private chats = new Map<string, ChatState>()
   private runningCount = 0
@@ -129,6 +147,22 @@ export class Engine {
   private fingerprint = ''
   /** 配置文件里的模型；this.brain 是实际在用的（可能被 /model 换过） */
   private configBrain: Brain
+  /** 本 bot 配置文件里的路由（不含自建），用来区分"配置文件里的"与"自建的" */
+  private fileRoutes: Record<string, Route>
+  /** 最近一次读到的 <根>/providers.json（读坏时为上一次的好值；从没读到过为 null） */
+  private sharedProviders: ProvidersSnapshot | null = null
+  /** 最近一次读 providers.json 成功没有（读坏 = false，覆盖只暂停、不清） */
+  private providersReadable = true
+  /** providers.json 的 mtime+inode+大小指纹，用来发现改名替换 */
+  private providersSig = ''
+  private providerMerge: MergedProviders | null = null
+  /** 注入：处理 `/provider refresh`（ProviderCommands）；注入：每次轮询调用（ProviderService 处理到点删键） */
+  providerCommand?: (name: string, args: string, chatId: string) => Promise<string>
+  onPoll?: () => void
+  /** 这个聊天上一轮是不是以出错结束（跨供应商换段时不碰旧会话） */
+  private lastTurnErrored = new Set<string>()
+  /** dsh 汇报的思考档位缓存：<供应商>/<模型> → 档位（dsh 重启清空） */
+  private effortCache = new Map<string, string[]>()
   /** dsh 回报的可选模型（最近一次看到的） */
   private modelChoices: ModelChoice[] = []
   /** 正在跑的 dsh 用的系统提示词的指纹（dsh 启动时算） */
@@ -164,8 +198,11 @@ export class Engine {
     readonly dsh: DshProcess,
     readonly mcp: McpServer,
   ) {
-    this.configBrain = cfg.brain
-    this.brain = this.withOverride(cfg.brain)
+    this.fileRoutes = cfg.brain.routes
+    this.providerMerge = mergeRoutes(this.fileRoutes, null)
+    this.configBrain = { ...cfg.brain, routes: this.providerMerge.routes }
+    this.checkProviders(true) // 启动就读一次 <根>/providers.json（读坏当空，方案 3.2 第 2 条）
+    this.brain = this.withOverride(this.configBrain)
     this.memory = new MemoryStore(cfg.memoryDir)
     this.media = new Media({
       api, ledger, log, mediaDir: cfg.mediaDir, bridgeUrl: cfg.gw.voiceBridgeUrl,
@@ -568,6 +605,7 @@ export class Engine {
         this.fingerprint = restartFingerprint(input)
         this.promptKey = promptFingerprint(input, this.harnessVersion())
         this.modelChoices = []
+        this.effortCache.clear()
         this.loaded.clear()
         this.lastProbeOkAt = Date.now()
         this.dshBackoff.reset()
@@ -654,6 +692,8 @@ export class Engine {
     } catch {
       return Math.max(1_000, this.dshNextTryAt - Date.now())
     }
+    // 新建供应商后马上切过来再发消息：这一轮的供应商还不在运行中的 dsh 里，先补重启（方案 3.2 第 3 条）
+    await this.restartForRouteIfNeeded(this.brain.provider).catch(e => this.log.warn('dsh.restart_for_route_failed', { err: safeError(e) }))
     // 新消息一进来就会超预算：先换段再处理
     await this.maybeRoll(chatId, batch)
     const since = Date.now()
@@ -696,10 +736,12 @@ export class Engine {
     // 对方发来的图片：附在消息后面（模型看不了图时，runPrompt 里换成一句说明）
     const images: Block[] = batch.flatMap(r => { const m = rowMedia(r); return m?.kind === 'photo' && m.path ? [{ image: m.path }] : [] })
     let blocks: Block[] = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone }), ...images]
+    const contentBlocks = blocks // 换段重试时用同样的内容（不带新段的补充说明）
     let kind: TurnKind = 'message'
     let attempt = 0
     let rootId: number | undefined
     let nudgedNoAction = false
+    let recovered = false
     const g = this.cfg.gw
 
     for (;;) {
@@ -712,6 +754,7 @@ export class Engine {
       this.log.info('turn.end', { turn: turn.id, kind, attempt, outcome: outcome.type, delivered, silent })
 
       if (outcome.type === 'ok') {
+        this.lastTurnErrored.delete(chatId)
         this.ledger.finishTurn(turn.id, 'ok', { stopReason: outcome.stopReason, usedTokens: outcome.used })
         if (done) { this.ledger.settleInbound(ids, 'done'); return 0 }
         if (!nudgedNoAction) { nudgedNoAction = true; kind = 'nudge'; blocks = [NUDGE_NO_ACTION]; continue }
@@ -740,8 +783,33 @@ export class Engine {
         this.ledger.finishTurn(turn.id, 'cancelled', { stopReason: 'cancelled', usedTokens: outcome.used })
         if (done) { this.ledger.settleInbound(ids, 'done', 'replied before cancel'); return 0 }
       } else {
+        this.lastTurnErrored.add(chatId)
         this.ledger.finishTurn(turn.id, 'error', { error: outcome.err, usedTokens: outcome.used })
         if (done) { this.ledger.settleInbound(ids, 'done', 'replied before error'); return 0 }
+        // 上下文超长 / 历史思考被拒（方案 3.2 第 10、11 条）：立即换段（账本流水写摘要）并重试一次
+        const reason = outcome.fatal ? null : classifyUpstreamError(outcome.err)
+        if (reason && !recovered) {
+          recovered = true
+          if (reason === 'thinking-history') this.log.info('segment.thinking_history_rejected', { chat: chatId, segment: seg.id })
+          if (reason === 'context-overflow') void this.notifyOverflow()
+          try {
+            await this.rollSegment(chatId, seg, reason, undefined, { skipInSession: true })
+          } catch (e) {
+            if (e instanceof AcpExited) return 1_000
+            this.log.error('segment.roll_failed', { chat: chatId, segment: seg.id, err: safeError(e) })
+            this.ledger.closeSegment(seg.id, 'closed', `${reason} (summary failed)`)
+            if (seg.session_id) this.loaded.delete(seg.session_id)
+          }
+          try {
+            seg = await this.openSegment(chatId, null)
+          } catch (e) {
+            this.log.error('segment.prepare_failed', { chat: chatId, err: safeError(e) })
+            return 1_000
+          }
+          kind = 'message'
+          blocks = contentBlocks
+          continue
+        }
         if (outcome.fatal) {
           this.ledger.settleInbound(ids, 'dead', outcome.err.slice(0, 200))
           void this.notifyOwner('fatal', `模型那边拒绝了请求（${outcome.err.slice(0, 160)}），可能是密钥、余额或模型名的问题。${ids.length} 条消息没处理。`)
@@ -811,7 +879,7 @@ export class Engine {
     this.ledger.markTurnSent(turnId)
     if (seg.needs_seed) { this.ledger.segmentSeeded(seg.id); seg.needs_seed = 0 }
     try {
-      const bk = brainKey(this.brain)
+      const bk = this.keyOf(this.brain)
       let res: { stopReason?: string }
       try {
         res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: promptItems(blocks, this.noImages.has(bk)) }, 0)
@@ -881,18 +949,27 @@ export class Engine {
       }
       seg = this.ledger.activeSegment(chatId)
     }
-    if (!seg || !seg.session_id) {
-      // 上一段是崩溃作废的、还没有摘要：先用账本流水补写一份（旧会话已经用不了）
-      if (!seg) await this.summarizeAbandoned(chatId)
-      if (!seg) seg = this.ledger.createSegment(chatId, randomToken(), true)
-      const s = await conn.request<{ sessionId: string; configOptions?: any[] }>('session/new', { cwd: this.cfg.workDir, mcpServers: this.mcp.serverSpec(seg.id, seg.mcp_token) }, 60_000)
-      this.ledger.setSegmentSession(seg.id, s.sessionId, '', this.promptKey)
-      this.noteOptions(s.configOptions)
-      this.loaded.set(s.sessionId, gen)
-      this.log.info('segment.created', { chat: chatId, segment: seg.id, needs_seed: seg.needs_seed === 1 })
-      seg = this.ledger.segment(seg.id)!
+    // 换到另一家（或自建供应商改了格式/主机，身份 = 名字+epoch）：先让旧模型在旧会话里写交接摘要，再开新会话
+    // （方案 3.2 第 6 条、Q6；BRIEF F5-3）。判断与入口无关，所有入口最终只改 this.brain，下一轮必经这里。
+    const from = seg?.model ? identityOf(seg.model) : ''
+    const to = this.identity(this.brain)
+    if (seg?.session_id && from && from !== to && this.ledger.segmentTurnsOfKind(seg.id, 'message') > 0) {
+      this.log.info('segment.provider_changed', { chat: chatId, segment: seg.id, from, to })
+      try {
+        await this.rollSegment(chatId, seg, 'provider-changed', undefined, {
+          inSessionMs: this.cfg.gw.providerSwitchSummaryMs,
+          skipInSession: this.lastTurnErrored.has(chatId) || !this.identityStillExists(from),
+        })
+      } catch (e) {
+        if (e instanceof AcpExited) throw e
+        this.log.error('segment.roll_failed', { chat: chatId, segment: seg.id, err: safeError(e) })
+        this.ledger.closeSegment(seg.id, 'closed', 'provider-changed (summary failed)')
+        if (seg.session_id) this.loaded.delete(seg.session_id)
+      }
+      seg = this.ledger.activeSegment(chatId)
     }
-    if (seg.model !== brainKey(this.brain)) await this.applyBrain(seg)
+    if (!seg || !seg.session_id) seg = await this.openSegment(chatId, seg)
+    if (seg.model !== this.keyOf(this.brain)) await this.applyBrain(seg)
     let seed: string | null = null
     if (seg.needs_seed) {
       const clearAt = Number(this.ledger.getMeta(`clear_at:${chatId}`) ?? 0)
@@ -908,6 +985,23 @@ export class Engine {
       })
     }
     return { seg: this.ledger.segment(seg.id)!, seed }
+  }
+
+  /** 开一个新会话（没有段就建段；上一段是作废的先用账本补摘要）。ensureSegment 与超长重试共用 */
+  private async openSegment(chatId: string, existing?: SegmentRow | null): Promise<SegmentRow> {
+    const conn = this.dsh.conn
+    if (!conn) throw new AcpExited('session/new')
+    const gen = this.dsh.generation
+    let seg = existing
+    if (!seg) await this.summarizeAbandoned(chatId)
+    if (!seg) seg = this.ledger.activeSegment(chatId)
+    if (!seg) seg = this.ledger.createSegment(chatId, randomToken(), true)
+    const s = await conn.request<{ sessionId: string; configOptions?: any[] }>('session/new', { cwd: this.cfg.workDir, mcpServers: this.mcp.serverSpec(seg.id, seg.mcp_token) }, 60_000)
+    this.ledger.setSegmentSession(seg.id, s.sessionId, '', this.promptKey)
+    this.noteOptions(s.configOptions)
+    this.loaded.set(s.sessionId, gen)
+    this.log.info('segment.created', { chat: chatId, segment: seg.id, needs_seed: seg.needs_seed === 1 })
+    return this.ledger.segment(seg.id)!
   }
 
   /**
@@ -930,8 +1024,11 @@ export class Engine {
     this.noteOptions(r?.configOptions)
     if (b.reasoningEffort) {
       const opt = (r?.configOptions ?? []).find((o: any) => o?.id === 'reasoning_effort')
-      if (opt) await conn.request('session/set_config_option', { sessionId, configId: 'reasoning_effort', value: b.reasoningEffort }, 30_000)
-      else this.log.info('brain.effort_unsupported', { model: b.model })
+      // 只有 dsh 报出的选项里有这个档位才设，否则会被 -32602 拒（S9）；不支持就跳过，不通知主人、不报错
+      const values: string[] = Array.isArray(opt?.options) ? opt.options.map((x: any) => String(x?.value ?? '')).filter((v: string) => v !== '') : []
+      if (!opt) this.log.info('brain.effort_unsupported', { model: b.model, effort: b.reasoningEffort })
+      else if (!values.includes(b.reasoningEffort)) this.log.info('brain.effort_unsupported', { model: b.model, effort: b.reasoningEffort })
+      else await conn.request('session/set_config_option', { sessionId, configId: 'reasoning_effort', value: b.reasoningEffort }, 30_000)
     }
   }
 
@@ -941,13 +1038,13 @@ export class Engine {
     const b = this.brain
     try {
       await this.setSessionBrain(seg.session_id)
-      this.ledger.setSegmentModel(seg.id, brainKey(b))
+      this.ledger.setSegmentModel(seg.id, this.keyOf(b))
       this.log.info('brain.applied', { segment: seg.id, provider: b.provider, model: b.model, effort: b.reasoningEffort ?? null })
     } catch (e) {
       if (e instanceof AcpExited) throw e
       this.log.error('brain.apply_failed', { segment: seg.id, err: safeError(e) })
       void this.notifyOwner('brain', `换模型没成功（${b.provider} / ${b.model}）：${safeError(e).slice(0, 120)}。先继续用原来的模型。`)
-      this.ledger.setSegmentModel(seg.id, brainKey(b)) // 不在每轮反复重试
+      this.ledger.setSegmentModel(seg.id, this.keyOf(b)) // 不在每轮反复重试
     }
   }
 
@@ -989,30 +1086,39 @@ export class Engine {
    * 换段：先在旧会话里写交接摘要（这一轮工具全锁），写不成就用账本流水单独写一份；
    * 摘要不像样或为空就不存（新段开头沿用上一份）。然后关掉旧会话，下一轮开新会话。
    */
-  async rollSegment(chatId: string, seg: SegmentRow, reason: string, focus?: string): Promise<{ how: 'in-session' | 'ledger' | 'none' | 'crashed'; chars: number }> {
+  async rollSegment(chatId: string, seg: SegmentRow, reason: string, focus?: string, o?: { inSessionMs?: number; skipInSession?: boolean }): Promise<{ how: 'in-session' | 'ledger' | 'none' | 'crashed'; chars: number }> {
     this.log.info('segment.roll_start', { chat: chatId, segment: seg.id, reason, used: seg.used_tokens, budget: this.budgetFor(seg) })
-    let summary: string | null = null
-    let how: 'in-session' | 'ledger' | 'none' = 'none'
-    // 网关重启后旧会话还没载入：先续接上，摘要照样在旧会话里写（命中缓存）
-    if (seg.session_id && this.dsh.running && this.loaded.get(seg.session_id) !== this.dsh.generation) await this.resumeForSummary(seg)
-    if (seg.session_id && this.dsh.running && this.loaded.get(seg.session_id) === this.dsh.generation) {
-      const r = await this.summarizeInSession(chatId, seg, focus)
-      if (r === 'crashed') return { how: 'crashed', chars: 0 } // 段已作废，下一轮开新段时用账本补写摘要
-      if (r) { summary = r; how = 'in-session' }
+    const got: { summary: string | null; how: 'in-session' | 'ledger' | 'none' } = { summary: null, how: 'none' }
+    let crashed = false
+    const acquire = async (): Promise<void> => {
+      // 网关重启后旧会话还没载入：先续接上，摘要照样在旧会话里写（命中缓存）
+      if (!o?.skipInSession && seg.session_id && this.dsh.running && this.loaded.get(seg.session_id) !== this.dsh.generation) await this.resumeForSummary(seg)
+      if (!o?.skipInSession && seg.session_id && this.dsh.running && this.loaded.get(seg.session_id) === this.dsh.generation) {
+        const r = await this.summarizeInSession(chatId, seg, focus)
+        if (r === 'crashed') { crashed = true; return } // 段已作废，下一轮开新段时用账本补写摘要
+        if (r) { got.summary = r; got.how = 'in-session'; return }
+      }
+      got.summary = await this.summarizeFromLedger(chatId, seg, focus).catch(e => { this.log.warn('summary.ledger_failed', { err: safeError(e) }); return null })
+      if (got.summary) got.how = 'ledger'
     }
-    if (!summary) {
-      summary = await this.summarizeFromLedger(chatId, seg, focus).catch(e => { this.log.warn('summary.ledger_failed', { err: safeError(e) }); return null })
-      if (summary) how = 'ledger'
+    // 写摘要最多等 inSessionMs（跨供应商换段用 provider_switch_summary_ms）：超时就不等了，直接用账本流水开新会话
+    if (o?.inSessionMs && o.inSessionMs > 0) {
+      const res = await Promise.race([acquire().then(() => 'done' as const), sleep(o.inSessionMs).then(() => 'timeout' as const)])
+      if (res === 'timeout') this.log.warn('segment.summary_timeout', { chat: chatId, segment: seg.id, reason, limit_ms: o.inSessionMs })
+    } else {
+      await acquire()
     }
-    if (summary) this.ledger.setSegmentSummary(seg.id, summary)
+    if (crashed) return { how: 'crashed', chars: 0 }
+    if (got.summary) this.ledger.setSegmentSummary(seg.id, got.summary)
     this.ledger.closeSegment(seg.id, 'closed', reason)
     if (seg.session_id) {
       this.loaded.delete(seg.session_id)
       void this.dsh.conn?.request('session/close', { sessionId: seg.session_id }, 15_000).catch(() => {})
     }
-    this.ledger.event(chatId, 'segment_rolled', { segment: seg.id, reason, summary: how, summary_chars: summary?.length ?? 0, used: seg.used_tokens })
-    this.log.info('segment.rolled', { chat: chatId, segment: seg.id, reason, summary: how, summary_chars: summary?.length ?? 0 })
-    return { how, chars: summary?.length ?? 0 }
+    const chars = got.summary?.length ?? 0
+    this.ledger.event(chatId, 'segment_rolled', { segment: seg.id, reason, summary: got.how, summary_chars: chars, used: seg.used_tokens })
+    this.log.info('segment.rolled', { chat: chatId, segment: seg.id, reason, summary: got.how, summary_chars: chars })
+    return { how: got.how, chars }
   }
 
   private async resumeForSummary(seg: SegmentRow): Promise<void> {
@@ -1111,14 +1217,14 @@ export class Engine {
     if (!cmd || !OWNER_COMMANDS.has(cmd.name)) { this.ledger.settleInbound([row.id], 'dropped', 'command ignored'); return }
     if (!targetOk) { this.ledger.settleInbound([row.id], 'dropped', 'command addressed to another bot'); this.log.info('command.wrong_target', { chat: row.chat_id }); return }
     if (!this.isOwner(row.sender_id)) { this.ledger.settleInbound([row.id], 'dropped', 'not owner'); this.log.warn('command.not_owner', { chat: row.chat_id }); return }
-    let text: string
+    let text: string | null
     try {
       switch (cmd.name) {
         case 'clear': text = await this.cmdClear(row.chat_id); break
         case 'compact': text = await this.cmdCompact(row.chat_id, cmd.args); break
         case 'model': text = await this.cmdModel(row.chat_id, cmd.args); break
         case 'models': text = await this.cmdModel(row.chat_id, 'list'); break
-        case 'provider': case 'providers': text = await this.cmdProvider(cmd.args); break
+        case 'provider': case 'providers': text = await this.cmdProvider(row.chat_id, cmd.args); break
         default: text = HELP_TEXT
       }
     } catch (e) {
@@ -1127,7 +1233,8 @@ export class Engine {
     }
     this.ledger.settleInbound([row.id], 'done', cmd.name)
     this.log.info('command.done', { chat: row.chat_id, name: cmd.name })
-    await this.sender.send({ chatId: row.chat_id, turnId: null, callSeq: 0, text, kind: 'system' }).catch(() => {})
+    // text 为 null：这个命令自己异步回复（/provider refresh 要立刻让出命令队列，好让「同一家正在刷新」能被接住）
+    if (text !== null) await this.sender.send({ chatId: row.chat_id, turnId: null, callSeq: 0, text, kind: 'system' }).catch(() => {})
   }
 
   /** 清空 = 这一段收尾写一份摘要（写不出来或为空就沿用上一份，不覆盖）+ 下一条消息开新段、不再带清空前的原话 */
@@ -1189,27 +1296,59 @@ export class Engine {
     return this.switchTo(r.ok)
   }
 
-  private async cmdProvider(args: string): Promise<string> {
+  private async cmdProvider(chatId: string, args: string): Promise<string | null> {
     const a = args.trim()
-    const choices = await this.modelChoicesNow()
-    if (choices.length === 0) return '【系统】暂时拿不到可选模型的列表，稍后再试。'
+    // /provider refresh <名字>：交给注入的 ProviderCommands（本批的 T4）。不在命令队列里等，立刻让出，
+    // 好让"同一家正在刷新"的第二次请求能被接住（方案 3.6、3.4.5）
+    const m = a.match(/^refresh(?:\s+([\s\S]*))?$/i)
+    if (m) {
+      const rest = (m[1] ?? '').trim()
+      if (!this.providerCommand) return '【系统】暂时不能刷新供应商。'
+      void this.providerCommand('refresh', rest, chatId)
+        .then(t => (t ? this.sender.send({ chatId, turnId: null, callSeq: 0, text: t, kind: 'system' }) : undefined))
+        .catch(e => this.log.warn('command.failed', { name: 'provider', err: safeError(e) }))
+      return null
+    }
+    const views = await this.providerViews()
     const cur = { provider: this.brain.provider, model: this.brain.model }
-    if (a === '') return formatProviders(choices, cur, p => this.keyStatus(p))
-    const p = providersOf(choices).find(x => x.toLowerCase() === a.toLowerCase())
+    if (a === '' || a === 'list' || a === 'status') return formatProviders(views, cur)
+    const p = providersOf(this.modelChoices).find(x => x.toLowerCase() === a.toLowerCase()) ?? this.viewName(a, views, true)
     if (!p) return `【系统】没有 ${a} 这个供应商。用 /provider 看有哪些。`
     if (p === cur.provider) return `【系统】现在用的就是 ${p}（模型 ${cur.model}）。`
     // 配置文件里用的就是这个供应商：换回配置文件里的模型；否则用它的第一个模型
     const file = this.configBrain
-    const pick = choices.find(c => c.provider === p && p === file.provider && c.model === file.model) ?? choices.find(c => c.provider === p)!
+    const choices = await this.modelChoicesNow()
+    const pick = choices.find(c => c.provider === p && p === file.provider && c.model === file.model) ?? choices.find(c => c.provider === p)
+    if (!pick) return `【系统】「${p}」还没有可用的模型。`
     return this.switchTo(pick)
+  }
+
+  /** 在可用供应商视图里按规整名找实际名字；onlyEnabled 时只找启用的 */
+  private viewName(name: string, views: ProviderView[], onlyEnabled: boolean): string | undefined {
+    const want = normName(name)
+    return views.find(v => (!onlyEnabled || v.enabled) && normName(v.name) === want)?.name
   }
 
   private switchTo(c: ModelChoice): string {
     if (c.provider === this.brain.provider && c.model === this.brain.model) return `【系统】现在用的就是 ${c.provider} / ${c.model}。`
     const k = this.keyStatus(c.provider)
-    if (k.status === 'missing') return `【系统】${c.provider} 还没配密钥（凭据文件里填 ${k.env}），先不换。`
+    if (k.status === 'missing') {
+      const hint = k.env && this.fileRoutes[c.provider] ? `凭据文件里填 ${k.env}` : '点「修改」→「密钥」补上'
+      return `【系统】${c.provider} 还没配密钥，先不换（${hint}）。`
+    }
+    const crossProvider = this.identityOfProvider(c.provider) !== this.identity(this.brain)
     this.setOverride(c)
-    return `【系统】已换成 ${c.provider} / ${c.model}，下一条消息起生效。这个 bot 的所有聊天都换，重启后保持；/model default 换回配置文件里的。`
+    const lines = [`【系统】已换成 ${c.provider} / ${c.model}，下一条消息起生效。这个 bot 的所有聊天都换，重启后保持；/model default 换回配置文件里的。`]
+    if (crossProvider) lines.push('换到了另一家供应商：下一条消息会先让现在的模型写一份交接摘要，再在新供应商上开新会话。')
+    const entry = this.selfByName(c.provider)?.entry
+    if (entry && entry.meta.guessedContext.includes(c.model)) lines.push('这个模型的上下文长度未知，按 131072 算；如果它实际更小，请在 /model →「管理自建供应商的模型」里改。')
+    return lines.join('\n')
+  }
+
+  /** 供应商身份（用于判断"换到另一家"）：自建的带 epoch */
+  private identityOfProvider(provider: string): string {
+    const epoch = this.epochOf(provider)
+    return epoch === null ? provider : `${provider}@${epoch}`
   }
 
   // ─── 管理台换模型（本机接口 /v1/model）：和 /model 命令同一套逻辑 ───
@@ -1222,33 +1361,85 @@ export class Engine {
   }
 
   async modelSet(spec: string): Promise<{ ok: boolean; text: string; current: ModelChoice }> {
-    const before = brainKey(this.brain)
+    const before = this.keyOf(this.brain)
     const s = spec.trim()
     const text = s === 'default' ? await this.cmdModel('', 'default') : s ? await this.cmdModel('', s) : '【系统】没给模型名。'
-    const ok = brainKey(this.brain) !== before || /现在用的就是/.test(text)
+    const ok = this.keyOf(this.brain) !== before || /现在用的就是/.test(text)
     return { ok, text: text.replace(/^【系统】/, ''), current: { provider: this.brain.provider, model: this.brain.model } }
   }
 
   // ─── /model、/provider 换的模型：记在账本里，重启后保持；配置文件里的模型改了就作废（以后改的为准） ───
 
+  /** 这个供应商在自建里（名字匹配规整名）；不在返回 null */
+  private selfByName(provider: string): { name: string; entry: ProviderEntry } | null {
+    const want = normName(provider)
+    for (const [n, e] of Object.entries(this.sharedProviders?.valid ?? {})) if (normName(n) === want) return { name: n, entry: e }
+    return null
+  }
+
+  /**
+   * 把账本里的覆盖（brain_override）叠到配置文件里的 brain 上（方案 3.2 第 8、9 条）：
+   * - config changed：配置文件里的供应商/模型/强度改了 → 清覆盖。
+   * - provider removed / model removed：确证没了才清（写账本 brain.override_cleared）。
+   * - 暂时不可用（providers.json 读不了、条目不合格、被同名遮住、没有模型）不清覆盖，只在内存里回落配置文件，
+   *   记 brain.override_suspended，恢复后自动回到覆盖。
+   */
   private withOverride(file: Brain): Brain {
-    let o: { provider: string; model: string; configKey: string } | null = null
-    try { o = JSON.parse(this.ledger.getMeta('brain_override') || 'null') } catch {}
-    if (!o) return file
+    let o: { provider?: string; model?: string; effort?: string; configKey?: string } | null = null
+    try { o = JSON.parse(this.ledger.getMeta('brain_override') || 'null') } catch { o = null }
+    if (!o || !o.provider || !o.model) return file
     if (o.configKey !== brainKey(file)) {
       this.ledger.setMeta('brain_override', '')
       this.log.info('brain.override_cleared', { reason: 'config changed' })
       return file
     }
-    return { ...file, provider: o.provider, model: o.model }
+    const eff = (o.effort ?? file.reasoningEffort) as Brain['reasoningEffort']
+    const apply = (provider: string, model: string): Brain => ({ ...file, provider, model, reasoningEffort: eff })
+    const p = o.provider
+    const want = normName(p)
+    if (p === 'deepseek-official' || Object.prototype.hasOwnProperty.call(this.fileRoutes, p)) {
+      const route = this.fileRoutes[p]
+      if (route && !route.models.some(m => m.id === o.model)) {
+        this.ledger.setMeta('brain_override', '')
+        this.log.info('brain.override_cleared', { reason: 'model removed' })
+        return file
+      }
+      return apply(p, o.model)
+    }
+    // 自建：按"暂时不可用 / 确证没了"分开处理
+    if (!this.providersReadable) { this.log.info('brain.override_suspended', { reason: 'providers unreadable' }); return file }
+    if (this.isShadowed(p)) { this.log.info('brain.override_suspended', { reason: 'shadowed' }); return file }
+    const found = this.selfByName(p)
+    if (!found) {
+      if ((this.sharedProviders?.invalid ?? []).some(i => normName(i.name) === want)) { this.log.info('brain.override_suspended', { reason: 'invalid entry' }); return file }
+      this.ledger.setMeta('brain_override', '')
+      this.log.info('brain.override_cleared', { reason: 'provider removed' })
+      return file
+    }
+    if (found.entry.route.models.length === 0) { this.log.info('brain.override_suspended', { reason: 'no models' }); return file }
+    if (!found.entry.route.models.some(m => m.id === o.model)) {
+      this.ledger.setMeta('brain_override', '')
+      this.log.info('brain.override_cleared', { reason: 'model removed' })
+      return file
+    }
+    return apply(found.name, o.model)
   }
 
-  private setOverride(c: ModelChoice | null): void {
+  /** 写覆盖：切模型（effort 丢掉，回到配置文件里的强度）或只改强度（provider/model 用当前值 + effort） */
+  private setOverride(c: ModelChoice | null, effort?: string): void {
     const file = this.configBrain
-    const same = !c || (c.provider === file.provider && c.model === file.model)
-    this.ledger.setMeta('brain_override', same ? '' : JSON.stringify({ provider: c!.provider, model: c!.model, configKey: brainKey(file) }))
+    const base = c ?? { provider: this.brain.provider, model: this.brain.model }
+    const same = !c || (base.provider === file.provider && base.model === file.model && !effort && !this.currentOverride())
+    const rec = c
+      ? { provider: c.provider, model: c.model, ...(effort ? { effort } : {}), configKey: brainKey(file) }
+      : effort ? { provider: base.provider, model: base.model, effort, configKey: brainKey(file) } : null
+    this.ledger.setMeta('brain_override', same || !rec ? '' : JSON.stringify(rec))
     this.brain = this.withOverride(file)
-    this.log.info('brain.override', { provider: this.brain.provider, model: this.brain.model, from_config: same })
+    this.log.info('brain.override', { provider: this.brain.provider, model: this.brain.model, effort: this.brain.reasoningEffort ?? null, from_config: same || !rec })
+  }
+
+  private currentOverride(): { provider?: string; model?: string; effort?: string } | null {
+    try { return JSON.parse(this.ledger.getMeta('brain_override') || 'null') } catch { return null }
   }
 
   private noteOptions(opts: unknown): void {
@@ -1270,11 +1461,57 @@ export class Engine {
 
   /** 供应商的密钥配没配：只看凭据文件里有没有像样的值，绝不读出、打印值本身 */
   private keyStatus(provider: string): { status: KeyStatus; env?: string } {
-    const route = this.brain.routes[provider]
-    if (provider !== 'deepseek-official' && !route) return { status: 'unknown' }
-    const env = route ? route.apiKeyEnv : 'DEEPSEEK_API_KEY'
+    if (provider === 'deepseek-official') return { status: this.credRef('DEEPSEEK_API_KEY') ? 'ok' : 'missing', env: 'DEEPSEEK_API_KEY' }
+    const fileRoute = this.fileRoutes[provider]
+    const env = fileRoute ? fileRoute.apiKeyEnv : this.selfByName(provider)?.entry.route.apiKeyEnv
+    if (!fileRoute && !env) return { status: 'unknown' }
     if (!env) return { status: 'none' }
     return { status: this.credRef(env) ? 'ok' : 'missing', env }
+  }
+
+  /** 供应商视图（/provider 列表、GET /v1/model 的 providers 都用它；绝不含密钥、地址） */
+  async providerViews(): Promise<ProviderView[]> {
+    try { await this.modelChoicesNow() } catch (e) { this.log.warn('api.model_choices_failed', { err: safeError(e) }) }
+    const countOf = (p: string) => this.modelChoices.filter(c => c.provider === p).length
+    const known = this.modelChoices.length > 0
+    const views: ProviderView[] = [
+      { name: 'deepseek-official', source: 'builtin', api: 'deepseek-official', models: known ? countOf('deepseek-official') : null, key: this.credRef('DEEPSEEK_API_KEY') ? 'ok' : 'missing', keyEnv: 'DEEPSEEK_API_KEY', enabled: true, note: null, lastRefresh: null },
+    ]
+    for (const [name, route] of Object.entries(this.fileRoutes)) {
+      const env = typeof route.apiKeyEnv === 'string' ? route.apiKeyEnv : null
+      views.push({ name, source: 'config', api: route.api, models: known ? countOf(name) : null, key: env ? (this.credRef(env) ? 'ok' : 'missing') : 'none', keyEnv: env, enabled: true, note: null, lastRefresh: null })
+    }
+    const snap = this.sharedProviders
+    const shadowed = new Set(this.providerMerge?.shadowed ?? [])
+    for (const [name, e] of Object.entries(snap?.valid ?? {})) {
+      const shadow = shadowed.has(name)
+      views.push({ name, source: 'custom', api: e.route.api, models: e.route.models.length, key: this.credRef(e.route.apiKeyEnv) ? 'ok' : 'missing', keyEnv: null, enabled: !shadow, note: shadow ? '和本 bot 配置文件里的路由同名，未启用' : null, lastRefresh: e.meta.lastRefresh })
+    }
+    for (const i of this.providerMerge?.invalid ?? []) {
+      if (views.some(v => v.name === i.name)) continue
+      views.push({ name: i.name, source: 'custom', api: null, models: null, key: 'unknown', keyEnv: null, enabled: false, note: `配置有误，未启用（${i.why}）`, lastRefresh: null })
+    }
+    return views
+  }
+
+  /** 问 dsh 当前模型支持哪些思考档（临时会话，不发模型请求，用完立即关闭；按"供应商/模型"缓存，dsh 重启清空） */
+  async effortChoicesNow(): Promise<string[]> {
+    const key = `${this.brain.provider}/${this.brain.model}`
+    const cached = this.effortCache.get(key)
+    if (cached) return cached
+    await this.ensureDsh()
+    const conn = this.dsh.conn
+    if (!conn) throw new AcpExited('session/new')
+    const s = await conn.request<{ sessionId: string; configOptions?: any[] }>('session/new', { cwd: this.cfg.workDir, mcpServers: [] }, 60_000)
+    try {
+      const r = await conn.request<{ configOptions?: any[] }>('session/set_config_option', { sessionId: s.sessionId, configId: 'model', value: modelValue(this.brain) }, 30_000)
+      const opt = (r?.configOptions ?? []).find((o: any) => o?.id === 'reasoning_effort')
+      const values: string[] = Array.isArray(opt?.options) ? opt.options.map((x: any) => String(x?.value ?? '')).filter((v: string) => v !== '') : []
+      this.effortCache.set(key, values)
+      return values
+    } finally {
+      void conn.request('session/close', { sessionId: s.sessionId }, 15_000).catch(() => {})
+    }
   }
 
   /** 凭据文件里某个键的值（像样的才返回，否则 null）。只给网关自己用，绝不写日志、不回给模型。 */
@@ -1286,6 +1523,15 @@ export class Engine {
   }
 
   // ─── 通知主人 ───
+
+  /**
+   * 上下文超长通知主人（方案 3.2 第 10 条）：同一模型 10 分钟内只通知一次（notifyOwner 自带按 key 节流）。
+   * 文案里带当前供应商/模型，提醒主人可能把上下文长度填大了。
+   */
+  private async notifyOverflow(): Promise<void> {
+    const b = this.brain
+    await this.notifyOwner(`overflow:${b.provider}/${b.model}`, `${b.provider} / ${b.model} 的上下文超长了，已换新会话。如果它的上下文长度填大了，请在 /model →「管理自建供应商的模型」里改小。`)
+  }
 
   async notifyOwner(key: string, text: string): Promise<void> {
     const last = this.noticeAt.get(key) ?? 0
@@ -1300,17 +1546,23 @@ export class Engine {
   // ─── 配置热更新：换模型不重启；改人设或路由要等全部空闲再重启 dsh ───
 
   private watchConfig(): void {
+    this.onPoll?.()
+    const providersChanged = this.checkProviders(false)
     const cm = mtime(this.cfg.configPath)
     const pm = mtime(this.personaPath())
-    if (cm === this.configMtime && pm === this.personaMtime) return
-    this.configMtime = cm
-    this.personaMtime = pm
-    const nb = reloadBrain(this.cfg.configPath)
-    if (!nb) { this.log.warn('config.reload_failed', { path: 'configs/<bot>.yml' }); return }
+    if (!providersChanged && cm === this.configMtime && pm === this.personaMtime) return
     const before = brainKey(this.brain)
     const beforeCap = this.brain.maxInputTokens ?? null
-    this.configBrain = nb
-    this.brain = this.withOverride(nb)
+    if (cm !== this.configMtime || pm !== this.personaMtime) {
+      this.configMtime = cm
+      this.personaMtime = pm
+      const nb = reloadBrain(this.cfg.configPath)
+      if (!nb) { this.log.warn('config.reload_failed', { path: 'configs/<bot>.yml' }); return }
+      this.fileRoutes = nb.routes
+      this.providerMerge = mergeRoutes(this.fileRoutes, this.sharedProviders)
+      this.configBrain = { ...nb, routes: this.providerMerge.routes }
+    }
+    this.brain = this.withOverride(this.configBrain)
     const b = this.brain
     if (brainKey(b) !== before || (b.maxInputTokens ?? null) !== beforeCap) {
       this.log.info('config.brain_changed', { provider: b.provider, model: b.model, effort: b.reasoningEffort ?? null, max_input_tokens: b.maxInputTokens ?? null })
@@ -1323,6 +1575,96 @@ export class Engine {
     }
   }
 
+  private providersPath(): string { return join(this.cfg.root, 'providers.json') }
+
+  /** providers.json 的 mtime+inode+大小指纹（改名替换后 inode 必变，避免秒级 mtime 漏判） */
+  private providersSignature(): string {
+    try { const s = statSync(this.providersPath()); return `${s.mtimeMs}:${s.ino}:${s.size}` } catch { return '' }
+  }
+
+  /**
+   * 发现并读入 providers.json（方案 3.2 第 2 条、Q1）：指纹没变且不强制就跳过；变了就重读并重算路由。
+   * 启动读坏当空、运行中读坏保留旧值；返回是否真的重算了。
+   */
+  private checkProviders(force: boolean): boolean {
+    const sig = this.providersSignature()
+    if (!force && sig === this.providersSig) return false
+    this.providersSig = sig
+    let snap: ProvidersSnapshot | null = null
+    try {
+      snap = readProviders(this.providersPath())
+      this.providersReadable = true
+    } catch (e) {
+      if (!(e instanceof ProvidersUnreadable)) throw e
+      this.providersReadable = false
+      this.log.warn('providers.reload_failed', { err: safeError(e), kept_previous: this.sharedProviders !== null })
+      return false
+    }
+    this.sharedProviders = snap
+    const merged = mergeRoutes(this.fileRoutes, snap)
+    for (const s of merged.shadowed) this.log.warn('providers.shadowed', { name: s })
+    for (const i of merged.invalid) this.log.warn('providers.entry_skipped', { name: i.name, why: i.why })
+    if (snap.droppedPending > 0) this.log.warn('providers.entry_skipped', { name: null, why: '待删登记的键名不合规则，已丢弃' })
+    this.providerMerge = merged
+    this.configBrain = { ...this.cfg.brain, routes: merged.routes }
+    this.log.info('providers.reloaded', { custom: Object.keys(merged.enabled).length, routes: Object.keys(merged.routes).length })
+    return true
+  }
+
+  /** 收到 providers.json 改动的通知（ProviderService.onChanged）：立刻重读、重算、必要时空闲重启（方案 Q1） */
+  reloadProvidersNow(): void {
+    if (this.checkProviders(true)) this.brain = this.withOverride(this.configBrain)
+    const fp = restartFingerprint(this.patchInput())
+    if (fp !== this.fingerprint && this.dsh.running) {
+      this.log.info('config.restart_needed', { reason: 'routes changed' })
+      this.restartPending = true
+      if (this.runningCount === 0) void this.restartIdle()
+    }
+  }
+
+  /** 这一轮要用的供应商还不在正在运行的 dsh 里、又有待执行的重启：先重启再处理（方案 3.2 第 3 条） */
+  private async restartForRouteIfNeeded(provider: string): Promise<void> {
+    if (!this.restartPending) return
+    if (this.modelChoices.some(c => c.provider === provider)) return
+    this.log.info('dsh.restart_for_route', { provider })
+    const end = Date.now() + 30_000
+    while (this.runningCount > 1 && Date.now() < end) await sleep(50)
+    this.restartPending = false
+    this.restarting = (async () => { await this.dsh.stop(); this.loaded.clear() })().finally(() => { this.restarting = null })
+    await this.restarting
+    await this.ensureDsh().catch(() => {})
+  }
+
+  /** 供应商身份（方案 3.2 第 6 条）：名字；自建的再加 @<epoch> */
+  private identity(b: Brain): string {
+    const epoch = this.epochOf(b.provider)
+    return epoch === null ? b.provider : `${b.provider}@${epoch}`
+  }
+
+  private keyOf(b: Brain): string { return `${this.identity(b)}/${b.model}/${b.reasoningEffort ?? ''}` }
+
+  private epochOf(provider: string): number | null {
+    const want = normName(provider)
+    for (const [n, e] of Object.entries(this.sharedProviders?.valid ?? {})) if (normName(n) === want) return e.meta.epoch
+    return null
+  }
+
+  private isShadowed(provider: string): boolean {
+    const want = normName(provider)
+    return Object.keys(this.fileRoutes).some(n => normName(n) === want)
+  }
+
+  /** 旧身份（名字[+@epoch]）现在还原样在不在（在的话才在旧会话里写摘要，方案 3.2 第 6 条） */
+  private identityStillExists(from: string): boolean {
+    const at = from.lastIndexOf('@')
+    if (at > 0 && /^\d+$/.test(from.slice(at + 1))) {
+      const name = from.slice(0, at)
+      const epoch = this.epochOf(name)
+      return epoch !== null && String(epoch) === from.slice(at + 1)
+    }
+    return from === 'deepseek-official' || !!this.fileRoutes[from]
+  }
+
   private async restartIdle(): Promise<void> {
     if (!this.restartPending || this.runningCount > 0) return
     this.restartPending = false
@@ -1332,6 +1674,8 @@ export class Engine {
       this.loaded.clear()
     })().finally(() => { this.restarting = null })
     await this.restarting
+    // 空闲时直接拉起新进程，让新路由立刻可用（方案 3.2 第 2 条）
+    await this.ensureDsh().catch(e => this.log.warn('dsh.restart_failed', { err: safeError(e) }))
     for (const c of this.ledger.chatsWithPending()) this.schedule(c)
   }
 
