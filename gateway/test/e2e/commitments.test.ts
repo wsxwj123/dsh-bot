@@ -1,6 +1,7 @@
 // M3：承诺（登记、兜底识别、到点、睡觉顺延、兑现判定）和私聊里的"生活状态"附带
 import { afterEach, expect, test } from 'bun:test'
-import { mkdirSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
 import { join } from 'path'
 import { FakeTelegram } from '../fakes/fake-telegram'
 import { cleanup, Gateway, makeBot, OWNER, prompts, readJsonl, toolResults, until, type BotEnv } from '../harness'
@@ -16,9 +17,9 @@ afterEach(async () => {
   tg = null; b = null; gw = null
 })
 
-async function setup(gwOpts: Record<string, unknown> = {}, before?: (b: BotEnv) => void) {
+async function setup(gwOpts: Record<string, unknown> = {}, before?: (b: BotEnv) => void, root?: string) {
   tg = new FakeTelegram()
-  b = makeBot(tg, { gw: { burst_window_ms: 0, ...gwOpts } })
+  b = makeBot(tg, { root, gw: { burst_window_ms: 0, ...gwOpts } })
   mkdirSync(b.acpState, { recursive: true })
   before?.(b)
   gw = new Gateway(b)
@@ -90,11 +91,37 @@ test('到点那一轮没开口不算兑现：重试有上限，最后标记失�
   await until(() => tg.sentTo(OWNER).some(s => s.text?.includes('提醒了 3 次都没开口')), 'owner notified')
 })
 
+// 生活状态的缓存只在网关内存里（SituationBridge）：消息处理时只读 current()，过期就当作"不知道"，
+// 不等待、不刷新（situation.ts 的设计：绝不卡住聊天）。原来"写完 situation.json 等 600ms"是固定等待，
+// 靠"慢机器上查询也能及时完成"的假设——CI Windows 上 Bun.spawn 一个查询子进程可能几百毫秒到一秒，
+// 消息处理时缓存还没查到/已过期，第一句就不带「你此刻」（本机用 0.8 秒的慢查询实测 3/3 复现了 CI 的挂法）。
+// 这里不用固定等待：探针脚本（写在测试临时目录里，fakes/ 是锁定范围不能碰）和 fake-situation 一样
+// 输出文件，但每次被查询都往 marker 记一笔（格式「时间戳 ok/fail」）；测试等到"有一条 ok"——
+// 那一刻缓存必然是刚写好的新值，再发消息必落在新鲜窗口里。断言一个字没改。
+// situation_ttl_ms 从默认 300ms 提到 1000ms：慢机器上单次查询可能花掉几百毫秒，缓存新鲜窗口（2×ttl）
+// 宽一点才不会被"下一次查询还在进行中"的间隙吃掉；代价只是本用例最多多等一秒。
+const SITUATION_PROBE = `import { appendFileSync, existsSync, readFileSync } from 'fs'
+const [file, marker] = process.argv.slice(2)
+let out = ''
+if (file && existsSync(file)) out = readFileSync(file, 'utf8').trim()
+if (out) process.stdout.write(out + '\\n')
+appendFileSync(marker, Date.now() + ' ' + (out ? 'ok' : 'fail') + '\\n')
+if (!out) process.exit(1)
+`
+
 test('生活状态：关系提示、"此刻在干什么"只在新会话开头和变化时附带；被晾的迟到反应带一次', async () => {
-  const { tg, b } = await setup()
+  const root = mkdtempSync(join(tmpdir(), 'dshbot-'))
+  const probe = join(root, 'situation-probe.ts')
+  const sitFile = join(root, 'situation.json')
+  const marker = join(root, 'situation-queries.log')
+  writeFileSync(probe, SITUATION_PROBE)
+  const { tg, b } = await setup({ situation_ttl_ms: 1000, situation_cmd: ['bun', probe, sitFile, marker] }, undefined, root)
   writeFileSync(join(b.channelDir, 'relationship.json'), JSON.stringify({ prompt_snippet: '【当前关系状态】测试好感五十' }))
-  situation(b, { name: '在图书馆', state: 'busy_other' })
-  await new Promise(r => setTimeout(r, 600)) // 等作息查询刷新
+  writeFileSync(sitFile, JSON.stringify({ interruptible: true, term_label: '', wakes: [], free_at: null, name: '在图书馆', state: 'busy_other' }))
+  // 等到网关真的查到过「在图书馆」：这条 ok 记录只可能来自写完文件之后的查询（文件是本测试自己新建的）
+  await until(() => {
+    try { return readFileSync(marker, 'utf8').split('\n').some(l => l.endsWith(' ok')) } catch { return false }
+  }, '网关查到过作息', 15_000)
   const at = (s: string) => prompts(b).find(p => p.text.includes(s))!.text
   await say(tg, '第一句')
   expect(at('第一句')).toContain('⟦关系状态⟧ 【当前关系状态】测试好感五十')
