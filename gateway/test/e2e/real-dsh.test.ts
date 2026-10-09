@@ -1,9 +1,9 @@
 // 真 dsh + 假模型：在真实 harness 上核对补丁层、隐私字段、工具挂载、按会话换模型。
 // 需要一份装好的 dsh：设置 DSH_BOT_HARNESS=<目录>（目录下有 node_modules/@deepseek-ai/dsh），没有就跳过。
 import { afterAll, beforeAll, expect, test } from 'bun:test'
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
-import { isAlive } from '../../src/dsh/process'
+import { isAlive, processCommandLine } from '../../src/dsh/process'
 import { startFakeLlm, type FakeLlm } from '../../../lab/dsh/lib/fake-llm'
 import { FakeTelegram } from '../fakes/fake-telegram'
 import { cleanup, Gateway, makeBot, OWNER, sleep, until, writeConfig, type BotEnv } from '../harness'
@@ -39,6 +39,13 @@ beforeAll(async () => {
   })
   delete (b.gw as Record<string, unknown>).dsh_command
   writeConfig(b)
+  // 放一个技能，让技能目录非空：Windows 上 dsh 会自动加载 sandbox-windows-acl 沙箱插件，
+  // 该插件自带技能 diagnose-windows-sandbox-acl，于是会话第一轮 dsh 会把技能目录作为一条
+  // <system-reminder> 开头的 user 消息追加在用户消息之后（macOS/Linux 没这个插件、默认不出现）。
+  // 三个平台都放一个技能，把这条 Windows 上必然出现的路径在所有平台覆盖到：假模型的剧本匹配
+  // 必须越过这条注入消息（见 lab/dsh/lib/fake-llm.ts 的 lastUserText），否则第一轮匹配不到用户文本。
+  mkdirSync(join(b.channelDir, 'skills', 'probe'), { recursive: true })
+  writeFileSync(join(b.channelDir, 'skills', 'probe', 'SKILL.md'), '---\nname: probe\ndescription: 测试用探针技能（只用于让技能目录非空）\n---\n\n正文不会被加载。\n')
   const cred = join(b.root, 'credentials.yaml')
   writeFileSync(cred, 'version: 1\nrefs:\n  FAKE_LLM_KEY: fake-key-for-tests\n')
   chmodSync(cred, 0o600)
@@ -54,34 +61,82 @@ afterAll(async () => {
   cleanup(b)
 })
 
+/**
+ * 用例失败时把现场打出来。CI 上这个 job 一轮要十几分钟，失败却只剩一句"超时"太贵。
+ * 带出：dsh 起没起（pid/存活/命令行）、假模型收到过什么请求（有请求=起了但没走到回复，
+ * 一个都没有=dsh 或上游根本没动）、假 Telegram 收到什么、dsh 的 stderr、网关日志尾部。
+ * 只打印测试临时目录里的东西（假 key/假令牌），不涉及真实家目录。
+ */
+async function dumpCrash(reason: unknown): Promise<void> {
+  const fileTail = (file: string, n: number): string => {
+    try {
+      const s = readFileSync(file, 'utf8').trimEnd()
+      if (!s) return '(空文件)'
+      return s.split('\n').slice(-n).map(l => (l.length > 500 ? `${l.slice(0, 500)}…(截断)` : l)).join('\n')
+    } catch (e) {
+      const msg = String((e as Error)?.message ?? e)
+      return /ENOENT/.test(msg) ? '(文件不存在：没有输出)' : `(读不到：${msg})`
+    }
+  }
+  console.error(`\n──── 真 dsh 失败现场 ──── ${reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason)}`)
+  try {
+    const rec = JSON.parse(readFileSync(join(b.botDir, 'state', 'dsh.pid'), 'utf8')) as { pid?: number }
+    const pid = Number(rec.pid)
+    console.error(`[dsh] pid 文件: ${JSON.stringify(rec)} 存活=${pid > 0 ? isAlive(pid) : '?'} 命令行=${pid > 0 ? await processCommandLine(pid) : '(无 pid)'}`)
+  } catch (e) {
+    console.error(`[dsh] pid 文件读不到（dsh 可能根本没启动）: ${String((e as Error)?.message ?? e).slice(0, 120)}`)
+  }
+  if (llm.requests.length === 0) {
+    console.error('[假模型] 一个请求都没收到：dsh 没起，或起了但没去请求模型')
+  } else {
+    console.error(`[假模型] 收到 ${llm.requests.length} 个请求：`)
+    for (const r of llm.requests) {
+      const us = (r.body?.messages ?? []).filter((m: any) => m.role === 'user')
+      const last = JSON.stringify(us.at(-1)?.content ?? '')
+      console.error(`  #${r.n} ${r.at} model=${r.body?.model} 最后一条user=${last.slice(0, 200)}`)
+    }
+  }
+  console.error(`[假 Telegram] 发给主人: ${JSON.stringify(tg.sentTo(OWNER).map(s => s.text ?? `(${s.method})`))}`)
+  console.error(`[dsh stderr 尾部]\n${fileTail(join(b.botDir, 'logs', 'dsh-stderr.log'), 40)}`)
+  console.error(`[网关日志尾部]\n${fileTail(join(b.botDir, 'logs', 'gateway.log'), 80)}`)
+  console.error(`[网关进程 stderr 尾部]\n${gw.stderr.trimEnd().split('\n').slice(-40).join('\n') || '(空)'}`)
+  console.error('──── 现场结束 ────\n')
+}
+
 test.skipIf(!available)('真 dsh：只留人设、只有我们自己的 10 个工具、不带隐私字段，回复能发出去', async () => {
   tg.pushText(OWNER, '你好 realA')
-  // Windows CI 上真 dsh 首轮冷启动明显更慢（实测有 60 秒还起不来一轮的），放宽到 120 秒；
-  // 断言本身没变——等的还是那两段回复。
-  await until(() => tg.sentTo(OWNER).some(s => s.text === '第二段'), 'reply via real dsh', 120_000)
-  // 工具结果回到模型那里（逐段送达情况），这一轮才算结束
-  await until(() => llm.requests.find(r => JSON.stringify(r.body.messages).includes('已送达 2/2 段')), 'tool result reached the model', 30_000)
-  await until(() => { const l = gw.ledger(); const ok = l.activeSegment(String(OWNER))?.used_tokens; l.close(); return ok }, 'turn finished', 30_000)
-  expect(tg.sentTo(OWNER).map(s => s.text)).toEqual(['真的收到了', '第二段'])
-  const first = llm.requests.find(r => JSON.stringify(r.body.messages).includes('realA'))!
-  const body = first.body
-  const system = body.messages.find((m: any) => m.role === 'system')
-  const systemText = typeof system.content === 'string' ? system.content : system.content.map((c: any) => c.text).join('')
-  expect(systemText.startsWith('# 测试人设')).toBe(true)
-  expect(systemText).toContain('{⁠{user}}')
-  expect(systemText).toContain('运行规则')
-  expect(systemText).not.toContain('MCP resource')
-  // 除我们自己的 10 个工具外，还有 dsh 的 skill 工具：人设分层后按需技能要它来加载
-  // （技能根只指到本 bot 的 skills 目录，见 profile.ts 的 skill-filesystem 行）。
-  expect(body.tools.map((t: any) => t.function.name).sort()).toEqual(['mcp__tg__commitment_cancel', 'mcp__tg__commitment_create', 'mcp__tg__commitment_list', 'mcp__tg__generate_image', 'mcp__tg__image_guide', 'mcp__tg__moments', 'mcp__tg__react', 'mcp__tg__remember', 'mcp__tg__reply', 'mcp__tg__stay_silent', 'mcp__tg__sticker', 'skill'])
-  const raw = JSON.stringify(body)
-  expect(raw).not.toContain('dsh_session_log')
-  expect(raw).not.toContain('dsh_plugin_packages')
-  const led = gw.ledger()
-  const seg = led.activeSegment(String(OWNER))!
-  expect(seg.window).toBe(1000000)
-  expect(seg.used_tokens).toBeGreaterThan(0)
-  led.close()
+  try {
+    // Windows CI 上真 dsh 首轮冷启动明显更慢（实测有 60 秒还起不来一轮的），放宽到 120 秒；
+    // 断言本身没变——等的还是那两段回复。
+    await until(() => tg.sentTo(OWNER).some(s => s.text === '第二段'), 'reply via real dsh', 120_000)
+    // 工具结果回到模型那里（逐段送达情况），这一轮才算结束
+    await until(() => llm.requests.find(r => JSON.stringify(r.body.messages).includes('已送达 2/2 段')), 'tool result reached the model', 30_000)
+    await until(() => { const l = gw.ledger(); const ok = l.activeSegment(String(OWNER))?.used_tokens; l.close(); return ok }, 'turn finished', 30_000)
+    expect(tg.sentTo(OWNER).map(s => s.text)).toEqual(['真的收到了', '第二段'])
+    const first = llm.requests.find(r => JSON.stringify(r.body.messages).includes('realA'))!
+    const body = first.body
+    const system = body.messages.find((m: any) => m.role === 'system')
+    const systemText = typeof system.content === 'string' ? system.content : system.content.map((c: any) => c.text).join('')
+    expect(systemText.startsWith('# 测试人设')).toBe(true)
+    expect(systemText).toContain('{⁠{user}}')
+    expect(systemText).toContain('运行规则')
+    expect(systemText).not.toContain('MCP resource')
+    // 除我们自己的 10 个工具外，还有 dsh 的 skill 工具：人设分层后按需技能要它来加载
+    // （技能根只指到本 bot 的 skills 目录，见 profile.ts 的 skill-filesystem 行）。
+    expect(body.tools.map((t: any) => t.function.name).sort()).toEqual(['mcp__tg__commitment_cancel', 'mcp__tg__commitment_create', 'mcp__tg__commitment_list', 'mcp__tg__generate_image', 'mcp__tg__image_guide', 'mcp__tg__moments', 'mcp__tg__react', 'mcp__tg__remember', 'mcp__tg__reply', 'mcp__tg__stay_silent', 'mcp__tg__sticker', 'skill'])
+    const raw = JSON.stringify(body)
+    expect(raw).not.toContain('dsh_session_log')
+    expect(raw).not.toContain('dsh_plugin_packages')
+    const led = gw.ledger()
+    const seg = led.activeSegment(String(OWNER))!
+    expect(seg.window).toBe(1000000)
+    expect(seg.used_tokens).toBeGreaterThan(0)
+    led.close()
+  } catch (e) {
+    // 超时/断言失败都把现场带出来（见 dumpCrash）：CI 一轮十几分钟，别让下一个人只能猜。
+    await dumpCrash(e)
+    throw e
+  }
 }, 240_000) // 用例级超时必须比内部最长的等待链更宽：三段 until 最坏等满 120+30+30=180 秒。
 // 命令行 --timeout（CI 里是 90000）只是默认值，这里不写第三参数的话，用例会被它先砍掉，内部的等待根本走不完。
 
