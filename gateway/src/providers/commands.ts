@@ -290,7 +290,7 @@ export function saveResultText(r: SaveResult, name: string): string {
     const trunc = r.truncated ? TRUNCATED_NOTE : ''
     if (r.reason !== null) {
       const verb = r.kind === 'created' ? '已添加' : '已更新'
-      return `【系统】${verb}供应商「${r.name}」，但没拉到模型：${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}。之后可以在 /provider 里点「刷新模型」，或用 /model →「管理自建供应商的模型」手动加。${extra}${trunc}`
+      return `【系统】${verb}供应商「${r.name}」，但没拉到模型：${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}。之后可以在 /provider 里点「刷新模型」，或用 /model →「管理模型」手动加。${extra}${trunc}`
     }
     if (r.kind === 'collided') return `【系统】「${r.name}」刚被别处新建，已改为更新它，拉到 ${r.count} 个模型。${extra}${trunc}`
     const verb = r.kind === 'created' ? '已添加' : '已更新'

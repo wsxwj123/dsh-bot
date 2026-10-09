@@ -1366,7 +1366,7 @@ export class Engine {
     const lines = [`【系统】已换成 ${c.provider} / ${c.model}，下一条消息起生效。这个 bot 的所有聊天都换，重启后保持；/model default 换回配置文件里的。`]
     if (crossProvider) lines.push('换到了另一家供应商：下一条消息会先让现在的模型写一份交接摘要，再在新供应商上开新会话。')
     const entry = this.selfByName(c.provider)?.entry
-    if (entry && entry.meta.guessedContext.includes(c.model)) lines.push('这个模型的上下文长度未知，按 131072 算；如果它实际更小，请在 /model →「管理自建供应商的模型」里改。')
+    if (entry && entry.meta.guessedContext.includes(c.model)) lines.push('这个模型的上下文长度未知，按 131072 算；如果它实际更小，请在 /model →「管理模型」里改。')
     return lines.join('\n')
   }
 
@@ -1640,7 +1640,7 @@ export class Engine {
    */
   private async notifyOverflow(): Promise<void> {
     const b = this.brain
-    await this.notifyOwner(`overflow:${b.provider}/${b.model}`, `${b.provider} / ${b.model} 的上下文超长了，已换新会话。如果它的上下文长度填大了，请在 /model →「管理自建供应商的模型」里改小。`)
+    await this.notifyOwner(`overflow:${b.provider}/${b.model}`, `${b.provider} / ${b.model} 的上下文超长了，已换新会话。如果它的上下文长度填大了，请在 /model →「管理模型」里改小。`)
   }
 
   async notifyOwner(key: string, text: string): Promise<void> {

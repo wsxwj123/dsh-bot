@@ -535,7 +535,7 @@ export class Wizard {
     await this.sendMenu(chatId, st, text, buttons)
   }
 
-  // ─── /model：管理自建供应商的模型（文字答案） ───
+  // ─── /model：管理模型（文字答案） ───
 
   private async onAddIdInput(chatId: string, st: St, msg: TgMessage, body: string): Promise<void> {
     const id = cleanModelId(body)

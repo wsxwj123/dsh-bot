@@ -1,4 +1,4 @@
-// /model 引导各步的渲染（方案 3.5）：主菜单、思考强度、管理自建供应商的模型。
+// /model 引导各步的渲染（方案 3.5）：主菜单、思考强度、管理模型。
 import type { Btn } from './keyboard'
 import { truncLabel, pageSlice, PAGE_SIZE, truncateMenu } from './keyboard'
 import { effortLabel, modelLine } from './text'
@@ -23,7 +23,7 @@ export const M = {
 /** 主菜单按钮（顺序固定） */
 export const MAIN_BUTTONS: Btn[] = [
   { label: '切换模型', action: 'swmodel' }, { label: '思考强度', action: 'eff' },
-  { label: '管理自建供应商的模型', action: 'mg' }, { label: '换回配置文件里的', action: 'rev' }, { label: '关闭', action: 'close' },
+  { label: '管理模型', action: 'mg' }, { label: '换回配置文件里的', action: 'rev' }, { label: '关闭', action: 'close' },
 ]
 
 const NO_CUSTOM = '【系统】还没有自建供应商。'
