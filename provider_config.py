@@ -1621,7 +1621,11 @@ def list_bots_status() -> list[dict]:
 
 
 def worker_alive(bot_id: str) -> bool:
-    """tmux 里是否存在 unified worker 会话（只读探测，不 spawn）。"""
+    """tmux 里是否存在 unified worker 会话（只读探测，不 spawn）。
+
+    Windows 上无 tmux（亦无 /tmp 约定）→ FileNotFoundError 落进下面的 OSError 分支，
+    与"worker 不在"同义（旧系统的 tmux worker 机制在 Windows 上本就不适用）。
+    """
     import subprocess
     try:
         r = subprocess.run(

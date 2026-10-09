@@ -16,15 +16,22 @@ bot 的 ``<bot_dir>/.claude/settings.json``，8770 那套 provider-proxy 才读�
 - ``default_providers_path()``：实际解析值（env 覆盖优先），供 provider_config 取默认。
 """
 import os
-import pwd
 
 # 旧仓根目录的覆盖接缝（测试/多机部署用）；不设 → ~/claudebotlife
 LEGACY_ROOT_ENV = "CLAUDEBOT_LEGACY_ROOT"
 
 
 def _account_home() -> str:
-    """真实主目录（按账户数据库取，不看 HOME）——固定基准不看 env，也不看 HOME。"""
-    return pwd.getpwuid(os.getuid()).pw_dir
+    """真实主目录（固定基准不看 env）。POSIX 上按账户数据库取 —— 有意不看 HOME：
+    测试会把 HOME 钉到 tmp，闸的比对基准不能跟着漂；Windows 没有 pwd 也没有 uid 语义，
+    家目录就是 HOME/USERPROFILE（`expanduser("~")` 正是这个口径），故落回它。
+    `pwd` 是 POSIX 专用模块，**延后到调用期 import**（照 scripts/install_compact_hook.py
+    的先例），模块导入面在 Windows 上保持干净。"""
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, AttributeError, KeyError, OSError):
+        return os.path.expanduser("~")
 
 
 def legacy_root() -> str:

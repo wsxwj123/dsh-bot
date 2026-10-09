@@ -23,6 +23,10 @@ import legacy_config_loader as config_loader  # noqa: E402  旧系统语义（ym
 import provider_config as pc  # noqa: E402
 import retry_backoff  # noqa: E402
 
+# 本模块是旧系统的 **POSIX 机制**（tmux 会话 + spawn-worker.sh + TMUX_TMPDIR=/tmp）。
+# Windows 上没有 tmux/bash：外部命令调用会 OSError，`_tmux` 一族按"会话不在"、
+# 重启按"拉起失败（spawn_failed）"安全降级，异常不会穿到请求层；其余逻辑
+# （闲忙判定、退避、记账）不依赖 POSIX。端口与目录仍由 BOT_PORTS / 接缝 env 控制。
 SPAWN_SH = os.environ.get("CLAUDEBOT_SPAWN_SH") or os.path.join(
     os.path.expanduser("~"), ".claude", "dispatcher", "spawn-worker.sh")
 TMUX_BIN = os.environ.get("CLAUDEBOT_TMUX_BIN") or shutil.which("tmux") or "tmux"

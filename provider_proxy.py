@@ -564,10 +564,13 @@ def _kickstart() -> bool:
     exe = lc if os.path.isabs(lc) else "launchctl"   # 桩接缝（R16）：绝对路径代替 launchctl，参数相同
     global _KICK_OK
     try:   # 非 0 退出或 5 s 超时即失败（9.15 restart 的 500 判据）
+        # os.getuid() 只在 POSIX 有（Windows 上不存在）：launchctl 体系在那边本就不存在，
+        # 取不到 uid 一律按 kickstart 失败落（AttributeError 并入 except，不让它冒成 500）。
+        uid = os.getuid()
         _KICK_OK = subprocess.run(
-            [exe, "kickstart", "-k", "gui/%d/%s" % (os.getuid(), LAUNCHD_LABEL)],
+            [exe, "kickstart", "-k", "gui/%d/%s" % (uid, LAUNCHD_LABEL)],
             capture_output=True, timeout=5).returncode == 0
-    except (OSError, subprocess.SubprocessError):
+    except (AttributeError, OSError, subprocess.SubprocessError):
         _KICK_OK = False
     return _KICK_OK
 
