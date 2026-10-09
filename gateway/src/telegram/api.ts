@@ -87,6 +87,12 @@ export function isNotModified(e: unknown): boolean {
 
 export type FileUpload = { field: string; path: string; filename?: string }
 
+/**
+ * 上传本地文件用的通道。gif 必须走 animation（当 photo 发 Telegram 只显示首帧）；webp/tgs 贴纸走 sticker。
+ * 哪个文件走哪条路见 sender 的 fileKind；这里只管通道本身。
+ */
+export type SendFileKind = 'photo' | 'document' | 'voice' | 'animation' | 'sticker'
+
 export class TelegramApi {
   constructor(private readonly token: string, private readonly base = 'https://api.telegram.org', private readonly timeoutMs = 30_000) {}
 
@@ -170,8 +176,8 @@ export class TelegramApi {
     return buf
   }
 
-  sendFile(kind: 'photo' | 'document' | 'voice', chatId: string, path: string, o: { replyTo?: number; caption?: string } = {}) {
-    const method = kind === 'photo' ? 'sendPhoto' : kind === 'voice' ? 'sendVoice' : 'sendDocument'
+  sendFile(kind: SendFileKind, chatId: string, path: string, o: { replyTo?: number; caption?: string } = {}) {
+    const method = kind === 'photo' ? 'sendPhoto' : kind === 'voice' ? 'sendVoice' : kind === 'animation' ? 'sendAnimation' : kind === 'sticker' ? 'sendSticker' : 'sendDocument'
     return this.call<TgMessage>(method, {
       chat_id: chatId,
       ...(o.caption ? { caption: o.caption } : {}),
