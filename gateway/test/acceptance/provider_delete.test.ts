@@ -159,7 +159,9 @@ describe('pendingKeyRemovals 的安全处理', () => {
 
   test('启动时已有到点的合规登记：由网关在锁内从凭据文件删掉该键并移除登记', async () => {
     await withModels({ handler: openaiOk(IDS), before: b => { seedProviders(b.root, [], [{ key: 'PROVIDER_GONE_KEY', after: 1 }]); seedCreds(b.root, { DEEPSEEK_API_KEY: 'sk-test-deepseek-000000', PROVIDER_GONE_KEY: 'test-key-7gone000000000' }) } }, async ({ b }) => {
-      await until(() => !readCreds(b.root).includes('PROVIDER_GONE_KEY'), '到点的键被删', 15_000)
+      // 产品在锁内的顺序是：先从凭据文件删键，紧接着才把登记从 providers.json 移除（崩在中间也能重试）。
+      // 只等凭据那一步会在慢机器上读到还没改写完的 providers.json，所以等到两件都发生。
+      await until(() => !readCreds(b.root).includes('PROVIDER_GONE_KEY') && readProviders(b.root).pendingKeyRemovals.length === 0, '到点的键被删且登记已移除', 15_000)
       expect(readCreds(b.root)).toContain('DEEPSEEK_API_KEY: "sk-test-deepseek-000000"')
       expect(readProviders(b.root).pendingKeyRemovals).toEqual([])
       await waitEvent(b, 'provider.key_removed', e => e.key === 'PROVIDER_GONE_KEY')
