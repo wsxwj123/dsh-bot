@@ -27,6 +27,7 @@ case "$cmd" in
     case ":\${FAKE_TMUX_SESSIONS:-}:" in *":$target:"*) exit 0 ;; *) exit 1 ;; esac
     ;;
   new)
+    if [ "\${FAKE_TMUX_NEW_FAIL:-}" = 1 ]; then exit 1; fi
     if [ "\${FAKE_TMUX_RUN:-}" = 1 ]; then
       sh -c "$4" >/dev/null 2>&1 || true
     fi
@@ -117,7 +118,7 @@ test('不碰旧系统的会话：worker / dispatcher 名字相近也照常只看
 
 test('配置文件不合格的跳过：没有 id、id 带非法字符的都不建；其余照常', () => {
   const s = setup({ '_global.yml': '# 没有 id\nfoo: 1\n', 'bot7.yml': 'id: bot7\n', 'weird.yml': 'id: "bad id"\n' }, '')
-  const r = run(s, { LOGS_TMUX_VERBOSE: '1' })
+  const r = run(s, { LOGS_TMUX_VERBOSE: '1', LANG: 'en_US.UTF-8' }) // 这一条会打到「$id」那句
   expect(r.exitCode).toBe(0)
   const out = r.stdout.toString()
   expect(out).toContain('_global.yml 里没有 id，跳过')
@@ -165,16 +166,55 @@ test('路径含空格和单引号时按单引号转义，交给 sh 执行后语�
 
 test('没有配置目录：说清楚并正常退出（还没切 bot 的机器）', () => {
   const s = setup({}, '')
-  const r = run(s, { DSH_BOT_CONFIGS_DIR: join(s.tmp, '不存在的目录') })
+  const r = run(s, { DSH_BOT_CONFIGS_DIR: join(s.tmp, '不存在的目录'), LANG: 'en_US.UTF-8' })
   expect(r.exitCode).toBe(0)
   expect(r.stdout.toString()).toContain('没有配置目录')
 })
 
-test('目录里没有 bot 配置：提示一行', () => {
-  const s = setup({ 'note.txt': 'x' }, '')
+test('目录里没有（启用中的）bot 配置：提示一行', () => {
+  const s = setup({ 'note.txt': 'x', 'bot3.yml': 'id: bot3\nenabled: false\n' }, '')
   const r = run(s)
   expect(r.exitCode).toBe(0)
-  expect(r.stdout.toString()).toContain('没找到 bot 配置')
+  expect(r.stdout.toString()).toContain('没有启用中的 bot 配置')
+  expect(calls(s).length).toBe(0) // 停用的连 has-session 都不查
+})
+
+test('只给启用中的 bot 建会话：enabled 假值的跳过，没写/真值/带引号的照常（口径与 list_enabled_bots 一致）', () => {
+  const s = setup({
+    'bot2.yml': 'id: bot2\n',
+    'bot3.yml': 'id: bot3\ndispatcher_port: 17953\nenabled: false   # 现在跑在旧栈\n',
+    'bot4.yml': 'id: bot4\nenabled: true\n',
+    'bot5.yml': 'id: bot5\nenabled: 0\n',
+    'bot6.yml': 'id: bot6\nenabled:\n',
+    'bot7.yml': 'id: bot7\ngateway:\n  enabled: false\n', // 缩进的不是顶层键
+    'bot8.yml': 'id: bot8\nenabled: "false"\n', // 带引号是字符串，非空即启用
+  }, '')
+  const r = run(s, { LOGS_TMUX_VERBOSE: '1' })
+  expect(r.exitCode).toBe(0)
+  const out = r.stdout.toString()
+  expect(out).toContain('bot3.yml 标记为停用（enabled 写了假值），跳过')
+  expect(out).toContain('bot5.yml 标记为停用（enabled 写了假值），跳过')
+  const news = calls(s).filter(c => c[0] === 'CALL new').map(c => c[3])
+  expect(news.sort()).toEqual(['tg-bot2-dsh', 'tg-bot4-dsh', 'tg-bot6-dsh', 'tg-bot7-dsh', 'tg-bot8-dsh'])
+  expect(out).toContain('共 5 个 bot，建了 5 个、跳过 0 个。')
+})
+
+// launchd 的 plist 设了 LANG=en_US.UTF-8：bash 3.2 会把中文标点的首字节吃进变量名，
+// 手工跑（shell 的 locale 是 C）不复现。下面两条把 summary 的两个分支都过一遍。
+test('UTF-8 locale 下建会话：summary 行正常，没有 unbound variable', () => {
+  const s = setup({ 'bot7.yml': 'id: bot7\n' }, '')
+  const r = run(s, { LANG: 'en_US.UTF-8', LOGS_TMUX_VERBOSE: '1' })
+  expect(r.exitCode).toBe(0)
+  expect(r.stderr.toString()).toBe('')
+  expect(r.stdout.toString()).toContain('共 1 个 bot，建了 1 个、跳过 0 个。')
+})
+
+test('UTF-8 locale 下建会话失败：失败数写进 summary、退出码 1，也不炸', () => {
+  const s = setup({ 'bot7.yml': 'id: bot7\n' }, '')
+  const r = run(s, { LANG: 'en_US.UTF-8', LOGS_TMUX_VERBOSE: '1', FAKE_TMUX_NEW_FAIL: '1' })
+  expect(r.exitCode).toBe(1)
+  expect(r.stderr.toString()).toContain('没建起来')
+  expect(r.stdout.toString()).toContain('共 1 个 bot，建了 0 个、跳过 0 个、失败 1 个。')
 })
 
 test('找不到 bun：报错退出（BUN_BIN、~/.bun/bin/bun、PATH 三处都没有）', () => {

@@ -1,9 +1,13 @@
 #!/bin/bash
-# 日志看板：给每个配好的 bot 起一个随时能 attach 的 tmux 会话（tg-<bot>-dsh），里面实时跟 gateway/scripts/logs.ts 的输出。
+# 日志看板：给每个启用中的 bot 起一个随时能 attach 的 tmux 会话（tg-<bot>-dsh），里面实时跟 gateway/scripts/logs.ts 的输出。
 #   bash gateway/scripts/logs_tmux.sh
 # 幂等：会话已存在就跳过，绝不关任何已有会话，更不碰旧系统的 tg-*-worker / tg-*-dispatcher。
 # 名字与安全：bot 名从配置文件名取（bot2.yml → bot2），只认 ^[A-Za-z0-9._-]+$，不合格的文件名跳过并写明原因；
 #   拼给 tmux 的命令串里路径一律走 sq 用单引号引用（内部的单引号按 '\'' 转义），不靠双引号插值。
+# 启用判定：配置顶层写了 enabled 假值（false/no/off/0）的 bot 不建会话——切回旧栈的 bot 停在那边，
+#   不该再看板（口径与 dsh-bot 侧 config_loader.list_enabled_bots 一致：没写字段 = 启用）。
+# 多字节的坑：中文标点紧跟 $var 时，bash 3.2 在 UTF-8 locale 下会把标点的首字节吃进变量名
+#   （launchd 里报 "summary…: unbound variable"，手工跑（C locale）不复现）；这里一律写 ${var} 断开。
 # 开机自启：launchd 任务 com.dsh-bot.tmux-logs（bun gateway/scripts/autostart.ts install-logs 装），
 #   RunAtLoad + 每 5 分钟跑一次。launchd 拉起的进程 PATH 里不一定有 bun / tmux，所以两边都用绝对路径：
 #   install-logs 会把解析到的 BUN_BIN / TMUX_BIN 写进 plist，脚本里的默认值只是手工跑时的兜底。
@@ -50,7 +54,7 @@ if [ -z "$TMUX" ]; then
 fi
 
 if [ ! -d "$CONFIGS_DIR" ]; then
-  echo "logs_tmux：没有配置目录 $CONFIGS_DIR（还没切一个 bot 过来？）"
+  echo "logs_tmux：没有配置目录 ${CONFIGS_DIR}（还没切一个 bot 过来？）"
   exit 0
 fi
 
@@ -76,6 +80,30 @@ read_bot_id() {
   return 1
 }
 
+# 这个 bot 启用没有：行首（顶层）的 enabled 取值判定，与 dsh-bot 侧的 list_enabled_bots 一个口径。
+# 没写 = 启用；空值按没写算；只有显式假值（false/no/off/0，不分大小写）才停；
+# 带引号的 '"false"' 是字符串（非空即启用）。缩进的 enabled（别的段里的键）不算。
+bot_enabled() {
+  local line v
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'enabled:'*) ;;
+      *) continue ;;
+    esac
+    v=${line#enabled:}
+    v=${v%%#*}
+    v=${v#"${v%%[![:space:]]*}"}
+    v=${v%"${v##*[![:space:]]}"}
+    case "$v" in
+      '""'|"''") return 1 ;;        # 空字符串是假值
+      '"'*|"'"*) return 0 ;;        # 带引号的非空串是字符串，算启用
+      false|False|FALSE|no|No|NO|off|Off|OFF|0) return 1 ;;
+    esac
+    return 0
+  done < "$1"
+  return 0
+}
+
 # launchd 里 stdout 是文件（不是终端）：安静模式，只有真发生事情才写日志
 verbose=1
 [ -t 1 ] || verbose=0
@@ -95,8 +123,12 @@ for f in "$CONFIGS_DIR"/*.yml; do
   esac
   id=$(read_bot_id "$f") || { [ "$verbose" = 1 ] && echo "logs_tmux：$base 里没有 id，跳过"; continue; }
   case "$id" in
-    ''|*[!A-Za-z0-9_-]*) [ "$verbose" = 1 ] && echo "logs_tmux：$base 的 id「$id」不能用（只能字母、数字、下划线、连字符），跳过"; continue ;;
+    ''|*[!A-Za-z0-9_-]*) [ "$verbose" = 1 ] && echo "logs_tmux：$base 的 id「${id}」不能用（只能字母、数字、下划线、连字符），跳过"; continue ;;
   esac
+  if ! bot_enabled "$f"; then
+    [ "$verbose" = 1 ] && echo "logs_tmux：$base 标记为停用（enabled 写了假值），跳过"
+    continue
+  fi
   found=$((found + 1))
   name="tg-$stem-dsh"
   # -t 加 = 前缀按名字精确匹配：tmux 默认前缀匹配，不加的话 tg-bot3 的查询会命中 tg-bot3-dispatcher
@@ -117,12 +149,12 @@ for f in "$CONFIGS_DIR"/*.yml; do
 done
 
 if [ "$found" -eq 0 ]; then
-  echo "logs_tmux：$CONFIGS_DIR 里没找到 bot 配置。"
+  echo "logs_tmux：$CONFIGS_DIR 里没有启用中的 bot 配置。"
 else
   summary="logs_tmux：共 $found 个 bot，建了 $created 个、跳过 $skipped 个"
-  [ "$failed" -gt 0 ] && summary="$summary、失败 $failed 个"
+  [ "$failed" -gt 0 ] && summary="${summary}、失败 $failed 个"
   if [ "$verbose" = 1 ] || [ "$created" -gt 0 ] || [ "$failed" -gt 0 ]; then
-    echo "$summary。"
+    echo "${summary}。"
   fi
 fi
 [ "$failed" -gt 0 ] && exit 1
