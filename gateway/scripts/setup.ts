@@ -239,7 +239,7 @@ async function check(): Promise<number> {
     }
     if (!cfg.gw.botlifeDb) note('没设 botlife_db：朋友圈用新仓库自己的 state.db，和网页上看到的不是同一份')
     else existsSync(expandHome(cfg.gw.botlifeDb)) ? ok('朋友圈库在') : note('botlife_db 指的文件不存在')
-    note(cfg.lifeId !== cfg.id ? '朋友圈、画风按旧系统里的名字找（取自 life_config 或 life_id）' : '朋友圈、画风按新配置的 id 找（没写 life_config）')
+    note(cfg.lifeId !== cfg.id ? '朋友圈按旧系统里的名字找（取自 life_config 或 life_id）' : '朋友圈按新配置的 id 找（没写 life_config）')
   } catch (e) {
     bad(e instanceof ConfigError ? e.message : String((e as Error).message ?? e))
     return 1

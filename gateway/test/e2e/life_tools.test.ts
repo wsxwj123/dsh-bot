@@ -34,7 +34,7 @@ function fakeSkill(root: string): string {
     'img = os.path.join(os.path.dirname(out), "fake.png")',
     'open(img, "wb").write(b"png")',
     'json.dump({"image_path": img}, open(out, "w"))',
-    'rec = {"argv": a, "token": os.environ.get("NOVELAI_BEARER_TOKEN"), "skill_root": os.environ.get("NOVELAI_SKILL_ROOT"), "im": im, "env_keys": sorted(os.environ)}',
+    'rec = {"argv": a, "token": os.environ.get("NOVELAI_BEARER_TOKEN"), "skill_root": os.environ.get("NOVELAI_SKILL_ROOT"), "im": im, "env_keys": sorted(os.environ), "worker_bot": os.environ.get("TELEGRAM_WORKER_BOT")}',
     `json.dump(rec, open(${JSON.stringify(join(root, 'skill-call.json'))}, "w"))`,
   ].join('\n'))
   return dir
@@ -61,7 +61,18 @@ test('image_guide 给出写法；generate_image 跑生图脚本：令牌只走�
   const b = await setup()
   const skill = fakeSkill(b.root)
   b.gw.image_skill_dir = skill
-  await start()
+  // 夹具：给这个 bot 补一份 life_config，让 id（testbot）与 lifeId（chenlulu）不同名——
+  // 画风必须按配置 id 找（管理台面板键），朋友圈身份（TELEGRAM_WORKER_BOT）才按 lifeId。
+  // 退回传 lifeId 时下面的 --agent-name 断言会红
+  const legacy = join(b.root, 'legacy')
+  mkdirSync(legacy, { recursive: true })
+  writeFileSync(join(legacy, 'chenlulu.yml'), '{}\n')
+  writeConfig(b)
+  const cfgY = JSON.parse(readFileSync(b.configPath, 'utf8'))
+  cfgY.life_config = join(legacy, 'chenlulu.yml')
+  writeFileSync(b.configPath, JSON.stringify(cfgY, null, 1))
+  gw = new Gateway(b) // 不能走 start()：它会用 writeConfig 覆盖掉刚补的 life_config
+  await gw.start()
   tg!.pushText(OWNER, '!tool:image_guide|{}')
   await until(() => !!resultOf(b, 'image_guide'), 'guide')
   expect(resultOf(b, 'image_guide')!.text).toContain('假的生图说明')
@@ -76,6 +87,11 @@ test('image_guide 给出写法；generate_image 跑生图脚本：令牌只走�
   expect(call.argv).toContain('square')
   expect(call.im).toEqual({ scene: '海边' })
   expect(call.skill_root).toBe(skill)
+  // 画风按配置 id 找（管理台面板键）；不等于 lifeId
+  expect(call.argv[call.argv.indexOf('--agent-name') + 1]).toBe(b.name)
+  expect(call.argv[call.argv.indexOf('--agent-name') + 1]).not.toBe('chenlulu')
+  // 朋友圈身份没被顺手改掉：worker 仍然用 lifeId
+  expect(call.worker_bot).toBe('chenlulu')
   // 模型进程的环境不整体传下去：没有 Telegram 令牌和 DeepSeek 密钥
   expect(call.env_keys.some((k: string) => /TELEGRAM_BOT_TOKEN|DEEPSEEK_API_KEY/.test(k))).toBe(false)
 })

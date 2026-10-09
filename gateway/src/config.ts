@@ -108,7 +108,7 @@ export type GatewayOpts = {
 
 export type BotConfig = {
   id: string
-  /** 在朋友圈、画风里用的名字（旧系统里的 bot 名）：life_id，没写就取 life_config 的文件名，再没有就是 id */
+  /** 在朋友圈里用的名字（lifeId，旧系统里的 bot 名）：life_id，没写就取 life_config 的文件名，再没有就是 id */
   lifeId: string
   displayName: string
   configPath: string

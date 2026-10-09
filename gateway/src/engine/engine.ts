@@ -212,7 +212,7 @@ export class Engine {
       sharedDirs: () => this.cfg.gw.imageDirs.map(expandHome),
     })
     this.actions = new LifeActions({
-      botId: cfg.lifeId, configPath: cfg.configPath, log, mediaDir: cfg.mediaDir,
+      botId: cfg.lifeId, imageAgent: cfg.id, configPath: cfg.configPath, log, mediaDir: cfg.mediaDir,
       imageProvider: () => this.cfg.gw.imageProvider,
       imageSkillDir: () => this.cfg.gw.imageSkillDir ?? join(import.meta.dir, '..', '..', '..', 'skills', `${this.cfg.gw.imageProvider}-skill`),
       stateDb: () => this.cfg.gw.botlifeDb,

@@ -67,8 +67,11 @@ const SYS_GUIDE: Record<'novelai' | 'comfyui', string> = {
 }
 
 export type ActionsDeps = {
-  /** 朋友圈、画风里用的名字（旧系统里的 bot 名） */
+  /** 朋友圈、TELEGRAM_WORKER_BOT 里用的名字（lifeId，旧系统里的 bot 名） */
   botId: string
+  /** 管理台面板键，等于配置里的 id：决定查哪套画风（styles.json 的键、生图脚本的 --agent-name），
+   *  也决定图落在 ~/resource/media/<这个名字>/ 下。必填——漏传会静默退回全局兜底画风，所以不给默认值 */
+  imageAgent: string
   configPath: string
   log: Logger
   mediaDir: string
@@ -176,7 +179,10 @@ export class LifeActions {
       if (provider === 'comfyui') {
         const prompt = String(it.prompt).trim()
         const out = join(this.d.mediaDir, `gen-${stamp}${tag}.png`)
-        return this.py([join(REPO_ROOT, 'scripts', 'comfyui_gen.py'), this.d.botId, prompt, '--out', out], {}, 600_000)
+        // 第一个参数传配置 id（管理台面板键）：comfyui 脚本用它 load_bot() 读人设锚点，
+        // 对不认识的 id 会按 life_config 文件名反查目录——多个 bot 共用一份 life_config 时会读错人。
+        // 落盘位置不受影响：这条路径永远带 --out
+        return this.py([join(REPO_ROOT, 'scripts', 'comfyui_gen.py'), this.d.imageAgent, prompt, '--out', out], {}, 600_000)
           .then(r => ({ idx, path: r.code === 0 ? out : null, err: r.err }))
       }
       const im = it.intermediate
@@ -186,7 +192,7 @@ export class LifeActions {
       const skill = expand(this.d.imageSkillDir())
       const ratio = ['portrait', 'landscape', 'square', 'wide'].includes(String(it.ratio)) ? String(it.ratio) : 'portrait'
       const argv = [join(skill, 'scripts', 'generate_novelai_image.py'), '--intermediate', imPath, '--config', join(skill, 'assets', 'default_config.json'),
-        '--ratio', ratio, '--agent-name', this.d.botId, '--session-name', `telegram-${chatId}`, '--output-json', resPath, ...(it.reuse_seed === true ? ['--reuse-seed'] : [])]
+        '--ratio', ratio, '--agent-name', this.d.imageAgent, '--session-name', `telegram-${chatId}`, '--output-json', resPath, ...(it.reuse_seed === true ? ['--reuse-seed'] : [])]
       return this.py(argv, { NOVELAI_BEARER_TOKEN: this.d.credRef('NOVELAI_BEARER_TOKEN') ?? undefined, NOVELAI_SKILL_ROOT: skill }, 600_000).then(r => {
         try { return { idx, path: String(JSON.parse(readFileSync(resPath, 'utf8')).image_path || '') || null, err: r.err } } catch { return { idx, path: null, err: r.err } }
       })

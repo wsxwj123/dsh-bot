@@ -55,13 +55,16 @@ function fakePy() {
   return { calls, run, peak: () => peak }
 }
 
-function setup(opts: { provider?: string; syncWaitMs?: number; skill?: string; py?: RunPy } = {}) {
+function setup(opts: { provider?: string; syncWaitMs?: number; skill?: string; py?: RunPy; botId?: string; imageAgent?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'imgmulti-'))
   const skillDir = join(root, 'skill')
   fakeSkill(skillDir)
   const notes: Note[] = []
   const deps: ActionsDeps = {
-    botId: 'bot5',
+    // 夹具默认就两个名字不同名：画风按配置 id（imageAgent）查，朋友圈身份（botId）是旧名。
+    // 有人把 --agent-name 又接回 botId 时，下面的 argv 断言会红
+    botId: opts.botId ?? 'chenlulu',
+    imageAgent: opts.imageAgent ?? 'bot5',
     configPath: join(root, 'b.yml'),
     log: new Logger({}),
     mediaDir: join(root, 'media'),
@@ -73,7 +76,7 @@ function setup(opts: { provider?: string; syncWaitMs?: number; skill?: string; p
     syncWaitMs: () => opts.syncWaitMs ?? 30_000,
     ...(opts.py ? { runPy: opts.py } : {}),
   }
-  return { root, skillDir, notes, actions: new LifeActions(deps), cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  return { root, skillDir, notes, deps, actions: new LifeActions(deps), cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
 const until = async (fn: () => boolean, ms = 10_000) => {
@@ -163,6 +166,18 @@ test('单张用法不变：返回形状、ratio、reuse_seed 照旧', async () =
     const bad = await s.actions.generateImage('42', {})
     expect(bad.isError).toBe(true)
     expect(bad.text).toBe('intermediate 不能为空。先调用 image_guide 看写法。')
+  } finally { s.cleanup() }
+})
+
+test('argv 的 --agent-name 用配置 id（imageAgent），不跟朋友圈身份的 botId（lifeId）混用', async () => {
+  const py = fakePy()
+  const s = setup({ py: py.run, botId: 'chenlulu', imageAgent: 'bot5' })
+  try {
+    await s.actions.generateImage('42', { intermediate: { prompt: 'style-check' } })
+    const c = py.calls[0]!
+    const agent = c.argv[c.argv.indexOf('--agent-name') + 1]
+    expect(agent).toBe('bot5') // 画风按管理台面板键（配置 id）查
+    expect(agent).not.toBe('chenlulu') // 有人把这里改回 botId（lifeId）时这条会红
   } finally { s.cleanup() }
 })
 
@@ -261,11 +276,7 @@ test('image_guide：交付文本开头是新系统说明；SKILL.md 有那段就
   } finally { s.cleanup() }
 })
 
-/** image_guide 测试用：复用 setup 的依赖，只换 SKILL.md 路径 */
+/** image_guide 测试用：复用 setup 的依赖（含两个不同名的 id），只换 SKILL.md 路径 */
 function depsOf(s: ReturnType<typeof setup>, skill: string): ActionsDeps {
-  return {
-    botId: 'bot5', configPath: join(s.root, 'b.yml'), log: new Logger({}), mediaDir: join(s.root, 'media'),
-    imageProvider: () => 'novelai', imageSkillDir: () => skill, stateDb: () => undefined, credRef: () => null,
-    notify: () => {}, syncWaitMs: () => 30_000,
-  }
+  return { ...s.deps, imageSkillDir: () => skill }
 }
