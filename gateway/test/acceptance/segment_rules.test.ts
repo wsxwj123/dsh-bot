@@ -196,7 +196,7 @@ describe('自建供应商身份变了（epoch 变，相当于换了一家，D6�
   })
 })
 
-const OVERFLOW_NOTE = '【系统】deepseek-official / deepseek-flash 的上下文超长了，已换新会话。如果它的上下文长度填大了，请在 /model →「管理自建供应商的模型」里改小。'
+const OVERFLOW_NOTE = '【系统】deepseek-official / deepseek-flash 的上下文超长了，已换新会话。如果它的上下文长度填大了，请在 /model →「管理模型」里改小。'
 const failNext = (b: BotEnv, text: string) => { mkdirSync(b.acpState, { recursive: true }); writeFileSync(join(b.acpState, 'next-error.txt'), text) }
 
 describe('上下文超长（3.2-10）', () => {

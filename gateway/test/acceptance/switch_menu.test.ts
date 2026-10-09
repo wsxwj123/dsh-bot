@@ -6,7 +6,7 @@ const KEY = 'test-key-7switch000000000001'
 const ROUTES = { myroute: { api: 'openai-completions', baseURL: 'https://r.example.com/v1', apiKeyEnv: 'MYROUTE_KEY', models: [{ id: 'r1', contextWindow: 65536 }] } }
 const DONE = (p: string, m: string) => `【系统】已换成 ${p} / ${m}，下一条消息起生效。这个 bot 的所有聊天都换，重启后保持；/model default 换回配置文件里的。`
 const ROLL = '换到了另一家供应商：下一条消息会先让现在的模型写一份交接摘要，再在新供应商上开新会话。'
-const GUESS = '这个模型的上下文长度未知，按 131072 算；如果它实际更小，请在 /model →「管理自建供应商的模型」里改。'
+const GUESS = '这个模型的上下文长度未知，按 131072 算；如果它实际更小，请在 /model →「管理模型」里改。'
 const mine = (o: { models?: any[]; key?: boolean; extra?: any[] } = {}) => (b: BotEnv) => {
   seedProviders(b.root, [{ name: 'myproxy', baseURL: 'https://p.example.com/v1', models: o.models ?? ['m1', { id: 'm2', contextWindow: 64000 }] }, ...(o.extra ?? [])])
   seedCreds(b.root, o.key !== false ? { ...DS_KEY, PROVIDER_MYPROXY_KEY: KEY } : DS_KEY)

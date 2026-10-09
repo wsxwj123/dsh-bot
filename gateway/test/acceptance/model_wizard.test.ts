@@ -32,10 +32,10 @@ describe('/model 主菜单', () => {
     })
   })
 
-  test('按钮是「切换模型」「思考强度」「管理自建供应商的模型」「换回配置文件里的」「关闭」', async () => {
+  test('按钮是「切换模型」「思考强度」「管理模型」「换回配置文件里的」「关闭」', async () => {
     await withBot({ before: ds }, async ({ tg }) => {
       const m = await openModelMenu(tg)
-      expect(labels(tg, m.messageId)).toEqual(['切换模型', '思考强度', '管理自建供应商的模型', '换回配置文件里的', '关闭'])
+      expect(labels(tg, m.messageId)).toEqual(['切换模型', '思考强度', '管理模型', '换回配置文件里的', '关闭'])
     })
   })
 

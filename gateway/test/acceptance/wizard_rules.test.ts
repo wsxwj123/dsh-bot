@@ -197,8 +197,8 @@ describe('callback_data 与菜单形状', () => {
     const ids = Array.from({ length: 60 }, (_, i) => `model-${String(i).padStart(2, '0')}-` + 'q'.repeat(120))
     await withBot({ before: b => { seedProviders(b.root, [{ name: 'many', baseURL: 'https://m.example.com/v1', models: ids }]); seedCreds(b.root, { PROVIDER_MANY_KEY: 'test-key-7many00000000' }) } }, async ({ tg }) => {
       tg.pushText(OWNER, '/model')
-      const m = await until(() => tg.lastMenu(OWNER)?.buttons.some(x => x.text === '管理自建供应商的模型') ? tg.lastMenu(OWNER) : null, '/model 主菜单')
-      tg.clickButton(OWNER, OWNER, m.messageId, '管理自建供应商的模型')
+      const m = await until(() => tg.lastMenu(OWNER)?.buttons.some(x => x.text === '管理模型') ? tg.lastMenu(OWNER) : null, '/model 主菜单')
+      tg.clickButton(OWNER, OWNER, m.messageId, '管理模型')
       await until(() => tg.buttonsOf(OWNER, m.messageId).some(x => x.text === 'many'), '选供应商')
       tg.clickButton(OWNER, OWNER, m.messageId, 'many')
       const t = await waitText(tg, OWNER, m.messageId, x => x.startsWith('【系统】「many」的模型（60 个）：'), '管理页')

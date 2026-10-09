@@ -164,7 +164,7 @@ describe('新建：失败与异常路径', () => {
   test('没拉到模型（401）：照样建好，回「但没拉到模型：密钥不对或没有权限（HTTP 401）」，按钮「刷新模型」「关闭」', async () => {
     await withModels({ handler: () => json({ error: 'bad key' }, 401) }, async ({ tg, b, fm, key }) => {
       const { result } = await wizardCreate(tg, { name: 'myproxy', fmt: 'openai', url: `${fm.url}/v1`, key })
-      expect(result.text!).toContain('【系统】已添加供应商「myproxy」，但没拉到模型：密钥不对或没有权限（HTTP 401）。之后可以在 /provider 里点「刷新模型」，或用 /model →「管理自建供应商的模型」手动加。')
+      expect(result.text!).toContain('【系统】已添加供应商「myproxy」，但没拉到模型：密钥不对或没有权限（HTTP 401）。之后可以在 /provider 里点「刷新模型」，或用 /model →「管理模型」手动加。')
       expect(labels(tg, result.messageId)).toEqual(['刷新模型', '关闭'])
       expect(readProviders(b.root).providers.myproxy.route.models).toEqual([])
       expect(readCreds(b.root)).toContain(`PROVIDER_MYPROXY_KEY: "${key}"`)

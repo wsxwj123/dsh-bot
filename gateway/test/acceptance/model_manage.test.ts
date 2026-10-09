@@ -1,4 +1,4 @@
-// 验收：/model →「管理自建供应商的模型」（INTERFACE 3.5.2、3.5.3、3.3.2 分页与按钮文字）
+// 验收：/model →「管理模型」（INTERFACE 3.5.2、3.5.3、3.3.2 分页与按钮文字）
 import { describe, expect, test } from 'bun:test'
 import { writeFileSync } from 'fs'
 import { OWNER, labels, lockPath, openModelMenu, override, readProviders, seedCreds, seedProviders, until, waitMenu, waitText, withBot, type BotEnv, type SeedModel } from './_acc'
@@ -12,10 +12,10 @@ const texts = (tg: any) => [...tg.sentTo(OWNER).map((s: any) => s.text ?? ''), .
 const said = (tg: any, pred: (t: string) => boolean, what: string) => until(() => texts(tg).find(pred), what)
 const entry = (b: BotEnv, name = 'myproxy') => readProviders(b.root).providers[name]
 
-/** /model →「管理自建供应商的模型」→ 选供应商，停在管理页 */
+/** /model →「管理模型」→ 选供应商，停在管理页 */
 async function toManage(tg: any, name = 'myproxy'): Promise<number> {
   const m = await openModelMenu(tg)
-  tg.clickButton(OWNER, OWNER, m.messageId, '管理自建供应商的模型')
+  tg.clickButton(OWNER, OWNER, m.messageId, '管理模型')
   await until(() => labels(tg, m.messageId).includes(name), '选自建供应商')
   tg.clickButton(OWNER, OWNER, m.messageId, name)
   await waitText(tg, OWNER, m.messageId, t => t.startsWith(`【系统】「${name}」的模型（`), '管理页')
@@ -38,7 +38,7 @@ describe('管理页', () => {
   test('没有自建供应商：「还没有自建供应商。」按钮「新建」「取消」', async () => {
     await withBot({}, async ({ tg }) => {
       const m = await openModelMenu(tg)
-      tg.clickButton(OWNER, OWNER, m.messageId, '管理自建供应商的模型')
+      tg.clickButton(OWNER, OWNER, m.messageId, '管理模型')
       await waitText(tg, OWNER, m.messageId, t => t === '【系统】还没有自建供应商。', '没有自建')
       expect(labels(tg, m.messageId)).toEqual(['新建', '取消'])
     })
@@ -101,7 +101,7 @@ describe('手动加一个模型', () => {
     })
   }
 
-  for (const bad of ['has space', 'x'.repeat(201), '模型名']) {
+  for (const bad of ['has space', 'x'.repeat(201), 'bad⟦id']) {   // 非 ASCII 现在合法（聚合商的 id 带中文前缀），改用含程序标记的样例
     test(`模型名「${bad.length > 20 ? bad.slice(0, 6) + '…(' + bad.length + ' 字)' : bad}」不合规：回原因并重问`, async () => {
       await withBot({ before: seed() }, async ({ tg }) => {
         const mid = await toManage(tg)
@@ -109,7 +109,7 @@ describe('手动加一个模型', () => {
         await waitText(tg, OWNER, mid, t => t.includes('请输入模型名'), '输入模型名')
         const k = texts(tg).length
         tg.pushText(OWNER, bad)
-        await until(() => texts(tg).slice(k).includes('【系统】模型名要 1–200 个可见英文字符，不能有空白。请重新输入：'), '不合规原因')
+        await until(() => texts(tg).slice(k).includes('【系统】模型名要 1–200 个字符，不能有空白、控制字符，也不能有 ⟦ ⟧。请重新输入：'), '不合规原因')
       })
     })
   }
