@@ -278,7 +278,7 @@ describe('覆盖自动失效与暂停（3.2-8）', () => {
   })
 
   test('条目变得不合格（暂时不可用）：不清覆盖，日志 brain.override_suspended；改回后下一轮又用覆盖的模型', async () => {
-    await withBot({ gw: GW, before: mine }, async ({ tg, b }) => {
+    await withBot({ gw: GW, before: mine }, async ({ tg, b, gw }) => {
       await cmd(tg, '/model myproxy/m1')
       const good = readProviders(b.root)
       const bad = JSON.parse(JSON.stringify(good))
@@ -287,7 +287,12 @@ describe('覆盖自动失效与暂停（3.2-8）', () => {
       await waitEvent(b, 'brain.override_suspended')
       expect(evs(b, 'brain.override_cleared')).toEqual([])
       await afterChange(b, () => writeFileSync(providersPath(b.root), JSON.stringify(good)))
-      await sleep(1_500)
+      // 等"生效中的模型"真的回到覆盖值再说下一句。原来用固定 sleep(1_500) 等网关跟上，
+      // 慢机器上不够：CI 上偶发（收到的是配置文件里的 deepseek-flash）。
+      await until(async () => {
+        const j = (await gw.call('/v1/model')).json
+        return j.current?.provider === 'myproxy' && j.current?.model === 'm1'
+      }, '生效模型回到 myproxy/m1', 15_000)
       await say(tg, '恢复后')
       expect(JSON.parse(turnOf(b, '恢复后')!.model)).toEqual(['myproxy', 'm1'])
     })
