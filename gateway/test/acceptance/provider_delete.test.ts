@@ -85,7 +85,9 @@ describe('删除', () => {
   test('provider_key_grace_ms=0：下一次轮询就从凭据文件删掉键，其它行逐字节不变，登记移除，日志 provider.key_removed', async () => {
     await withModels({ gw: { provider_key_grace_ms: 0 }, handler: openaiOk(IDS), before: seed() }, async ({ tg, b }) => {
       await confirmDelete(tg)
-      await until(() => !readCreds(b.root).includes('PROVIDER_MYPROXY_KEY'), '键被删', 15_000)
+      // 产品在锁内的顺序：先从凭据文件删键，紧接着才把登记从 providers.json 移除。只等凭据
+      // 那一步会在慢机器上读到还没改写的 providers.json（与同文件另一条同因）。
+      await until(() => !readCreds(b.root).includes('PROVIDER_MYPROXY_KEY') && readProviders(b.root).pendingKeyRemovals.length === 0, '键被删且登记已移除', 15_000)
       expect(readCreds(b.root)).toBe(KEEP)
       expect(readProviders(b.root).pendingKeyRemovals).toEqual([])
       await waitEvent(b, 'provider.key_removed', e => e.key === 'PROVIDER_MYPROXY_KEY')

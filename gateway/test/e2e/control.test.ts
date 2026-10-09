@@ -3,7 +3,7 @@ import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { writeFileSync } from 'fs'
 import { join } from 'path'
 import { FakeTelegram } from '../fakes/fake-telegram'
-import { cleanup, configCalls, FRIEND, Gateway, lifecycle, makeBot, OWNER, prompts, sleep, until, writeConfig, type BotEnv } from '../harness'
+import { cleanup, configCalls, FRIEND, Gateway, lifecycle, makeBot, OWNER, prompts, readJsonl, sleep, until, writeConfig, type BotEnv } from '../harness'
 
 let tg: FakeTelegram
 let b: BotEnv
@@ -133,8 +133,12 @@ test('改了这个 bot 的模型：下一轮生效，不重启 dsh；另一个 b
   const otherCallsBefore = configCalls(b2).length
 
   b.brain = { ...b.brain, model: 'deepseek-v4-pro', reasoning_effort: 'high' }
+  // 不能固定 sleep：网关按配置轮询间隔读文件，慢机器（Windows CI）上 500 毫秒还没读到，
+  // 下一句就会用旧模型。等它真的记下这次改动再发。
+  const brainChanges = () => readJsonl<{ event?: string }>(join(b.botDir, 'logs', 'gateway.log')).filter(e => e.event === 'config.brain_changed').length
+  const seenChanges = brainChanges()
   writeConfig(b)
-  await sleep(500)
+  await until(() => brainChanges() > seenChanges, '网关读到新配置')
   tg.pushText(OWNER, 'afterModel')
   await until(() => tg.sentTo(OWNER).some(s => s.text === '收到：afterModel'), 'after model')
   const p = prompts(b).find(x => x.text.includes('afterModel'))!
