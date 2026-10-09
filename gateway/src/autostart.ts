@@ -16,6 +16,8 @@ export type Agent = {
   /** 定时任务：每隔多少秒跑一次，或者按日历（Weekday/Hour/Minute）跑。都不给就是常驻（退出了自动拉起） */
   interval?: number
   calendar?: Record<string, number>
+  /** 定时任务是否在加载时（开机后）立刻先跑一次。默认 false（到点再跑）；tmux 日志看板要 true，开机马上把会话建起来 */
+  runAtLoad?: boolean
 }
 
 /** 代理设置：从安装时的终端环境里带过去（launchd 启动的进程拿不到终端里的环境变量） */
@@ -48,6 +50,20 @@ export function directorAgent(o: { python: string; repo: string; chatId: string;
     cwd: o.repo,
     env: { ...o.env, HUB_CONFIGS_DIR: join(o.root, 'configs'), DIRECTOR_CHAT_ID: o.chatId, DIRECTOR_LOG_FILE: join(dir, 'director.log') },
     stdoutPath: join(dir, 'launchd.log'),
+  }
+}
+
+/** 日志看板：开机后（之后每 5 分钟）跑一次 logs_tmux.sh，给每个配好的 bot 保证一个 tg-<bot>-dsh 的 tmux 会话，
+ *  里面跟着 logs.ts 的实时输出。脚本自己读 ~/.dsh-bot/configs 下的 bot 配置；已有会话不动、绝不碰旧系统的会话 */
+export function tmuxLogsAgent(o: { repo: string; root: string; env: Record<string, string>; extraEnv?: Record<string, string> }): Agent {
+  return {
+    label: 'com.dsh-bot.tmux-logs',
+    args: ['/bin/bash', join(o.repo, 'gateway', 'scripts', 'logs_tmux.sh')],
+    cwd: o.repo,
+    env: { ...o.env, ...o.extraEnv },
+    stdoutPath: join(o.root, 'logs', 'tmux-logs.launchd.log'),
+    interval: 300,
+    runAtLoad: true, // 开机就把会话建出来，不等第一个 5 分钟
   }
 }
 
@@ -108,7 +124,7 @@ ${strs(a.args)}
 ${env}
   </dict>
 ${a.interval ? `  <key>StartInterval</key><integer>${a.interval}</integer>
-  <key>RunAtLoad</key><false/>` : a.calendar ? `  <key>StartCalendarInterval</key>
+  <key>RunAtLoad</key><${a.runAtLoad ? 'true' : 'false'}/>` : a.calendar ? `  <key>StartCalendarInterval</key>
   <dict>
 ${Object.entries(a.calendar).map(([k, v]) => `    <key>${esc(k)}</key><integer>${v}</integer>`).join('\n')}
   </dict>
@@ -209,6 +225,7 @@ export function statusLine(
 /** 某个自启项的日志在哪（status 出问题时提示） */
 export function logHint(name: string, root = '~/.dsh-bot'): string {
   if (name === 'director') return `${root}/director/director.log`
+  if (name === 'tmux-logs') return `${root}/logs/tmux-logs.launchd.log`
   if (name.includes('.') || SHARED.some(j => j.name === name)) return `${root}/logs/${name}.log 和 ${name}.launchd.log`
   return `${root}/bots/${name}/logs/launchd.log`
 }

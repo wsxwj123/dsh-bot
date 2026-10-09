@@ -1,6 +1,6 @@
 // M6：开机自启的 LaunchAgent 内容。只放必要的环境变量，不放密钥；代理地址带账号密码的不写
 import { expect, test } from 'bun:test'
-import { baseEnv, directorAgent, gatewayAgent, plist } from '../../src/autostart'
+import { baseEnv, directorAgent, gatewayAgent, logHint, plist, pythonAgent, tmuxLogsAgent } from '../../src/autostart'
 
 test('网关和导演的 LaunchAgent：命令、工作目录、环境变量（关遥测、带代理、不带密钥）、自动拉起', () => {
   const env = baseEnv({
@@ -40,4 +40,30 @@ test('定时任务：每个 bot 的主动消息每 10 分钟；共用任务按�
   expect(c).toContain('<key>BOTLIFE_STATE_DB</key><string>/old/state.db</string>')
   const web = SHARED.find(j => j.name === 'moments-web')!
   expect(plist(pythonAgent({ name: web.name, python: 'p', repo: '/r', script: web.script, root: '/h', env }))).toContain('<key>KeepAlive</key><true/>')
+})
+
+test('tmux 日志看板（install-logs）：开机就建立、之后每 5 分钟一次；bun/tmux 的绝对路径写进环境', () => {
+  const a = tmuxLogsAgent({ repo: '/r', root: '/h', env: { PATH: '/usr/bin', HOME: '/u' }, extraEnv: { BUN_BIN: '/u/.bun/bin/bun', TMUX_BIN: '/opt/homebrew/bin/tmux' } })
+  expect(a.label).toBe('com.dsh-bot.tmux-logs')
+  expect(a.args).toEqual(['/bin/bash', '/r/gateway/scripts/logs_tmux.sh'])
+  expect(a.interval).toBe(300)
+  expect(a.runAtLoad).toBe(true)
+  expect(a.stdoutPath).toBe('/h/logs/tmux-logs.launchd.log')
+  const x = plist(a)
+  expect(x).toContain('<key>StartInterval</key><integer>300</integer>')
+  expect(x).toContain('<key>RunAtLoad</key><true/>')
+  expect(x).toContain('<key>BUN_BIN</key><string>/u/.bun/bin/bun</string>')
+  expect(x).toContain('<key>TMUX_BIN</key><string>/opt/homebrew/bin/tmux</string>')
+  expect(x).not.toContain('KeepAlive')
+})
+
+test('runAtLoad 只影响显式传它的任务：现有的主动消息、日历任务还是 RunAtLoad false', () => {
+  const si = pythonAgent({ name: 'self-initiate.bot5', python: 'p', repo: '/r', script: ['scripts/self_initiate.py', 'bot5', '42'], root: '/h', env: {}, interval: 600 })
+  expect(plist(si)).toContain('<key>RunAtLoad</key><false/>')
+  const cal = pythonAgent({ name: 'jiwen', python: 'p', repo: '/r', script: ['jiwen/tick.py'], root: '/h', env: {}, calendar: { Weekday: 0, Hour: 4, Minute: 0 } })
+  expect(plist(cal)).toContain('<key>RunAtLoad</key><false/>')
+})
+
+test('logHint：tmux-logs 指向自己的 launchd 日志', () => {
+  expect(logHint('tmux-logs', '/root')).toBe('/root/logs/tmux-logs.launchd.log')
 })

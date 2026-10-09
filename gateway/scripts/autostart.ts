@@ -5,14 +5,16 @@
 //   bun gateway/scripts/autostart.ts install-shared [--botlife-db <朋友圈库>] [--only jiwen,memory-compactor] [--web-port N] [--call-port N]
 //                                                                    全部 bot 切完以后：情绪、记忆整理、朋友圈网页、电话
 //                                                                    （切换期间可以先 --only jiwen,memory-compactor：只管新系统的 bot）
+//   bun gateway/scripts/autostart.ts install-logs                     日志看板：开机后给每个 bot 保证一个 tg-<bot>-dsh 的 tmux 会话（每 5 分钟检查一次）
 //   bun gateway/scripts/autostart.ts uninstall <bot 名 | director>   停掉并取消开机自启
+//   bun gateway/scripts/autostart.ts uninstall-logs                  停掉并取消日志看板
 //   bun gateway/scripts/autostart.ts status                          列出新系统的开机自启项、状态、定时任务上次的退出码；有问题返回非零退出码
 // 看实时日志：bun gateway/scripts/logs.ts --config <配置文件> -f（导演：tail -f ~/.dsh-bot/director/director.log）
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
-import { baseEnv, defaultProtectedDirs, directorAgent, gatewayAgent, logHint, parseLaunchctlPrint, parseLaunchctlRuns, pickShared, plist, plistPath, protectedRepoDir, PROXY_VARS, pythonAgent, SHARED, sharedPortEnv, statusLine, type Agent } from '../src/autostart'
-import { loadAccess, loadBotConfig, rootDir } from '../src/config'
+import { baseEnv, defaultProtectedDirs, directorAgent, gatewayAgent, logHint, parseLaunchctlPrint, parseLaunchctlRuns, pickShared, plist, plistPath, protectedRepoDir, PROXY_VARS, pythonAgent, SHARED, sharedPortEnv, statusLine, tmuxLogsAgent, type Agent } from '../src/autostart'
+import { loadAccess, loadBotConfig, rootDir, expandHome } from '../src/config'
 
 const [cmd, ...rest] = process.argv.slice(2)
 const opt = (n: string) => { const i = rest.indexOf(`--${n}`); return i >= 0 ? rest[i + 1] : undefined }
@@ -58,9 +60,17 @@ function repoBlocked(): boolean {
   return true
 }
 
+function uninstallLabel(label: string): number {
+  launchctl('bootout', `gui/${uid()}/${label}`)
+  const p = plistPath(HOME, label)
+  if (existsSync(p)) rmSync(p)
+  console.log(`  ✅ 已停掉并取消开机自启：${label}`)
+  return 0
+}
+
 function main(): number {
   if (process.platform !== 'darwin') { console.log('开机自启目前只支持 macOS（launchd）。其他系统请用 tmux 或系统自己的服务管理。'); return 2 }
-  if (['install', 'install-director', 'install-jobs', 'install-shared'].includes(cmd ?? '') && repoBlocked()) return 1
+  if (['install', 'install-director', 'install-jobs', 'install-shared', 'install-logs'].includes(cmd ?? '') && repoBlocked()) return 1
   if (cmd === 'install') {
     const cfgPath = rest[0]
     if (!cfgPath) { console.log('用法：autostart.ts install <配置文件>'); return 2 }
@@ -101,16 +111,23 @@ function main(): number {
     }
     return bad ? 1 : 0
   }
+  if (cmd === 'install-logs') {
+    const bun = Bun.which('bun') ?? process.execPath
+    const tmux = Bun.which('tmux')
+    if (!tmux) { console.log('没找到 tmux（装一个：brew install tmux）'); return 1 }
+    // bun / tmux 都用安装时解析到的绝对路径写进 plist：launchd 的 PATH 里不一定有它们
+    const cfgDir = process.env.DSH_BOT_CONFIGS_DIR
+    return install(tmuxLogsAgent({
+      repo: REPO, root: rootDir(), env: env(),
+      extraEnv: { BUN_BIN: bun, TMUX_BIN: tmux, ...(cfgDir ? { DSH_BOT_CONFIGS_DIR: resolve(expandHome(cfgDir)) } : {}) },
+    }))
+  }
   if (cmd === 'uninstall') {
     const name = rest[0]
     if (!name) { console.log('用法：autostart.ts uninstall <bot 名 | director | self-initiate.<bot 名> | jiwen | moments-web …>'); return 2 }
-    const label = `com.dsh-bot.${name}`
-    launchctl('bootout', `gui/${uid()}/${label}`)
-    const p = plistPath(HOME, label)
-    if (existsSync(p)) rmSync(p)
-    console.log(`  ✅ 已停掉并取消开机自启：${label}`)
-    return 0
+    return uninstallLabel(`com.dsh-bot.${name}`)
   }
+  if (cmd === 'uninstall-logs') return uninstallLabel('com.dsh-bot.tmux-logs')
   if (cmd === 'status') {
     const dir = join(HOME, 'Library', 'LaunchAgents')
     const labels = existsSync(dir) ? readdirSync(dir).filter(f => f.startsWith('com.dsh-bot.') && f.endsWith('.plist')).map(f => f.slice(0, -6)) : []
@@ -129,7 +146,7 @@ function main(): number {
     if (bad) console.log(`\n${bad} 项有问题，见上面标 ⚠️ 的行。`)
     return bad ? 1 : 0
   }
-  console.log('用法：bun gateway/scripts/autostart.ts install <配置文件> | install-director --chat <群 id> | install-jobs <配置文件> | install-shared [--botlife-db <路径>] [--only 名字,名字] [--web-port N] [--call-port N] | uninstall <名字> | status')
+  console.log('用法：bun gateway/scripts/autostart.ts install <配置文件> | install-director --chat <群 id> | install-jobs <配置文件> | install-logs | install-shared [--botlife-db <路径>] [--only 名字,名字] [--web-port N] [--call-port N] | uninstall <名字> | uninstall-logs | status')
   return 2
 }
 
