@@ -174,3 +174,41 @@ export function parseLaunchctlPrint(out: string, code: number): { state: string;
     lastExit: last === undefined ? null : last === '(never exited)' ? '从未退出' : last,
   }
 }
+
+/**
+ * status 用：在 parseLaunchctlPrint 的基础上多取一个顶层 `runs = N`（"跑过几次"，定时任务看它）。
+ * 单独一个函数，不改 parseLaunchctlPrint 的返回（验收测试锁定它的三个字段）。
+ */
+export function parseLaunchctlRuns(out: string, code: number): string | null {
+  if (code !== 0) return null
+  for (const line of out.split(/\r?\n/)) {
+    const m = /^\truns =(.*)$/.exec(line)
+    if (m) return m[1]!.trim()
+  }
+  return null
+}
+
+/** status 的一行：常驻的看是不是在跑；定时任务看跑过几次、上次退出码。有问题的标 ⚠️ 并给出看哪个日志 */
+export function statusLine(
+  label: string,
+  s: { state: string; pid: string | null; lastExit: string | null },
+  timed: boolean,
+  runs: string | null,
+  logHint: string,
+): string {
+  const gone = s.state.startsWith('没在运行（launchd 里没有这个任务）')
+  const bad = s.lastExit !== null && s.lastExit !== '0'
+  const parts = [`${s.state}${s.pid ? `（pid ${s.pid}）` : ''}`]
+  if (timed) parts.push(runs ? `跑过 ${runs} 次` : '还没跑过')
+  parts.push(`上次退出码 ${s.lastExit ?? '未知'}`)
+  // 常驻的：在跑就行（被杀过一次又被拉起来的不算问题）；定时任务：上次没正常退出就要看
+  const warn = gone || (timed ? bad : s.state !== 'running')
+  return `${warn ? '⚠️' : '  '} ${label}：${timed ? '定时任务，' : ''}${parts.join('，')}${warn ? `。看日志：${logHint}` : ''}`
+}
+
+/** 某个自启项的日志在哪（status 出问题时提示） */
+export function logHint(name: string, root = '~/.dsh-bot'): string {
+  if (name === 'director') return `${root}/director/director.log`
+  if (name.includes('.') || SHARED.some(j => j.name === name)) return `${root}/logs/${name}.log 和 ${name}.launchd.log`
+  return `${root}/bots/${name}/logs/launchd.log`
+}

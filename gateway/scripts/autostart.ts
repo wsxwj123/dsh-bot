@@ -6,12 +6,12 @@
 //                                                                    全部 bot 切完以后：情绪、记忆整理、朋友圈网页、电话
 //                                                                    （切换期间可以先 --only jiwen,memory-compactor：只管新系统的 bot）
 //   bun gateway/scripts/autostart.ts uninstall <bot 名 | director>   停掉并取消开机自启
-//   bun gateway/scripts/autostart.ts status                          列出新系统的开机自启项和状态
+//   bun gateway/scripts/autostart.ts status                          列出新系统的开机自启项、状态、定时任务上次的退出码；有问题返回非零退出码
 // 看实时日志：bun gateway/scripts/logs.ts --config <配置文件> -f（导演：tail -f ~/.dsh-bot/director/director.log）
-import { chmodSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
-import { baseEnv, defaultProtectedDirs, directorAgent, gatewayAgent, parseLaunchctlPrint, pickShared, plist, plistPath, protectedRepoDir, PROXY_VARS, pythonAgent, SHARED, sharedPortEnv, type Agent } from '../src/autostart'
+import { baseEnv, defaultProtectedDirs, directorAgent, gatewayAgent, logHint, parseLaunchctlPrint, parseLaunchctlRuns, pickShared, plist, plistPath, protectedRepoDir, PROXY_VARS, pythonAgent, SHARED, sharedPortEnv, statusLine, type Agent } from '../src/autostart'
 import { loadAccess, loadBotConfig, rootDir } from '../src/config'
 
 const [cmd, ...rest] = process.argv.slice(2)
@@ -115,12 +115,19 @@ function main(): number {
     const dir = join(HOME, 'Library', 'LaunchAgents')
     const labels = existsSync(dir) ? readdirSync(dir).filter(f => f.startsWith('com.dsh-bot.') && f.endsWith('.plist')).map(f => f.slice(0, -6)) : []
     if (labels.length === 0) console.log('还没有设开机自启的项。')
+    let bad = 0
     for (const l of labels) {
       const r = launchctl('print', `gui/${uid()}/${l}`)
       const s = parseLaunchctlPrint(r.out, r.code)
-      console.log(`  ${l}：${s.state}${s.pid ? `（pid ${s.pid}）` : ''}（上次退出码 ${s.lastExit ?? '未知'}）`)
+      // 定时任务（StartInterval / StartCalendarInterval）平时不在运行：看跑过几次、上次退出码；常驻的看是不是在跑
+      let timed = false
+      try { timed = /<key>Start(Calendar)?Interval<\/key>/.test(readFileSync(join(dir, `${l}.plist`), 'utf8')) } catch {}
+      const line = statusLine(l, s, timed, parseLaunchctlRuns(r.out, r.code), logHint(l.slice('com.dsh-bot.'.length), rootDir()))
+      if (line.startsWith('⚠️')) bad++
+      console.log(line)
     }
-    return 0
+    if (bad) console.log(`\n${bad} 项有问题，见上面标 ⚠️ 的行。`)
+    return bad ? 1 : 0
   }
   console.log('用法：bun gateway/scripts/autostart.ts install <配置文件> | install-director --chat <群 id> | install-jobs <配置文件> | install-shared [--botlife-db <路径>] [--only 名字,名字] [--web-port N] [--call-port N] | uninstall <名字> | status')
   return 2
