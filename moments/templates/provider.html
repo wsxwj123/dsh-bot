@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Provider 管理</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root { --bg:#ededed; --card:#fff; --ink:#181818; --ink-soft:#555; --ink-faint:#888;
+  --hairline:rgba(0,0,0,0.06); --hairline-strong:rgba(0,0,0,0.12);
+  --wxgreen:#07c160; --danger:#fa5151; --warn:#c98a00;
+  --font-body:'Noto Sans SC',-apple-system,system-ui,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,monospace; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#000; --card:#1c1c1e; --ink:#f0f0f0; --ink-soft:#c0c0c0; --ink-faint:#8a8a8a;
+    --hairline:rgba(255,255,255,0.08); --hairline-strong:rgba(255,255,255,0.16); }
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:var(--font-body); background:var(--bg); color:var(--ink);
+  line-height:1.6; font-size:15px; padding-bottom:60px; }
+.topbar { position:sticky; top:0; z-index:10; background:var(--bg);
+  border-bottom:1px solid var(--hairline); padding:16px 20px;
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  flex-wrap:wrap;
+  max-width:900px; margin:0 auto; }
+.topbar h1 { font-size:18px; font-weight:600; }
+.btn { border:none; border-radius:8px; padding:8px 14px; font-size:14px; cursor:pointer;
+  font-family:var(--font-body); transition:opacity .15s; white-space:nowrap; }
+.btn:hover { opacity:.85; }
+.btn-primary { background:var(--wxgreen); color:#fff; }
+.btn-ghost { background:transparent; color:var(--ink-soft); border:1px solid var(--hairline-strong); }
+.btn-danger { background:transparent; color:var(--danger); border:1px solid var(--danger); }
+.wrap { max-width:900px; margin:20px auto; padding:0 20px; }
+.panel { background:var(--card); border:1px solid var(--hairline); border-radius:14px;
+  padding:16px 18px; margin-bottom:16px; }
+.panel h2 { font-size:15px; font-weight:600; margin-bottom:12px; }
+.row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.field { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; }
+.field label { font-size:12px; color:var(--ink-soft); }
+input, select { padding:8px 10px; border-radius:8px; font-size:14px; color:var(--ink);
+  border:1px solid var(--hairline-strong); background:transparent; font-family:var(--font-body); }
+input[type=text], input[type=password] { width:100%; }
+table { width:100%; border-collapse:collapse; font-size:14px; }
+th, td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--hairline); vertical-align:top; }
+th { font-size:12px; color:var(--ink-soft); font-weight:500; }
+.mono { font-family:var(--font-mono); font-size:12px; color:var(--ink-soft);
+  overflow-wrap:anywhere; word-break:break-word; }
+.tag { display:inline-block; font-size:12px; padding:1px 7px; border-radius:20px;
+  border:1px solid var(--hairline-strong); color:var(--ink-soft); }
+.tag.local { color:var(--warn); border-color:var(--warn); }
+.tag.ok { color:var(--wxgreen); border-color:var(--wxgreen); }
+.tag.bad { color:var(--danger); border-color:var(--danger); }
+.banner { border-radius:10px; padding:10px 14px; margin-bottom:16px; font-size:14px; }
+.banner.warn { background:rgba(201,138,0,.12); color:var(--warn); }
+.banner.err { background:rgba(250,81,81,.12); color:var(--danger); }
+.banner.ok { background:rgba(7,193,96,.12); color:var(--wxgreen); }
+.hint { font-size:12px; color:var(--ink-faint); }
+#modelPicker { position:fixed; z-index:60; background:var(--card); border:1px solid var(--hairline-strong);
+  border-radius:12px; box-shadow:0 10px 34px rgba(0,0,0,.22); padding:8px; overflow:auto; }
+#modelPicker[hidden] { display:none; }
+.picker-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px; }
+.picker-status { font-size:12px; color:var(--ink-soft); }
+.picker-list { display:flex; flex-direction:column; }
+.mi-row { display:flex; align-items:baseline; gap:8px; padding:7px 8px; border-radius:8px;
+  cursor:pointer; font-size:14px; }
+.mi-row:hover { background:var(--hairline); }
+.mi-id { font-family:var(--font-mono); font-size:11px; color:var(--ink-faint); }
+.picker-more { width:100%; margin-top:6px; }
+
+/* 模型列：本列只列出模型 id；协议是 provider 级事实，在表单里选，不逐模型选。 */
+.model-cell .mono { display:block; }
+.protocol-hint { font-size:12px; color:var(--ink-faint); font-weight:400; }
+
+/* ── 手机（≤430px）：窄留白 + 两个表格纯 CSS 纵向堆叠，长串不再撑破视口 ── */
+@media (max-width:430px) {
+  .topbar { padding:12px 14px; gap:8px; }
+  .wrap { padding:0 14px; margin:14px auto; }
+  .panel { padding:14px; }
+  /* 表格转纵列：每个 td 独占一行。注意第二张表的 thead 有第 2 行 = protocol-hint
+     （data-role=protocol-hint），只能藏标题行，不能藏整个 thead，否则 hint 被一起隐藏。 */
+  table, thead, tbody, tr, th, td { display:block; width:100%; }
+  thead tr:first-child { display:none; }
+  tbody tr { border:1px solid var(--hairline); border-radius:10px;
+    padding:10px 12px; margin-bottom:12px; }
+  tbody td { padding:4px 0; border-bottom:none; }
+  tbody td:empty { display:none; }
+  /* 列名还原：JS 生成的 td 没有列名属性，只能用 ::before 补标签 */
+  #botRows td:nth-child(1)::before { content:"bot："; }
+  #botRows td:nth-child(2)::before { content:"生效来源/模型："; }
+  #botRows td:nth-child(3)::before { content:"状态："; }
+  #botRows td:nth-child(4)::before { content:"绑定："; }
+  #botRows td:nth-child(5)::before { content:"操作："; }
+  #providerRows td:nth-child(1)::before { content:"id："; }
+  #providerRows td:nth-child(2)::before { content:"名称："; }
+  #providerRows td:nth-child(3)::before { content:"base_url："; }
+  #providerRows td:nth-child(4)::before { content:"key："; }
+  #providerRows td:nth-child(5)::before { content:"模型："; }
+  #providerRows td:nth-child(6)::before { content:""; }
+  #botRows td::before, #providerRows td::before { color:var(--ink-faint); font-weight:500; }
+  /* 触控目标：手机上按钮与表单控件统一 ≥36px */
+  .btn { min-height:36px; }
+  select, input { min-height:36px; }
+}
+
+/* ── 打印：还原为桌面表格布局，避免堆叠被印成纵向单列 ──────────────── */
+@media print {
+  table { display:table; }
+  thead { display:table-header-group; }
+  tbody { display:table-row-group; }
+  tr { display:table-row; }
+  th, td { display:table-cell; }
+  thead tr:first-child { display:table-row; }
+  #botRows td::before, #providerRows td::before { content:none; }
+}
+
+/* ── 桌面（≥1024px）：容器与单元格更舒展 ───────────────────────────── */
+@media (min-width:1024px) {
+  .topbar, .wrap { max-width:1024px; }
+  th, td { padding:10px 14px; }
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Provider 管理</h1>
+  <div class="row">
+    <a class="btn btn-ghost" href="/">朋友圈</a>
+    <a class="btn btn-ghost" href="/styles">画风</a>
+    <button class="btn btn-ghost" id="syncAllBtn">同步全部 bot</button>
+    <button class="btn btn-danger" id="logoutBtn">登出</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <!-- 「同步全部 bot」的结果反馈：不进 #banners（整表重画会清掉它），留到下一次同步 -->
+  <div id="syncAllMsg" class="banner" hidden></div>
+  <div id="banners"></div>
+
+  <div class="panel" id="proxyPanel">
+    <h2>本机代理实例（provider 协议转换）</h2>
+    <div class="row">
+      <span class="tag" id="proxyStatus" data-state="bad">未运行</span>
+      <span class="mono" id="proxyKey"></span>
+      <span class="mono" id="proxyCount"></span>
+      <button class="btn btn-ghost" id="proxySyncBtn">同步代理配置</button>
+      <span id="proxySyncMsg" class="hint"></span>
+    </div>
+    <div id="proxyError" class="banner err" hidden></div>
+    <span id="proxyGenMsg" class="hint"></span>
+    <div id="proxySuspended" class="banner err" hidden><span></span>
+      <button type="button" class="btn btn-ghost" id="proxyRestartBtn" onclick="restartProxy()">重启实例</button></div>
+    <div class="hint">开启代理开关的 provider 的模型会注册进这个实例；已绑定 provider 的 bot 通过它调用上游（协议转换由实例完成）。</div>
+    <div class="hint">此实例只服务本面板的 bot，与本机其它工具使用的代理互不影响。</div>
+  </div>
+
+  <div class="panel">
+    <h2>全局（继承兜底）</h2>
+    <div class="row"><span class="mono" id="globalInfo">…</span></div>
+    <div class="hint">未单独配置 provider 的 bot 会继承这里的设置。切换全局 profile 时请确认模型名与上游匹配。</div>
+  </div>
+
+  <div class="panel" id="auxPanel">
+    <h2>朋友圈模型（全部 bot 共用）</h2>
+    <div class="row">
+      <select id="auxProviderSelect" aria-label="朋友圈供应商"></select>
+      <select id="auxModelSelect" aria-label="朋友圈模型"></select>
+      <button class="btn btn-primary" id="auxSaveBtn">保存</button>
+      <span id="auxMsg" class="hint"></span>
+    </div>
+    <div class="hint" id="auxStatusHint">未启用（跟随默认）</div>
+    <div class="hint">朋友圈文案与生图提示词翻译走这里选定的供应商直连；未启用时跟随默认（DeepSeek 或 Claude CLI）。全部 bot 共用这一份。</div>
+  </div>
+
+  <div class="panel">
+    <h2>每只 bot 的 provider</h2>
+    <table>
+      <thead><tr><th>bot</th><th>生效来源/模型</th><th>状态</th><th>绑定</th><th>操作</th></tr></thead>
+      <tbody id="botRows"></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2 id="formTitle">新建 provider</h2>
+    <div class="field"><label>名称</label><input type="text" id="pName"></div>
+    <div class="field"><label>base_url</label><input type="text" id="pBaseUrl" placeholder="https://api.example.com"></div>
+    <div class="field"><label>协议（该 provider 的全部模型都按此协议发送；请选上游实际使用的协议。新建时必选）</label>
+      <select id="pProtocol" data-role="protocol-input" name="protocol">
+        <option value="">请选择协议…</option>
+        <option value="anthropic">anthropic</option>
+        <option value="openai">openai</option>
+      </select></div>
+    <div class="field"><label>api_key（留空 = 沿用原来的 key；如果这次改了 base_url，必须在这里重新填一遍）</label>
+      <input type="password" id="pApiKey" autocomplete="off"></div>
+    <div class="field"><label>默认模型（会随 provider 一起保存；绑定 bot 时自动带出。可手填、可点开选）</label>
+      <input type="text" id="pModel" role="combobox" aria-expanded="false" placeholder="deepseek-chat">
+      <!-- models_datalist 是候选集的数据载体：拉取结果写成它的 option，组合框面板从它读。
+           没有任何输入框用 list= 引用它（否则原生下拉会与自绘面板叠成两个列表）。
+           删掉它会弄红 tests/acceptance/provider_isolation/test_panel_pages.py:29。 -->
+      <datalist id="models_datalist"></datalist></div>
+    <div class="row">
+      <button class="btn btn-ghost" id="fetchModelsBtn">拉取模型</button>
+      <button class="btn btn-primary" id="saveProviderBtn">保存 provider</button>
+      <button class="btn btn-ghost" id="cancelEditBtn" style="display:none">取消编辑</button>
+      <span id="formMsg" class="hint"></span>
+    </div>
+    <div id="modelsMsg" class="hint" style="color:var(--danger)"></div>
+    <table style="margin-top:14px">
+      <thead><tr><th>id</th><th>名称</th><th>base_url</th><th>key</th><th>模型</th><th></th></tr>
+        <tr><td colspan="6"><div class="protocol-hint" data-role="protocol-hint">协议是 provider 级设置（在下方表单里选）；bot 仍按 Anthropic 调用，转换由本机实例完成。</div></td></tr></thead>
+      <tbody id="providerRows"></tbody>
+    </table>
+  </div>
+</div>
+
+<input type="hidden" id="editingId" value="">
+
+<!-- 模型候选面板：全页唯一，静止态收起。展开入口是模型输入框本身（或「拉取模型」按钮）。 -->
+<div id="modelPicker" class="picker" data-scope="" data-bot-id="" data-provider-id="" data-open="0" data-state="idle" hidden>
+  <div class="picker-head">
+    <span id="modelPickerStatus" class="picker-status"></span>
+    <button type="button" class="btn btn-ghost" id="modelPickerClose">关闭</button>
+  </div>
+  <div id="modelPickerList" class="picker-list" role="listbox"></div>
+  <button type="button" class="btn btn-ghost picker-more" id="modelPickerMore" hidden>显示更多（剩余 <span id="modelPickerMoreCount">0</span>）</button>
+</div>
+<template id="miRowTpl"><div class="mi-row" role="option" data-model-id=""><span class="mi-label"></span></div></template>
+<!-- 协议是 provider 级设置，在表单的 [data-role="protocol-input"] 里选；不再有模型级协议控件。 -->
+<!-- 本轮新增控件的开标签模板（属性要在 HTML 标签上，JS 只填值）：proxy-toggle 带 data-provider-id。 -->
+<template id="proxyCtlTpl"><button type="button" class="btn btn-ghost" data-role="proxy-toggle" data-provider-id=""></button></template>
+<!-- bot 行的绑定控件；每行克隆一份，data-bot-id 由 JS 填 -->
+<template id="botCtlTpl"><select data-role="provider-select" data-bot-id=""></select><input type="text" data-role="bot-model" data-bot-id="" role="combobox" aria-expanded="false" data-autofilled="0" placeholder="模型"><button type="button" class="btn btn-primary" data-role="save-binding" data-bot-id="">保存</button><button type="button" class="btn btn-ghost" data-role="reset-binding" data-bot-id="">重置为官方订阅</button><button type="button" class="btn btn-ghost" data-role="restart-bot" data-bot-id="">重启</button></template>
+
+<script>
+const _origFetch = fetch;
+let DATA = null;
+let EDIT_ID = '';
+
+async function apiFetch(url, opts) {
+  const res = await _origFetch(url, opts);
+  if (res.status === 401) {
+    location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+    throw new Error('unauthorized');
+  }
+  return res;
+}
+
+async function jsonFetch(url, opts) {
+  const res = await apiFetch(url, opts);
+  let body = null;
+  try { body = await res.json(); } catch (e) { body = null; }
+  // 写入后从响应头取代号（9.15），跟踪它是否生效
+  const gen = res.headers.get('X-Proxy-Generation');
+  if (gen) watchGeneration(Number(gen));
+  return { ok: res.ok, status: res.status, body: body };
+}
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function sourceLabel(s) {
+  return { local: '本地', bot: '项目', global: '全局', unknown: '未知', subscription: '官方订阅' }[s] || s;
+}
+
+// 裁定补充 rev5 D3：列表接口失败不再静默空白——错误横幅可见，且不用垃圾 body 覆盖已有 DATA
+function showLoadError(text) {
+  const banners = document.getElementById('banners');
+  let b = banners.querySelector('[data-role="load-error"]');
+  if (!b) {
+    b = el('div', 'banner err');
+    b.setAttribute('data-role', 'load-error');
+    banners.prepend(b);
+  }
+  b.textContent = '加载 provider 列表失败：' + text + '。页面内容可能已过期，请刷新重试。';
+}
+
+async function load() {
+  let r;
+  try {
+    r = await jsonFetch('/api/providers');
+  } catch (e) {
+    if (e && e.message === 'unauthorized') throw e;   // apiFetch 已跳转登录页
+    showLoadError('网络错误 ' + ((e && e.message) || e));
+    return;
+  }
+  if (!r.ok) {
+    showLoadError((r.body && r.body.error) || ('HTTP ' + r.status));
+    return;
+  }
+  DATA = r.body || {};
+  render();
+  await loadProxy();
+  await loadAux();
+}
+
+function render() {
+  // 整表重画会重建 bot 行/输入框 ⇒ 必须先收起面板，否则候选会写进已从文档移除的旧节点
+  closePicker();
+  const banners = document.getElementById('banners');
+  banners.replaceChildren();
+  const pending = DATA.pending || [];
+  for (const p of pending) {
+    // halted：自动重启已停止（试满 5 次或根本无法重启）。E-25.1：失败次数与最近一次
+    // 失败原因都要有出口（接口的 fail_count/last_error），不再只显示 pending 一行字。
+    // 两者都经 textContent 以纯文本输出，不拼 HTML。
+    const fails = p.fail_count ? '（已失败 ' + p.fail_count + ' 次）' : '';
+    const reason = p.last_error ? '，最近一次：' + p.last_error : '';
+    const text = p.halted
+      ? '⛔ ' + p.bot_id + ' 自动重启已停止' + fails + reason + '。处理后点该 bot 的「重启」。'
+      : '⏳ ' + p.bot_id + ' 待重启：配置已落盘但 worker 尚未加载，面板会自动重试（超 30 分钟强制重启）'
+        + fails + reason + '。';
+    banners.appendChild(el('div', 'banner warn', text));
+  }
+  const g = DATA.global || {};
+  document.getElementById('globalInfo').textContent =
+    'base_url: ' + (g.base_url || '（未设）') + ' · model: ' + (g.model || '（未设）') +
+    ' · key: ' + (g.has_key ? '已设' : '未设');
+
+  renderProviders();
+  renderBots();
+  renderProxy();
+}
+
+// ── 代理实例面板（§4）────────────────────────────────────────────────────
+// 端口是**运行期值**（§0 P1：8770 只是缺省），故一律从 GET /api/proxy 的 port 取，
+// 不写死任何端口字面量。
+let PROXY = null;
+
+async function loadProxy() {
+  try {
+    const r = await jsonFetch('/api/proxy');
+    if (!r.ok) return;
+    PROXY = r.body;
+    renderProxy();
+  } catch (e) {
+    if (e && e.message === 'unauthorized') throw e;
+  }
+}
+
+function renderProxy() {
+  const status = document.getElementById('proxyStatus');
+  const key = document.getElementById('proxyKey');
+  const count = document.getElementById('proxyCount');
+  const errBox = document.getElementById('proxyError');
+  if (!PROXY) return;
+  status.textContent = PROXY.running
+    ? ('运行中 (127.0.0.1:' + PROXY.port + ')')
+    : '未运行';
+  status.setAttribute('data-state', PROXY.running ? 'ok' : 'bad');
+  key.textContent = PROXY.key_masked || '';
+  count.textContent = 'provider ' + PROXY.providers_count + ' · 模型 ' + PROXY.models_count;
+  const le = PROXY.last_error || '';
+  errBox.textContent = le ? (le + '。点『同步』可立即重试') : '';
+  errBox.hidden = !le;
+}
+
+// ── 朋友圈模型（全部 bot 共用）：aux_llm ────────────────────────────────
+let AUX = null;
+
+function auxOption(value, text) {
+  const o = document.createElement('option');
+  o.value = value; o.textContent = text;
+  return o;
+}
+
+async function loadAux() {
+  try {
+    const r = await jsonFetch('/api/aux-llm');
+    if (!r.ok) return;
+    AUX = r.body || {};
+    renderAux();
+  } catch (e) {
+    if (e && e.message === 'unauthorized') throw e;
+  }
+}
+
+function renderAux() {
+  const psel = document.getElementById('auxProviderSelect');
+  const cur = AUX.provider_id || '';
+  psel.replaceChildren();
+  psel.appendChild(auxOption('', '未启用（跟随默认）'));
+  for (const p of AUX.providers || []) psel.appendChild(auxOption(p.id, p.name || p.id));
+  psel.value = cur;
+  fillAuxModels(cur, AUX.model || '');
+  const hint = document.getElementById('auxStatusHint');
+  hint.textContent = cur ? ('当前：' + (psel.selectedIndex >= 0 ? psel.options[psel.selectedIndex].textContent : cur)) : '未启用（跟随默认）';
+}
+
+function fillAuxModels(providerId, curModel) {
+  const msel = document.getElementById('auxModelSelect');
+  msel.replaceChildren();
+  if (!providerId) { msel.disabled = true; return; }
+  msel.disabled = false;
+  const p = (DATA.providers || []).find(x => x.id === providerId);
+  const models = (p && p.models) || [];
+  for (const m of models) { const id = m.id || m; msel.appendChild(auxOption(id, id)); }
+  if (curModel) msel.value = curModel;
+  if (!models.length) msel.appendChild(auxOption('', '（该供应商暂无模型）'));
+}
+
+document.getElementById('auxProviderSelect').addEventListener('change', (e) => {
+  fillAuxModels(e.target.value, '');
+});
+
+document.getElementById('auxSaveBtn').addEventListener('click', async () => {
+  const pid = document.getElementById('auxProviderSelect').value;
+  const model = pid ? document.getElementById('auxModelSelect').value : '';
+  const msg = document.getElementById('auxMsg');
+  msg.style.color = '';
+  let r;
+  try {
+    r = await jsonFetch('/api/aux-llm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider_id: pid, model: model}),
+    });
+  } catch (e) {
+    if (e && e.message === 'unauthorized') throw e;
+    msg.textContent = '保存失败：' + ((e && e.message) || e);
+    msg.style.color = 'var(--danger)';
+    return;
+  }
+  if (r.ok && r.body && r.body.ok) {
+    msg.textContent = '已生效';
+    await loadAux();
+  } else {
+    msg.textContent = (r.body && r.body.error) || ('保存失败 ' + r.status);
+    msg.style.color = 'var(--danger)';
+  }
+});
+
+
+function renderProviders() {
+  const tb = document.getElementById('providerRows');
+  tb.replaceChildren();
+  const sel = document.getElementById('botRows');
+  for (const p of DATA.providers || []) {
+    const tr = el('tr');
+    tr.setAttribute('data-provider-id', p.id);
+    tr.setAttribute('data-default-model', p.default_model || '');
+    tr.setAttribute('data-proxy', p.proxy ? 'true' : 'false');
+    tr.setAttribute('data-protocol', p.protocol || '');
+    tr.setAttribute('data-anthropic-url', p.anthropic_base_url || '');
+    tr.setAttribute('data-openai-url', p.openai_base_url || '');
+    tr.appendChild(el('td', 'mono', p.id));
+    tr.appendChild(el('td', '', p.name));
+    tr.appendChild(el('td', 'mono', p.base_url));
+    tr.appendChild(el('td', 'mono', p.key_masked || '（无）'));
+
+    // 模型列：只列出模型 id（协议是 provider 级事实，不逐模型标记）。
+    const md = el('td', 'model-cell');
+    const models = p.models || [];
+    if (!models.length) {
+      md.appendChild(el('div', 'mono', '默认模型：' + (p.default_model || '未设') + ' · 候选 0 个'));
+    }
+    for (const m of models) {
+      md.appendChild(el('div', 'mono', m.id));
+    }
+    tr.appendChild(md);
+
+    const td = el('td');
+    const toggle = document.getElementById('proxyCtlTpl').content.firstElementChild.cloneNode(true);
+    toggle.setAttribute('data-provider-id', p.id);
+    toggle.textContent = p.proxy ? '关闭代理' : '开启代理';
+    toggle.onclick = () => setProxy(p.id, !p.proxy);
+    const edit = el('button', 'btn btn-ghost', '编辑');
+    edit.setAttribute('data-role', 'provider-edit');
+    edit.onclick = () => startEdit(p);
+    const del = el('button', 'btn btn-danger', '删除');
+    del.setAttribute('data-role', 'provider-delete');
+    del.onclick = () => removeProvider(p.id);
+    td.appendChild(toggle); td.appendChild(edit); td.appendChild(del);
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  }
+}
+
+
+function renderBots() {
+  const tb = document.getElementById('botRows');
+  tb.replaceChildren();
+  for (const b of DATA.bots || []) {
+    const eff = b.effective || {};
+    const des = eff.desired || {};
+    const tr = el('tr');
+    // 无 yml 的 dir bot 标注"未配置人设"（has_config 由 GET /api/providers 下发）
+    tr.appendChild(el('td', '', b.display_name + ' (' + b.bot_id + ')'
+      + (b.has_config === false ? '（未配置人设）' : '')));
+
+    const src = el('td');
+    src.appendChild(el('span', 'tag' + (des.source === 'local' ? ' local' : ''), sourceLabel(des.source)));
+    // rev6 P12：官方订阅（三层都没有接口地址，钥匙串登录）是正式状态，不再显示成「未知 / 无模型 / 无地址」
+    src.appendChild(el('div', 'mono', des.source === 'subscription'
+      ? (des.model || '（全局未设模型）') + ' → 官方（钥匙串登录）'
+      : (des.model || '（无模型）') + ' → ' + (des.base_url || '（无地址）')));
+    for (const k of des.extra_keys || []) src.appendChild(el('div', 'hint', '额外键: ' + k));
+    tr.appendChild(src);
+
+    const st = el('td');
+    // worker_idle（已绑定、配置一致，只是没活会话）与 pending 一样走中性样式，不涂红（E-25.2）：
+    // "空闲"是健康态，红只留给真故障（drifted/local_override/… ）。写法保持三元表达式口径。
+    st.appendChild(el('span', 'tag' + ((eff.state === 'applied' || eff.state === 'subscription') ? ' ok' : ((eff.state === 'pending' || eff.state === 'worker_idle') ? '' : ' bad')), eff.state || ''));
+    tr.appendChild(st);
+
+    const bd = el('td', 'mono');
+    const binding = (DATA.bindings || {})[b.bot_id];
+    bd.textContent = binding ? (binding.provider_name || binding.provider_id) : '未绑定';
+    tr.appendChild(bd);
+
+    const td = el('td');
+    const isLocal = (eff.local_conflict || []).length > 0;
+    if (isLocal) {
+      const warn = el('div', 'tag bad', 'local 覆盖：' + eff.local_conflict.join(', '));
+      td.appendChild(warn);
+    }
+    const ctl = document.getElementById('botCtlTpl').content.cloneNode(true);
+    const pid = ctl.querySelector('[data-role="provider-select"]');
+    const model = ctl.querySelector('[data-role="bot-model"]');
+    const save = ctl.querySelector('[data-role="save-binding"]');
+    const reset = ctl.querySelector('[data-role="reset-binding"]');
+    const restart = ctl.querySelector('[data-role="restart-bot"]');
+    for (const n of [pid, model, save, reset, restart]) n.setAttribute('data-bot-id', b.bot_id);
+
+    pid.appendChild(el('option', '', '选择 provider…')).value = '';
+    for (const p of DATA.providers || []) {
+      const o = el('option', '', p.name);
+      o.value = p.id;
+      if (binding && binding.provider_id === p.id) o.selected = true;
+      pid.appendChild(o);
+    }
+    model.value = (binding && binding.model) || '';   // 首次渲染 = 该 bot 已绑定的模型
+    model.addEventListener('click', (e) => { e.stopPropagation(); openFromInput(e.currentTarget); });
+    model.addEventListener('input', onTriggerInput);
+    model.addEventListener('keydown', onTriggerKeydown);
+    // 换 provider：仅当该行模型框是预填的、或为空，才带出该 provider 的默认模型；只改值不保存
+    pid.addEventListener('change', () => {
+      if (model.getAttribute('data-autofilled') !== '1' && model.value !== '') return;
+      const def = defaultModelOf(pid.value);
+      model.value = def;
+      model.setAttribute('data-autofilled', def ? '1' : '0');
+    });
+    save.onclick = () => bind(b.bot_id, pid.value, model.value);
+    reset.onclick = () => resetBot(b.bot_id);
+    restart.onclick = () => restartBot(b.bot_id, false);
+    td.appendChild(ctl);
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  }
+}
+
+function defaultModelOf(providerId) {
+  for (const p of DATA.providers || []) {
+    if (p.id === providerId) return p.default_model || '';
+  }
+  return '';
+}
+
+function startEdit(p) {
+  EDIT_ID = p.id;
+  document.getElementById('editingId').value = p.id;
+  document.getElementById('formTitle').textContent = '编辑 provider：' + p.name;
+  document.getElementById('pName').value = p.name || '';
+  document.getElementById('pBaseUrl').value = p.base_url || '';
+  document.getElementById('pProtocol').value = p.protocol || '';
+  document.getElementById('pApiKey').value = '';
+  document.getElementById('pModel').value = p.default_model || '';
+  document.getElementById('cancelEditBtn').style.display = '';
+}
+
+function cancelEdit() {
+  EDIT_ID = '';
+  document.getElementById('editingId').value = '';
+  document.getElementById('formTitle').textContent = '新建 provider';
+  for (const id of ['pName', 'pBaseUrl', 'pProtocol', 'pApiKey', 'pModel']) document.getElementById(id).value = '';
+  document.getElementById('cancelEditBtn').style.display = 'none';
+  document.getElementById('formMsg').textContent = '';
+}
+
+async function saveProvider() {
+  const msg = document.getElementById('formMsg');
+  msg.textContent = '';
+  const body = {
+    name: document.getElementById('pName').value.trim(),
+    base_url: document.getElementById('pBaseUrl').value.trim(),
+    api_key: document.getElementById('pApiKey').value,
+    default_model: document.getElementById('pModel').value.trim(),
+  };
+  // 协议是 provider 级可写字段：非空才提交（新建留空 → 服务端 400「protocol 必须是 …」；
+  // 编辑留空 → 不提交 = 保留现有有效协议，或改地址时由服务端清空）。
+  const proto = document.getElementById('pProtocol').value;
+  if (proto) body.protocol = proto;
+  let r;
+  if (EDIT_ID) {
+    r = await jsonFetch('/api/providers/' + encodeURIComponent(EDIT_ID), {
+      method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  } else {
+    r = await jsonFetch('/api/providers', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  }
+  if (!r.ok) { msg.textContent = (r.body && r.body.error) || ('失败 ' + r.status); return; }
+  cancelEdit();
+  // E-15：保存成功但上游地址未验证（探测 404）→ 把 warning 显示出来，不再静默
+  if (r.body && r.body.warning) { msg.textContent = r.body.warning; }
+  await load();
+}
+
+async function removeProvider(id) {
+  if (!confirm('删除 provider ' + id + '？')) return;
+  const r = await jsonFetch('/api/providers/' + encodeURIComponent(id), {method: 'DELETE'});
+  const msg = document.getElementById('formMsg');
+  if (!r.ok) { msg.textContent = (r.body && r.body.error) || ('失败 ' + r.status); return; }
+  await load();
+}
+
+// ── 模型组合框（点框即展开；每次展开都真拉，无跨次缓存）────────────────────
+// 去重只做一件事：**在途请求合并**。键 = 本次请求的语义目标（模式① provider_id /
+// 模式② #pBaseUrl 的 trim 值）；请求落地（成功或失败）立即销毁，故"关掉再点开"
+// 必定是新请求。不做任何跨次缓存，也不把成功结果留在页面内存里。
+const PICKER_BATCH = 100;
+const PICKER_LOADING_TEXT = '拉取中…（最长 8 秒）';
+const PICKER_MANUAL_TEXT = '请先在该行选择 provider；也可以直接手填模型 id';
+const PICKER_EMPTY_TEXT = '上游返回了空列表，请直接手填模型 id';
+
+const picker = {scope: '', botId: '', providerId: '', query: '', candidates: [], rendered: 0, trigger: null, writeModels: false};
+const inflight = new Map();
+
+function pickerRoot() { return document.getElementById('modelPicker'); }
+
+function setPickerStatus(text) {
+  document.getElementById('modelPickerStatus').textContent = text;
+}
+
+function setMoreButton(remaining) {
+  const btn = document.getElementById('modelPickerMore');
+  if (remaining > 0) {
+    document.getElementById('modelPickerMoreCount').textContent = String(remaining);
+    btn.hidden = false;
+  } else {
+    btn.hidden = true;
+  }
+}
+
+// 候选数据载体：拉取结果整体替换 #models_datalist 的 option，面板从它读
+function writeDatalist(models) {
+  const dl = document.getElementById('models_datalist');
+  dl.replaceChildren();
+  for (const m of models) {
+    const o = el('option');
+    o.value = m.id;
+    o.setAttribute('label', m.label || m.id);
+    dl.appendChild(o);
+  }
+}
+
+function readDatalist() {
+  const out = [];
+  for (const o of document.getElementById('models_datalist').children) {
+    out.push({id: o.value, label: o.getAttribute('label') || o.value});
+  }
+  return out;
+}
+
+const PICKER_MIN_HEIGHT = 160;   // 可见高度下限；低于它就没有可用的点选区域
+const PICKER_MAX_HEIGHT = 360;
+const PICKER_COMPACT_ROOM = 72;  // 无候选时面板只有一行状态+关闭钮；框上方至少有这么多空间才翻上去
+
+function positionPanel(input) {
+  const p = pickerRoot();
+  const box = input.getBoundingClientRect();
+  const vh = window.innerHeight;
+  const room = Math.max(80, vh - 16);   // 视口内可用的最大高度（上下各留 8px）
+  const width = Math.max(240, Math.min(box.width, window.innerWidth - 16));
+  const below = vh - box.bottom - 12;
+  const above = box.top - 12;
+  let height, top;
+
+  p.style.width = width + 'px';
+  p.style.left = Math.max(8, Math.min(box.left, window.innerWidth - width - 8)) + 'px';
+
+  // 无候选（拉取中 / 报错 / 仅提示 / 空列表）时面板只有一行状态，翻到框上方、底边贴框：
+  // 让出框下方同容器里的操作按钮（「拉取模型」「保存 provider」、bot 行「保存」），裁定补充 rev5 P9。
+  // 用 bottom 锚定，高度随内容、不必量；候选到了（或上方没空间）走下面的常规分支。
+  if (picker.candidates.length === 0 && above >= PICKER_COMPACT_ROOM) {
+    p.style.top = '';
+    p.style.bottom = (vh - box.top + 4) + 'px';
+    p.style.maxHeight = Math.min(above, room) + 'px';
+    return;
+  }
+  p.style.bottom = '';
+
+  if (below >= PICKER_MIN_HEIGHT || below >= above) {
+    top = box.bottom + 4;
+    height = Math.max(PICKER_MIN_HEIGHT, Math.min(PICKER_MAX_HEIGHT, below));
+  } else {
+    // 下方放不下就翻到输入框上方：面板是 position:fixed，压成一条缝等于没得点
+    height = Math.max(PICKER_MIN_HEIGHT, Math.min(PICKER_MAX_HEIGHT, above));
+    top = box.top - 4 - height;
+  }
+  height = Math.min(height, room);                      // 矮视口兜底：绝不让面板超出视口
+  top = Math.max(8, Math.min(top, vh - height - 8));    // 上移兜底，保证整体留在视口内
+
+  p.style.top = top + 'px';
+  p.style.maxHeight = height + 'px';
+}
+
+// 面板位置只在展开那一刻算一次的话，页面滚动/视口变化后就会与输入框脱开，故要重算。
+// **不自动收起**：滚动是常态（手机上键盘弹起就会滚），收起会让面板"闪一下就没了"，
+// 而固定定位的面板留在视口里照样可点。锚点滚出视口时只是暂不跟随。
+// scroll/resize 在浏览器里本来就是按帧派发的，直接重算即可（读一次 rect + 写几个样式）；
+// 不套 requestAnimationFrame —— 那多一层依赖，且面板很小，省不下什么。
+// （面板内部的滚动事件不冒泡，不会误触发。）
+function repositionPanel() {
+  if (pickerRoot().getAttribute('data-open') !== '1') return;
+  const t = picker.trigger;
+  if (!t || !t.isConnected) return;
+  const box = t.getBoundingClientRect();
+  if (box.bottom < 0 || box.top > window.innerHeight) return;
+  positionPanel(t);
+}
+
+window.addEventListener('scroll', repositionPanel, {passive: true});
+window.addEventListener('resize', repositionPanel);
+
+function closePicker() {
+  const p = pickerRoot();
+  if (picker.trigger) picker.trigger.setAttribute('aria-expanded', 'false');
+  p.setAttribute('data-open', '0');
+  p.setAttribute('data-state', 'idle');
+  p.setAttribute('data-scope', '');
+  p.setAttribute('data-bot-id', '');
+  p.setAttribute('data-provider-id', '');
+  p.hidden = true;
+  picker.scope = ''; picker.botId = ''; picker.providerId = '';
+  picker.query = ''; picker.candidates = []; picker.rendered = 0; picker.trigger = null;
+  picker.writeModels = false;
+  document.getElementById('modelPickerList').replaceChildren();
+  setMoreButton(0);
+}
+
+function openPicker(input, scope, botId, providerId, writeModels) {
+  const p = pickerRoot();
+  picker.scope = scope;
+  picker.botId = botId || '';
+  picker.providerId = providerId || '';
+  picker.writeModels = !!writeModels;   // true = 显式拉取（允许写回清单）；缺省 = 只看一眼
+  picker.query = ''; picker.candidates = []; picker.rendered = 0;
+  // 直接从另一个框切过来（没先收起）：先把上一个的 aria-expanded 复位，否则它永远停在 "true"
+  if (picker.trigger && picker.trigger !== input) picker.trigger.setAttribute('aria-expanded', 'false');
+  picker.trigger = input;
+  p.setAttribute('data-scope', scope);
+  p.setAttribute('data-bot-id', botId || '');
+  p.setAttribute('data-provider-id', providerId || '');
+  p.setAttribute('data-open', '1');
+  p.hidden = false;
+  input.setAttribute('aria-expanded', 'true');
+  document.getElementById('modelPickerList').replaceChildren();
+  setMoreButton(0);
+  positionPanel(input);
+  // 展开时全选：否则一个有值的框一点开就只剩 1 条候选，"完整列表"当场没了
+  try { input.select(); } catch (e) { /* 移动端可能不支持 select() */ }
+  if (scope === 'bot' && !providerId) {
+    // 该行还没选 provider：不发任何请求，只提示；框内照常可打字、可保存
+    p.setAttribute('data-state', 'manual');
+    setPickerStatus(PICKER_MANUAL_TEXT);
+    return;
+  }
+  if (scope === 'provider') document.getElementById('modelsMsg').textContent = '';
+  p.setAttribute('data-state', 'loading');
+  setPickerStatus(PICKER_LOADING_TEXT);
+  loadCandidates(scope, picker.botId, picker.providerId, picker.writeModels);
+}
+
+// 在途合并：同键请求还在飞就复用，落地即销毁（失败不留存）。只读查询与写回拉取不合并
+// （键不同）：同一次展开要么是"看一眼"、要么是显式拉取写回，语义不同不能复用响应。
+function fetchModelsFor(providerId, writeModels) {
+  const key = providerId
+    ? ('id:' + providerId + (writeModels ? ':w' : ':q'))
+    : ('url:' + document.getElementById('pBaseUrl').value.trim());
+  let p = inflight.get(key);
+  if (!p) {
+    let body;
+    if (providerId) {
+      body = {provider_id: providerId};
+      // E-25.3「看一眼不改配置」：展开候选框只查不写；写回留给显式拉取/显式保存。
+      if (!writeModels) body.query_only = true;
+    } else {
+      body = {base_url: document.getElementById('pBaseUrl').value.trim(),
+              api_key: document.getElementById('pApiKey').value};
+    }
+    p = jsonFetch('/api/providers/models', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+    }).then(r => r, () => ({ok: false, status: 0, body: null}))
+      .finally(() => { inflight.delete(key); });
+    inflight.set(key, p);
+  }
+  return p;
+}
+
+async function loadCandidates(scope, botId, providerId, writeModels) {
+  const r = await fetchModelsFor(providerId, writeModels);
+  const p = pickerRoot();
+  // 面板已收起或已换目标：结果作废（写进去会让用户"点了没反应"或看到别的 provider 的候选）
+  if (p.getAttribute('data-open') !== '1' || picker.scope !== scope
+      || picker.botId !== botId || picker.providerId !== providerId) return;
+
+  const body = r.body || {};
+  const models = (r.ok && body.ok === true && Array.isArray(body.models)) ? body.models : [];
+  writeDatalist(models);
+  picker.candidates = readDatalist();
+  repositionPanel();   // 有候选了就从"框上方一行"回到常规位置；仍无候选则原地不动
+
+  if (!r.ok || body.ok !== true) {
+    const text = body.error || ('失败 ' + r.status);
+    p.setAttribute('data-state', 'error');
+    setPickerStatus(text);   // 服务端 error 原文，逐字回显
+    if (scope === 'provider') document.getElementById('modelsMsg').textContent = text;
+    renderCandidates(true);
+    return;
+  }
+  p.setAttribute('data-state', 'ok');
+  setPickerStatus(models.length
+    ? ('共 ' + models.length + ' 个模型')
+    : PICKER_EMPTY_TEXT);
+  renderCandidates(true);
+}
+
+// reset=true 清空重建（首次渲染 / 查询串变化）；否则**追加**下一批，不重建已有行
+function renderCandidates(reset) {
+  const list = document.getElementById('modelPickerList');
+  const k = picker.query;
+  const all = k
+    ? picker.candidates.filter(m => m.id.toLowerCase().includes(k)
+        || (m.label || '').toLowerCase().includes(k))
+    : picker.candidates;
+  if (reset) { list.replaceChildren(); picker.rendered = 0; }
+  const tpl = document.getElementById('miRowTpl');
+  const frag = document.createDocumentFragment();
+  const end = Math.min(all.length, picker.rendered + PICKER_BATCH);
+  for (let i = picker.rendered; i < end; i++) {
+    const m = all[i];
+    const label = m.label || m.id;
+    const row = tpl.content.firstElementChild.cloneNode(true);
+    row.setAttribute('data-model-id', m.id);   // 定位锚点：永远是精确 id
+    row.querySelector('.mi-label').textContent = label;
+    if (label !== m.id) row.appendChild(el('span', 'mi-id', m.id));
+    frag.appendChild(row);
+  }
+  picker.rendered = end;
+  list.appendChild(frag);
+  setMoreButton(all.length - picker.rendered);
+}
+
+// 选中：先在**当前文档里重新取**目标输入框（重画会整表重建 bot 行），取不到就只收起不写值
+function selectCandidate(modelId) {
+  const scope = picker.scope, botId = picker.botId;
+  let input = null;
+  if (scope === 'provider') {
+    input = document.getElementById('pModel');
+  } else if (scope === 'bot') {
+    for (const n of document.querySelectorAll('[data-role="bot-model"]')) {
+      if (n.getAttribute('data-bot-id') === botId) { input = n; break; }
+    }
+  }
+  closePicker();
+  if (!input) return;
+  input.value = modelId;
+  input.setAttribute('data-autofilled', '0');
+}
+
+function providerValueFor(botId) {
+  for (const n of document.querySelectorAll('[data-role="provider-select"]')) {
+    if (n.getAttribute('data-bot-id') === botId) return n.value;
+  }
+  return '';
+}
+
+// 展开入口：点模型框本身，或收起态下按方向键；已展开时不重拉
+function openFromInput(input) {
+  if (pickerRoot().getAttribute('data-open') === '1' && picker.trigger === input) return;
+  if (input.id === 'pModel') {
+    openPicker(input, 'provider', '', EDIT_ID || '');
+  } else {
+    const botId = input.getAttribute('data-bot-id');
+    openPicker(input, 'bot', botId, providerValueFor(botId));
+  }
+}
+
+// 「拉取模型」按钮：与"点 #pModel"等价，但**无条件**重拉——面板停在 error 态时它是唯一的
+// 重试入口，不能被 openFromInput 的"已展开且同一触发器就早退"挡住（旧版 fetchModels() 就是
+// 无条件重发的）。在途请求仍按 D1 合并，故连点不会打出多个并发请求。
+function refetchProviderModels() {
+  // E-25.3：「拉取模型」是用户显式动作 → 照旧写回清单并触发重建（F4 新模型立即可路由）；
+  // 点模型框只是"看一眼"，走只读查询，不改配置。
+  openPicker(document.getElementById('pModel'), 'provider', '', EDIT_ID || '', true);
+}
+
+function onTriggerInput(e) {
+  const input = e.currentTarget;
+  // 手动键入 = 不再是预填值。**无「面板已展开」限定**：Tab 聚焦后打字、粘贴、浏览器
+  // 自动填充都不触发 click，面板可能根本没开，标志位也必须清掉——否则换 provider 时
+  // 会把用户手改的值当"预填值"覆盖成新 provider 的默认模型。
+  input.setAttribute('data-autofilled', '0');
+  if (pickerRoot().getAttribute('data-open') !== '1' || picker.trigger !== input) return;
+  picker.query = input.value.trim().toLowerCase();
+  renderCandidates(true);
+}
+
+function onTriggerKeydown(e) {
+  const input = e.currentTarget;
+  if (e.key === 'Escape') {
+    if (pickerRoot().getAttribute('data-open') === '1') { e.preventDefault(); closePicker(); }
+    return;
+  }
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  if (pickerRoot().getAttribute('data-open') === '1') return;
+  e.preventDefault();
+  openFromInput(input);
+}
+
+async function setProxy(providerId, on) {
+  const r = await jsonFetch('/api/providers/' + encodeURIComponent(providerId), {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({proxy: !!on})});
+  if (!r.ok) { alert((r.body && r.body.error) || ('失败 ' + r.status)); return; }
+  await load();
+}
+
+// 代号跟踪（9.15）：verified ≥ g 已生效；last_error_generation ≥ g 且有 last_error 显示错误；
+// 超过 D+1 s（D = 3T+11.2，T 缺省 5 s）显示「核验未完成」，之后每 10 s 续轮询。
+const GEN_DEADLINE_MS = (3 * 5 + 11.2 + 1) * 1000;
+let GEN_WATCH = 0;
+function setGenMsg(text, isErr) {
+  const m = document.getElementById('proxyGenMsg');
+  m.textContent = text;
+  m.style.color = isErr ? 'var(--danger)' : 'var(--wxgreen)';
+}
+function showSuspended(list) {
+  const box = document.getElementById('proxySuspended');
+  box.querySelector('span').textContent = list && list.length
+    ? '以下裸名被实例暂停（上游返回 401/402/403/404），重启实例可恢复；带前缀的名字不受影响：' + list.join(', ') : '';
+  box.hidden = !(list && list.length);
+}
+async function watchGeneration(g) {
+  if (!g || g <= GEN_WATCH) return;
+  GEN_WATCH = g;
+  const start = Date.now();
+  setGenMsg('配置已写入，等待实例生效…', false);
+  while (GEN_WATCH === g) {
+    const r = await jsonFetch('/api/proxy/generation');
+    const b = r.body || {};
+    showSuspended(b.suspended);
+    if (b.verified_generation >= g) { setGenMsg('已生效', false); return; }
+    if (b.last_error && b.last_error_generation >= g) {
+      setGenMsg(b.last_error + '。点『同步』可立即重试', true); return;
+    }
+    const late = Date.now() - start > GEN_DEADLINE_MS;
+    if (late) setGenMsg('核验未完成', true);
+    await new Promise(res => setTimeout(res, late ? 10000 : 1000));
+  }
+}
+async function restartProxy() {
+  const btn = document.getElementById('proxyRestartBtn');
+  btn.disabled = true;
+  try {
+    const r = await jsonFetch('/api/proxy/restart', {method: 'POST'});
+    const b = r.body || {};
+    if (r.status === 429) setGenMsg(b.error + '（' + b.retry_after + ' 秒后）', true);
+    else if (!r.ok || r.status === 202) setGenMsg(b.error || ('失败 ' + r.status), true);
+  } finally { btn.disabled = false; }
+  await loadProxy();
+}
+
+function setProxySyncMsg(text, isErr) {
+  const m = document.getElementById('proxySyncMsg');
+  m.textContent = text;
+  m.style.color = isErr ? 'var(--danger)' : 'var(--wxgreen)';
+}
+
+async function syncProxy() {
+  setProxySyncMsg('', false);
+  const btn = document.getElementById('proxySyncBtn');
+  btn.disabled = true;   // 在途禁用，防重复提交
+  let r;
+  try {
+    r = await jsonFetch('/api/proxy/sync', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+  } finally { btn.disabled = false; }
+  if (!r.ok) {
+    // 500：逐字回显服务端的 error；其余（202）按契约文案。
+    setProxySyncMsg((r.body && r.body.error) || ('失败 ' + r.status), true);
+    await loadProxy();
+    return;
+  }
+  if (r.status === 202) {
+    setProxySyncMsg('同步完成：重载核验失败，请检查实例', true);
+  } else {
+    setProxySyncMsg('同步完成：已重载', false);
+  }
+  await loadProxy();
+}
+
+async function bind(botId, providerId, model) {  const r = await jsonFetch('/api/bots/' + encodeURIComponent(botId) + '/provider', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({provider_id: providerId, model: model})});
+  if (!r.ok) { alert((r.body && r.body.error) || ('失败 ' + r.status)); return; }
+  if (r.body && r.body.warning) { alert(r.body.warning); }   // E-15：地址未验证提示
+  await load();
+}
+
+async function resetBot(botId) {
+  const r = await jsonFetch('/api/bots/' + encodeURIComponent(botId) + '/provider/reset', {method: 'POST'});
+  if (!r.ok) { alert((r.body && r.body.error) || ('失败 ' + r.status)); return; }
+  await load();
+}
+
+async function restartBot(botId, force) {
+  const r = await jsonFetch('/api/bots/' + encodeURIComponent(botId) + '/restart', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({force: !!force})});
+  // E-24：以后端响应体的 body.ok 判成败——只看 r.ok 会把“曾经回 200 的失败”误报成已重启。
+  const body = (r.body && typeof r.body === 'object') ? r.body : null;
+  if (!(body && body.ok === true)) {
+    const why = (body && (body.error || (body.restart && body.restart.detail))) || ('HTTP ' + r.status);
+    alert('重启失败：' + why);
+  }
+  await load();
+}
+
+function setSyncAllMsg(text, isErr) {
+  const m = document.getElementById('syncAllMsg');
+  m.className = 'banner ' + (isErr ? 'err' : 'ok');
+  m.textContent = text;
+  m.hidden = !text;
+}
+
+// 裁定补充 rev5 P10：先确认（说明重写 N 只 + 进入待重启、收敛器会重启含已生效的），取消零请求；完成后给成功/失败只数
+async function syncAll() {
+  const n = Object.keys((DATA && DATA.bindings) || {}).length;
+  const go = confirm(
+    '同步全部 bot：将重写 ' + n + ' 只已绑定 bot 的配置（各自 settings.json 的 env）。\n' +
+    '这些 bot 会进入待重启，收敛器下一轮会重启它们的 worker（包括原本已生效的）。\n\n确定继续？');
+  if (!go) return;
+  setSyncAllMsg('', false);
+  const r = await jsonFetch('/api/providers/sync_all', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+  if (!r.ok) {
+    setSyncAllMsg('同步全部 bot 失败：' + ((r.body && r.body.error) || ('失败 ' + r.status)), true);
+    return;
+  }
+  const results = (r.body && Array.isArray(r.body.results)) ? r.body.results : [];
+  const okN = results.filter(x => x && x.ok === true).length;
+  const badN = results.length - okN;
+  const detail = results.filter(x => !(x && x.ok === true))
+    .map(x => (x && x.bot_id) + '（' + ((x && x.error) || '失败') + '）').join('、');
+  setSyncAllMsg('同步全部 bot 完成：成功 ' + okN + ' 只，失败 ' + badN + ' 只' + (detail ? '：' + detail : '') +
+    '。成功的 bot 已进入待重启，收敛器下一轮会重启其 worker。', badN > 0);
+  await load();
+}
+
+async function logout() {
+  await apiFetch('/logout', {method: 'POST'});
+  location.href = '/login';
+}
+
+document.getElementById('saveProviderBtn').addEventListener('click', saveProvider);
+document.getElementById('cancelEditBtn').addEventListener('click', cancelEdit);
+document.getElementById('fetchModelsBtn').addEventListener('click', (e) => {
+  // 拦下这次冒泡：否则紧随其后的"点面板外收起"会立刻把刚展开的面板关上
+  e.stopPropagation();
+  refetchProviderModels();
+});
+document.getElementById('syncAllBtn').addEventListener('click', syncAll);
+document.getElementById('logoutBtn').addEventListener('click', logout);
+document.getElementById('proxySyncBtn').addEventListener('click', syncProxy);
+
+// 组合框自身的交互：关闭按钮、分批追加、点候选、点面板外收起
+document.getElementById('modelPickerClose').addEventListener('click', closePicker);
+document.getElementById('modelPickerMore').addEventListener('click', () => renderCandidates(false));
+document.getElementById('modelPickerList').addEventListener('click', (e) => {
+  const row = e.target.closest('[data-model-id]');
+  if (row) selectCandidate(row.getAttribute('data-model-id'));
+});
+document.addEventListener('click', (e) => {
+  if (pickerRoot().getAttribute('data-open') !== '1') return;
+  if (pickerRoot().contains(e.target) || e.target === picker.trigger) return;
+  closePicker();
+});
+
+// provider 表单那个模型框的展开入口（点框 / 方向键），与「拉取模型」等价
+const pModelInput = document.getElementById('pModel');
+pModelInput.addEventListener('click', (e) => { e.stopPropagation(); openFromInput(e.currentTarget); });
+pModelInput.addEventListener('input', onTriggerInput);
+pModelInput.addEventListener('keydown', onTriggerKeydown);
+
+// 调试访问器：静止态返回 {open:false, scope:"", botId:"", providerId:"", state:"idle", renderedCount:0}
+window.__pickerState = function () {
+  const p = pickerRoot();
+  return {
+    open: p.getAttribute('data-open') === '1',
+    scope: p.getAttribute('data-scope') || '',
+    botId: p.getAttribute('data-bot-id') || '',
+    providerId: p.getAttribute('data-provider-id') || '',
+    state: p.getAttribute('data-state') || '',
+    renderedCount: document.getElementById('modelPickerList')
+      .querySelectorAll('[data-model-id]').length,
+  };
+};
+
+load();
+</script>
+</body>
+</html>
