@@ -3,7 +3,7 @@
 // 要验证的不只是"导入成功"，而是"她接得上"：导入后下一轮请求里要出现旧系统那段里的某句话
 // （增量导入会把该聊天还活着的段标成 needs_seed=1，网关下一轮重新构建前情，把刚导的原话带进去）。
 import { afterEach, expect, test } from 'bun:test'
-import { mkdirSync, utimesSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, utimesSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { Database } from 'bun:sqlite'
 import { FakeTelegram } from '../fakes/fake-telegram'
@@ -22,12 +22,27 @@ afterEach(async () => {
   tg = null; b = null; gw = null
 })
 
-function scalar(path: string, sql: string, ...args: (string | number)[]): unknown {
-  const db = new Database(path, { readonly: true })
+/**
+ * 只读瞄一眼账本的一行。库还没建出来、schema 还没写全（网关刚起、migrate 还在跑）都当作
+ * "还没就绪"返回 null —— 这个函数要能安全地放进 until(() => …) 当等待条件：
+ * until 不会重试回调抛出的错，而 CI 的 macOS 上启动慢一拍，账本还没落盘时只读打开会抛
+ * SQLiteError: unable to open database file（本机跑得快、账本早建好了，所以只在 CI 上现形）。
+ * 真出了别的错照样抛，不吞。
+ */
+function peek(path: string, sql: string, ...args: (string | number)[]): unknown {
+  if (!existsSync(path)) return null // 库还没建出来
+  let db: Database | null = null
   try {
+    db = new Database(path, { readonly: true })
     const row = db.query(sql).get(...(args as never[])) as Record<string, unknown> | null
     return row ? Object.values(row)[0] : null
-  } finally { db.close() }
+  } catch (e) {
+    // 网关刚建库、schema 还没写完的窗口：也当"还没就绪"；wait 的事交给调用方的 until
+    if (/no such table|unable to open|locked/i.test(String(e))) return null
+    throw e
+  } finally {
+    if (db) db.close()
+  }
 }
 
 test('增量导入后，下一轮请求里出现旧系统那段里的某句话（还活着的段重新取前情）', async () => {
@@ -39,20 +54,23 @@ test('增量导入后，下一轮请求里出现旧系统那段里的某句话�
   // 1) 先在新系统聊一轮：建好会话段，needs_seed 在第一次开口时就用掉了（此后是普通续聊）
   gw = new Gateway(bot)
   await gw.start()
+  // 等待条件里读账本必须对"库还没建出来"安全（CI 的 macOS 上启动慢一拍，就是这条路径挂的）
+  expect(peek(join(bot.root, 'state', 'ledger-not-yet.sqlite'), 'SELECT 1 FROM inbound LIMIT 1')).toBeNull()
   tg.pushText(OWNER, '今天怎么样')
   await until(() => prompts(bot).some(p => p.text.includes('今天怎么样')), '第一轮请求')
-  await until(() => Number(scalar(ledger, "SELECT COUNT(*) AS n FROM inbound WHERE chat_id = ? AND state = 'done'", String(OWNER))) === 1, '第一轮处理完')
+  await until(() => Number(peek(ledger, "SELECT COUNT(*) AS n FROM inbound WHERE chat_id = ? AND state = 'done'", String(OWNER))) === 1, '第一轮处理完')
+  expect(existsSync(ledger)).toBe(true)
   const first = prompts(bot).find(p => p.text.includes('今天怎么样'))!.text
   expect(first).not.toContain('旧系统里补的一句关键话')
-  expect(Number(scalar(ledger, "SELECT needs_seed FROM segments WHERE state = 'active'"))).toBe(0)
+  expect(Number(peek(ledger, "SELECT needs_seed FROM segments WHERE state = 'active'"))).toBe(0)
 
   // 2) 停网关（真机上是先切回旧系统；这里直接模拟"切走"）
   await gw.stop()
   gw = null
-  // 心跳文件还在、还很新鲜：导入脚本会以为网关还在跑，把它推到 1 分钟前（网关已经停了，这是实情）
+  // 心跳文件还在、还很新鲜：导入脚本会以为网关还在跑，把它推到 1 分钟前（网关已经停了，这是实情）。
+  // 文件不在也算"没在跑"，跳过就行——别让 utimesSync 对不存在的文件抛 ENOENT
   const hb = join(bot.botDir, 'state', 'heartbeat')
-  const old = new Date(Date.now() - 60_000)
-  utimesSync(hb, old, old)
+  if (existsSync(hb)) { const old = new Date(Date.now() - 60_000); utimesSync(hb, old, old) }
 
   // 3) 旧系统那几天：造旧频道目录与会话文件，记录的时间戳晚于水位线（= 账本里这个聊天的最后一条）
   const home = join(bot.root, 'oldhome')
@@ -63,7 +81,7 @@ test('增量导入后，下一轮请求里出现旧系统那段里的某句话�
   const slug = Bun.spawnSync([PY, '-c', `import chat_history,sys; print(chat_history._project_slug_for(sys.argv[1]))`, chan], { cwd: REPO, env }).stdout.toString().trim()
   const proj = join(home, '.claude', 'projects', slug)
   mkdirSync(proj, { recursive: true })
-  const wm = Number(scalar(ledger, 'SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM inbound WHERE chat_id = ? UNION ALL SELECT MAX(COALESCE(sent_at, created_at)) AS t FROM outbound WHERE chat_id = ?)', String(OWNER), String(OWNER)))
+  const wm = Number(peek(ledger, 'SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM inbound WHERE chat_id = ? UNION ALL SELECT MAX(COALESCE(sent_at, created_at)) AS t FROM outbound WHERE chat_id = ?)', String(OWNER), String(OWNER)))
   expect(wm).toBeGreaterThan(0)
   const t = (ms: number) => new Date(ms).toISOString()
   writeFileSync(join(proj, 's.jsonl'), [
@@ -75,7 +93,7 @@ test('增量导入后，下一轮请求里出现旧系统那段里的某句话�
   expect(r.exitCode).toBe(0)
   expect(r.stdout.toString()).toContain('增量导入')
   // 导入的东西必须被"标成重新取前情"，否则记录只是躺在账本里
-  expect(Number(scalar(ledger, "SELECT needs_seed FROM segments WHERE state = 'active'"))).toBe(1)
+  expect(Number(peek(ledger, "SELECT needs_seed FROM segments WHERE state = 'active'"))).toBe(1)
 
   // 4) 起回来，说下一句：这一轮请求里要能看到旧系统那段里的话
   gw = new Gateway(bot)
@@ -86,5 +104,5 @@ test('增量导入后，下一轮请求里出现旧系统那段里的某句话�
   expect(second).toContain('旧系统里补的一句关键话')
   expect(second).toContain('补料那几天的回复')
   // 用掉之后就归零，不会每轮都重发一遍前情
-  expect(Number(scalar(ledger, "SELECT needs_seed FROM segments WHERE state = 'active'"))).toBe(0)
+  expect(Number(peek(ledger, "SELECT needs_seed FROM segments WHERE state = 'active'"))).toBe(0)
 })
