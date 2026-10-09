@@ -45,6 +45,18 @@ function peek(path: string, sql: string, ...args: (string | number)[]): unknown 
   }
 }
 
+/**
+ * 等账本"读得到"再返回读到的值。peek 在读不到时返回 null，而 Number(null) 是 0 ——
+ * 直接把 Number(peek(...)) 拿去断言，会把"没读到"混成合法值 0（或者用 toBe(0) 时假过）。
+ * 这里把 null 留给 until 重试（CI 的 macOS 上只读打开账本偶发撞上瞬时打不开、schema 尚未就绪），
+ * 等到非 null 就把值交回，值对不对仍由调用方照常断言——错了照样报实际值。
+ * 值包一层对象再回：until 把 falsy 当"还没等到"，读到的值本身可能就是 0。
+ */
+async function peekWhenReady(what: string, path: string, sql: string, ...args: (string | number)[]): Promise<unknown> {
+  const got = await until(() => { const v = peek(path, sql, ...args); return v === null ? null : { v } }, what)
+  return got.v
+}
+
 test('增量导入后，下一轮请求里出现旧系统那段里的某句话（还活着的段重新取前情）', async () => {
   tg = new FakeTelegram()
   b = makeBot(tg, { gw: { burst_window_ms: 0 } })
@@ -62,7 +74,11 @@ test('增量导入后，下一轮请求里出现旧系统那段里的某句话�
   expect(existsSync(ledger)).toBe(true)
   const first = prompts(bot).find(p => p.text.includes('今天怎么样'))!.text
   expect(first).not.toContain('旧系统里补的一句关键话')
-  expect(Number(peek(ledger, "SELECT needs_seed FROM segments WHERE state = 'active'"))).toBe(0)
+  // 等"活跃段可读"再断言：活跃段是第一轮正常收尾的证据，也是导入脚本后面要标"重新取前情"的那一段，
+  // 它不在（比如崩溃后段被作废）要在这里就显形，别让它到导入之后才以"导入没标上"的样子出现。
+  // 读到非 null 就断言值：needs_seed 应该已经用掉（0）——用 Number(null)=0 直接断言会把"没读到"假过掉。
+  const seeded = await peekWhenReady('第一轮收尾、活跃段可读', ledger, "SELECT needs_seed FROM segments WHERE chat_id = ? AND state = 'active'", String(OWNER))
+  expect(Number(seeded)).toBe(0)
 
   // 2) 停网关（真机上是先切回旧系统；这里直接模拟"切走"）
   await gw.stop()
@@ -81,7 +97,8 @@ test('增量导入后，下一轮请求里出现旧系统那段里的某句话�
   const slug = Bun.spawnSync([PY, '-c', `import chat_history,sys; print(chat_history._project_slug_for(sys.argv[1]))`, chan], { cwd: REPO, env }).stdout.toString().trim()
   const proj = join(home, '.claude', 'projects', slug)
   mkdirSync(proj, { recursive: true })
-  const wm = Number(peek(ledger, 'SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM inbound WHERE chat_id = ? UNION ALL SELECT MAX(COALESCE(sent_at, created_at)) AS t FROM outbound WHERE chat_id = ?)', String(OWNER), String(OWNER)))
+  // 水位线也等"读得到"再算：一次性读碰上涨 null 会误报成"算不出水位线"
+  const wm = Number(await peekWhenReady('水位线可读', ledger, 'SELECT MAX(t) AS t FROM (SELECT MAX(ts) AS t FROM inbound WHERE chat_id = ? UNION ALL SELECT MAX(COALESCE(sent_at, created_at)) AS t FROM outbound WHERE chat_id = ?)', String(OWNER), String(OWNER)))
   expect(wm).toBeGreaterThan(0)
   const t = (ms: number) => new Date(ms).toISOString()
   writeFileSync(join(proj, 's.jsonl'), [
@@ -92,8 +109,12 @@ test('增量导入后，下一轮请求里出现旧系统那段里的某句话�
   const r = Bun.spawnSync([PY, join(REPO, 'scripts', 'import_history.py'), bot.name, '--from', chan, '--since', 'auto'], { cwd: REPO, env })
   expect(r.exitCode).toBe(0)
   expect(r.stdout.toString()).toContain('增量导入')
-  // 导入的东西必须被"标成重新取前情"，否则记录只是躺在账本里
-  expect(Number(peek(ledger, "SELECT needs_seed FROM segments WHERE state = 'active'"))).toBe(1)
+  // 导入的东西必须被"标成重新取前情"，否则记录只是躺在账本里。等标记真的可见再断言值：
+  // peek 读不到时返回 null，Number(null) 是 0，一次性读会把它误判成"没标上"——
+  // CI 的 macOS 上只读打开账本偶发撞上瞬时打不开（第 7 轮那次就是这条路径），
+  // peek 把这种"读不到"吞成 null 交给 until 重试，读一次就断言的写法吃不到这层保护。
+  const marked = await peekWhenReady('导入后活跃段可读', ledger, "SELECT needs_seed FROM segments WHERE chat_id = ? AND state = 'active'", String(OWNER))
+  expect(Number(marked)).toBe(1)
 
   // 4) 起回来，说下一句：这一轮请求里要能看到旧系统那段里的话
   gw = new Gateway(bot)
@@ -103,6 +124,7 @@ test('增量导入后，下一轮请求里出现旧系统那段里的某句话�
   const second = prompts(bot).find(p => p.text.includes('接着聊昨天的事'))!.text
   expect(second).toContain('旧系统里补的一句关键话')
   expect(second).toContain('补料那几天的回复')
-  // 用掉之后就归零，不会每轮都重发一遍前情
-  expect(Number(peek(ledger, "SELECT needs_seed FROM segments WHERE state = 'active'"))).toBe(0)
+  // 用掉之后就归零，不会每轮都重发一遍前情（同样等"读得到"再断言值）
+  const used = await peekWhenReady('前情取用后段可读', ledger, "SELECT needs_seed FROM segments WHERE chat_id = ? AND state = 'active'", String(OWNER))
+  expect(Number(used)).toBe(0)
 })
