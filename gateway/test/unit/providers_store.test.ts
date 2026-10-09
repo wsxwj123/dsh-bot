@@ -50,13 +50,16 @@ test('键名：PROVIDER_<规整名大写>_KEY，被占用依次加 _2、_3', () 
   expect(apiKeyEnvFor('my-proxy', ['PROVIDER_MY_PROXY_KEY', 'PROVIDER_MY_PROXY_KEY_2'])).toBe('PROVIDER_MY_PROXY_KEY_3')
 })
 
-test('模型 id：去首尾空白、1–200 个字符；允许非 ASCII（聚合商把渠道写进 id）；空白、控制字符、⟦⟧、超长丢掉', () => {
+test('模型 id：去首尾空白、1–200 个字符；允许非 ASCII（聚合商把渠道写进 id）；空白、控制字符、⟦⟧、零宽与双向控制符、超长丢掉', () => {
   expect(cleanModelId(' ok-1 ')).toBe('ok-1')
   expect(cleanModelId('模型一')).toBe('模型一')
   expect(cleanModelId('[次]deepseek-v4-pro')).toBe('[次]deepseek-v4-pro')
+  expect(cleanModelId('[1000k按次计费]gemini-3.6-flash')).toBe('[1000k按次计费]gemini-3.6-flash')
   expect(cleanModelId('<b>')).toBe('<b>')
   expect(cleanModelId('y'.repeat(200))).toBe('y'.repeat(200))
-  for (const bad of ['', '   ', 'has space', 'bad\nid', 'bad\u0001id', 'bad\u007fid', 'a b', 'x⟦y', 'x⟧y', 'y'.repeat(201)])
+  // U+200B 零宽空格、U+202E 从右到左覆盖、U+FEFF 行首 BOM、U+2066 双向隔离符：能在菜单/日志里伪装模型名
+  for (const bad of ['', '   ', 'has space', 'bad\nid', 'bad\u0001id', 'bad\u007fid', 'a b',
+    'x⟦y', 'x⟧y', 'a​b', 'a‮b', 'a﻿b', 'a⁦b', 'y'.repeat(201)])
     expect(cleanModelId(bad)).toBeNull()
   expect(cleanModelId(5)).toBeNull()
 })
