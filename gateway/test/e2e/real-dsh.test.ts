@@ -56,7 +56,9 @@ afterAll(async () => {
 
 test.skipIf(!available)('真 dsh：只留人设、只有我们自己的 10 个工具、不带隐私字段，回复能发出去', async () => {
   tg.pushText(OWNER, '你好 realA')
-  await until(() => tg.sentTo(OWNER).some(s => s.text === '第二段'), 'reply via real dsh', 60_000)
+  // Windows CI 上真 dsh 首轮冷启动明显更慢（实测有 60 秒还起不来一轮的），放宽到 120 秒；
+  // 断言本身没变——等的还是那两段回复。
+  await until(() => tg.sentTo(OWNER).some(s => s.text === '第二段'), 'reply via real dsh', 120_000)
   // 工具结果回到模型那里（逐段送达情况），这一轮才算结束
   await until(() => llm.requests.find(r => JSON.stringify(r.body.messages).includes('已送达 2/2 段')), 'tool result reached the model', 30_000)
   await until(() => { const l = gw.ledger(); const ok = l.activeSegment(String(OWNER))?.used_tokens; l.close(); return ok }, 'turn finished', 30_000)
@@ -121,7 +123,11 @@ test.skipIf(!available)('真 dsh：用量快到线时来了新消息，先在旧
   expect(sumMsgs).not.toContain('realD')
   const next = llm.requests.find(r => JSON.stringify(r.body.messages).includes('realD'))!
   const users = next.body.messages.filter((m: any) => m.role === 'user')
-  expect(users.length).toBe(1) // 新会话：前情和新消息是同一条用户消息里的两个内容块
+  // 新会话：前情和新消息是同一条用户消息里的两个内容块。失败时把实际内容带出来，
+  // 便于分辨是真差异还是 Windows 上的环境噪声（断言本身不放松）。
+  expect(users.length, `新会话第一轮的用户消息应有 1 条，实际 ${users.length} 条：` +
+    JSON.stringify(users.map((m: any) => String(JSON.stringify(m.content)).slice(0, 200))))
+    .toBe(1)
   const first = JSON.stringify(users[0].content)
   expect(first).toContain('⟦之前聊天的交接摘要')
   expect(first).toContain('真dsh摘要')
