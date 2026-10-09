@@ -10,7 +10,7 @@ export type TurnKind = 'message' | 'retry' | 'nudge' | 'summary'
 export type TurnState = 'preparing' | 'sent' | 'ok' | 'error' | 'cancelled' | 'crashed' | 'aborted'
 export type SegmentState = 'active' | 'closed' | 'abandoned'
 export type OutboundState = 'pending' | 'sent' | 'failed' | 'ambiguous'
-export type OutboundKind = 'text' | 'photo' | 'document' | 'reaction' | 'system' | 'api'
+export type OutboundKind = 'text' | 'photo' | 'document' | 'animation' | 'sticker' | 'reaction' | 'system' | 'api'
 
 export type InboundRow = {
   id: number
@@ -391,10 +391,10 @@ export class Ledger {
   markSilent(id: number, reason: string): void {
     this.db.query('UPDATE turns SET silent = 1, silent_reason = ? WHERE id = ?').run(reason.slice(0, 500), id)
   }
-  /** 这一串（原始轮 + 补救轮）里已经送达或可能送达的段数。大于 0 就绝不重试。 */
+  /** 这一串（原始轮 + 补救轮）里已经送达或可能送达的段数。大于 0 就绝不重试。表情包（animation/sticker）本身就是一次回复，也算。 */
   deliveredInChain(rootId: number): number {
     const r = this.db.query<{ n: number }, [number]>(
-      `SELECT COUNT(*) AS n FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind IN ('text','photo','document') AND o.state IN ('sent','ambiguous','pending')`).get(rootId)
+      `SELECT COUNT(*) AS n FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind IN ('text','photo','document','animation','sticker') AND o.state IN ('sent','ambiguous','pending')`).get(rootId)
     return r?.n ?? 0
   }
   /** 这一串里已经发出（或可能发出）的文字段，用来拦住模型把同样的话再发一遍 */
@@ -405,7 +405,7 @@ export class Ledger {
   /** 这一轮（含重试、提醒）已经发出、可能发出或正在发的文件 */
   sentFilesInChain(rootId: number): string[] {
     return this.db.query<{ file: string }, [number]>(
-      `SELECT o.file FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind IN ('photo','document') AND o.state IN ('sent','ambiguous','pending') AND o.file IS NOT NULL`).all(rootId).map(r => r.file)
+      `SELECT o.file FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind IN ('photo','document','animation','sticker') AND o.state IN ('sent','ambiguous','pending') AND o.file IS NOT NULL`).all(rootId).map(r => r.file)
   }
   clearSilent(rootId: number): void {
     this.db.query('UPDATE turns SET silent = 0 WHERE root_id = ?').run(rootId)
