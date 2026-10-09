@@ -385,6 +385,62 @@ export function carryBack(ctx: Ctx, payload: LedgerPayload, deps: SwitchDeps): C
   return { ok: true, memoryAdded, memories: fresh.length, promises: merged.added, notes }
 }
 
+/* ── 配置里的停用标记（enabled） ─────────────────────────── */
+
+/** 切回旧栈时写进配置的那行：与手工写的（bot3.yml）一字不差 */
+export const ENABLED_FALSE_LINE = 'enabled: false   # 现在跑在旧栈（claudebotlife）；切回新系统时删掉这行'
+
+const ENABLED_RE = /^enabled[ \t]*:/
+const DISPATCHER_PORT_RE = /^dispatcher_port[ \t]*:/
+
+/**
+ * 一行 enabled 的值算不算"启用"。口径与 dsh-bot 侧的 config_loader.list_enabled_bots 相同：
+ * 没写字段 = 启用；只有显式假值（false/no/off/0）才停；`enabled:` 空值按没写算；
+ * 带引号的 `"false"` 是字符串（非空即启用），不是假值。
+ */
+export function enabledValueOf(line: string): boolean {
+  const rest = line.slice(line.indexOf(':') + 1)
+  const ci = rest.search(/(^|[ \t])#/)
+  const v = (ci >= 0 ? rest.slice(0, ci) : rest).trim()
+  if (v === '') return true
+  if (v.startsWith('"') || v.startsWith("'")) {
+    const end = v.indexOf(v[0]!, 1)
+    return (end >= 0 ? v.slice(1, end) : v.slice(1)).trim() !== ''
+  }
+  return !/^(false|no|off|0)$/i.test(v)
+}
+
+/**
+ * 顶层 enabled 行的行级编辑：切回旧栈写 false（有就改值、没有就插在 dispatcher_port 后面），
+ * 切回新系统把这行删掉。只动这一行，文件其它字节原样（缩进与注释风格跟手工写的一致）。
+ */
+export function editEnabledYml(text: string, on: boolean): { text: string; changed: boolean; what: string } {
+  const lines = text.split('\n')
+  const i = lines.findIndex(l => ENABLED_RE.test(l))
+  if (on) {
+    if (i < 0) return { text, changed: false, what: '没有 enabled 行（本来就按新系统算），不用改' }
+    const gone = lines[i]!.trim()
+    lines.splice(i, 1)
+    return { text: lines.join('\n'), changed: true, what: `删掉第 ${i + 1} 行「${gone}」` }
+  }
+  if (i >= 0) {
+    const line = lines[i]!
+    if (!enabledValueOf(line)) return { text, changed: false, what: `第 ${i + 1} 行已经是停用（${line.trim()}），不用改` }
+    // 只把值换成 false：冒号后的缩进、值两边的空白、行尾注释原样保留
+    const head = line.slice(0, line.indexOf(':') + 1)
+    const rest = line.slice(head.length)
+    const ci = rest.search(/(^|[ \t])#/)
+    const value = ci >= 0 ? rest.slice(0, ci) : rest
+    const comment = ci >= 0 ? rest.slice(ci) : ''
+    lines[i] = `${head}${/^[ \t]*/.exec(value)![0]}false${/[ \t]*$/.exec(value)![0]}${comment}`
+    return { text: lines.join('\n'), changed: true, what: `第 ${i + 1} 行改成 enabled: false` }
+  }
+  const dp = lines.findIndex(l => DISPATCHER_PORT_RE.test(l))
+  const at = dp >= 0 ? dp + 1 : 0
+  lines.splice(at, 0, ENABLED_FALSE_LINE)
+  return { text: lines.join('\n'), changed: true, what: `在第 ${at + 1} 行插入 enabled: false（${dp >= 0 ? 'dispatcher_port 后面' : '文件开头'}）` }
+}
+
 /* ── 动作 ─────────────────────────────────────────────── */
 
 export type Action =
@@ -393,6 +449,7 @@ export type Action =
   | { kind: 'bootout'; label: string; what: string }
   | { kind: 'install'; what: 'gateway' | 'jobs' }
   | { kind: 'carry-back'; payload: LedgerPayload }
+  | { kind: 'set-enabled'; on: boolean }
 
 export function describeAction(a: Action, ctx: Ctx, deps: SwitchDeps): string {
   switch (a.kind) {
@@ -406,6 +463,11 @@ export function describeAction(a: Action, ctx: Ctx, deps: SwitchDeps): string {
       return `${ctx.bun} gateway/scripts/autostart.ts ${a.what === 'gateway' ? 'install' : 'install-jobs'} ${ctx.configPath}`
     case 'carry-back':
       return `把新系统期间的摘要、长期记忆写进 ${oldMemoryPath(deps.home, ctx.oldChannelDir)}，把 ${a.payload.pending.length} 条没到点的承诺写进 ${oldPromisesPath(ctx.oldChannelDir)}（只追加，不重写）`
+    case 'set-enabled': {
+      const text = deps.fs.read(ctx.configPath)
+      const what = text === null ? '读不了这个文件，做不了' : editEnabledYml(text, a.on).what
+      return `${ctx.configPath}：${what}`
+    }
   }
 }
 
@@ -440,6 +502,30 @@ export function execAction(a: Action, ctx: Ctx, deps: SwitchDeps): { ok: boolean
         return { ok: false, note: `往旧侧写摘要/记忆/承诺时出错（${(e as Error).name}）` }
       }
     }
+    case 'set-enabled': {
+      const text = deps.fs.read(ctx.configPath)
+      if (text === null) return { ok: false, note: `读不了配置 ${ctx.configPath}，enabled 没改` }
+      const e = editEnabledYml(text, a.on)
+      if (!e.changed) return { ok: true, note: `${ctx.configPath}：${e.what}` }
+      try {
+        deps.fs.write(ctx.configPath, e.text)
+        return { ok: true, note: `${ctx.configPath}：${e.what}` }
+      } catch (err) {
+        return { ok: false, note: `配置写不进去（${(err as Error).name}），enabled 没改` }
+      }
+    }
+  }
+}
+
+/** 标/清 enabled 的收尾：失败不拦路（它只是给共用服务/管理台看的标记），但报告里要说清楚 */
+const isSetEnabled = (x: Action): x is Extract<Action, { kind: 'set-enabled' }> => x.kind === 'set-enabled'
+
+function applySetEnabled(a: Extract<Action, { kind: 'set-enabled' }>, ctx: Ctx, deps: SwitchDeps, done: string[], p: (l: string) => void): void {
+  const r = execAction(a, ctx, deps)
+  if (r.ok) { done.push(r.note); p(`  · ${r.note}`) }
+  else {
+    p(`  ⚠️  ${r.note}（手工补：${a.on ? '删掉配置顶层的 enabled 行' : `在配置顶层加一行 ${ENABLED_FALSE_LINE.split('   #')[0]}`}）`)
+    done.push(`配置标记：失败（${r.note}）`)
   }
 }
 
@@ -489,6 +575,8 @@ export function switchToDsh(ctx: Ctx, deps: SwitchDeps, opts: { dryRun: boolean;
   const actions: Action[] = []
   if (old.running) actions.push({ kind: 'stop-old' })
   else p(`  · 旧侧 ${ctx.oldName} 没在跑，跳过 stop-bot.sh`)
+  // 旧侧确认停住之后才清停用标记：中途失败时配置还指着旧栈，共用服务不会误把它当新系统的 bot
+  actions.push({ kind: 'set-enabled', on: true })
   actions.push({ kind: 'install', what: 'gateway' }, { kind: 'install', what: 'jobs' })
 
   const back = `bun gateway/scripts/switch.ts back ${ctx.bot}`
@@ -527,6 +615,7 @@ export function switchToDsh(ctx: Ctx, deps: SwitchDeps, opts: { dryRun: boolean;
     done.push('确认旧侧已停（停用标记在、tmux 会话没了、端口关了）')
     p(`  ✓ ${done[done.length - 1]}`)
   }
+  for (const a of actions.filter(isSetEnabled)) applySetEnabled(a, ctx, deps, done, p)
   for (const a of actions.filter(x => x.kind === 'install')) {
     const r = execAction(a, ctx, deps)
     if (!r.ok) {
@@ -578,7 +667,7 @@ export function switchBack(ctx: Ctx, deps: SwitchDeps, opts: { dryRun: boolean; 
     if (others.length) p(`  · 导演（所有新系统 bot 共用的）没停：新系统里还有 ${others.join('、')} 在跑，群聊还要用它`)
     else actions.push({ kind: 'bootout', label: DIRECTOR_LABEL, what: '群聊导演' })
   }
-  actions.push({ kind: 'carry-back', payload }, { kind: 'start-old' })
+  actions.push({ kind: 'set-enabled', on: false }, { kind: 'carry-back', payload }, { kind: 'start-old' })
 
   const back = `bun gateway/scripts/switch.ts to-dsh ${ctx.bot}`
   const todo = actions.map(a => describeAction(a, ctx, deps))
@@ -615,6 +704,8 @@ export function switchBack(ctx: Ctx, deps: SwitchDeps, opts: { dryRun: boolean; 
   }
   done.push('确认新侧已停（launchd 不认在跑，心跳也停了）')
   p(`  ✓ ${done[done.length - 1]}`)
+  // 新侧停住了才标停用：共用服务（jiwen、memory-compactor）和管理台按这行认"谁是新系统的 bot"
+  for (const a of actions.filter(isSetEnabled)) applySetEnabled(a, ctx, deps, done, p)
   for (const a of actions.filter(x => x.kind === 'carry-back' || x.kind === 'start-old')) {
     const r = execAction(a, ctx, deps)
     if (!r.ok) {
@@ -646,6 +737,8 @@ export function nodeSwitchFs(): SwitchFs {
     read: (p) => { try { return readFileSync(p, 'utf8') } catch { return null } },
     write: (p, text, mode) => {
       mkdirSync(dirname(p), { recursive: true })
+      // 没显式给权限、而目标文件已经存在：沿用它的权限——只改内容，不顺手把文件权限也改掉
+      if (mode === undefined) { try { mode = statSync(p).mode & 0o777 } catch {} }
       const tmp = `${p}.tmp-${process.pid}`
       try {
         try { rmSync(tmp, { force: true }) } catch {}

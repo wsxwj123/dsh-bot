@@ -8,6 +8,8 @@
 //
 // back（新 → 旧）会把 dsh 期间的收获带回旧侧：最近一份摘要 + 最近的原话 + 长期记忆追加进旧 bot 的
 // MEMORY.md（auto-memory 路径，只追加一个带日期的交接小节），没到点的承诺并进旧侧的 .promises.json。
+// 配置里的 enabled 也一起管：back 在停完新侧后给配置顶层标 enabled: false（共用服务与管理台按这行认
+// "谁是新系统的 bot"），to-dsh 在停完旧侧后把这行删掉；--dry-run 只打印将改哪一行，不动文件。
 import { existsSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join, resolve } from 'path'
@@ -29,8 +31,8 @@ const has = (n: string) => rest.includes(`--${n}`)
 function usage(): number {
   console.log('用法：bun gateway/scripts/switch.ts to-dsh <新 bot 名> [--config <配置文件>] [--old <旧 bot 名>] [--old-channel <旧频道目录>] [--no-stop-old] [--wait-seconds N] [--dry-run]')
   console.log('      bun gateway/scripts/switch.ts back   <新 bot 名> [--config <配置文件>] [--old <旧 bot 名>] [--old-channel <旧频道目录>] [--wait-seconds N] [--dry-run]')
-  console.log('  to-dsh：停旧 bot → 起新 bot 的网关与主动消息自启 → 等网关就绪 → 抽查提示')
-  console.log('  back  ：停新 bot（plist 留着）→ 把摘要/记忆/承诺带回旧侧 → 起旧 bot → 抽查提示')
+  console.log('  to-dsh：停旧 bot → 清掉配置里的 enabled 停用标记 → 起新 bot 的网关与主动消息自启 → 等网关就绪 → 抽查提示')
+  console.log('  back  ：停新 bot（plist 留着）→ 给配置标 enabled: false → 把摘要/记忆/承诺带回旧侧 → 起旧 bot → 抽查提示')
   console.log('  两个方向都能 --dry-run 先看一遍；手册见 docs/dsh-migration/CUTOVER.md')
   return 2
 }

@@ -2,11 +2,12 @@
 // 断言两个方向的动作顺序与"先停后起"、--dry-run 不产生动作、互斥中止、幂等，
 // 以及 back 方向带回旧侧的三样东西（摘要/记忆/承诺）写对位置、重复跑不重复追加。
 import { expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import {
-  EMPTY_PAYLOAD, nodeSwitchFs, oldMemoryPath, oldPromisesPath, switchBack, switchToDsh,
+  EMPTY_PAYLOAD, ENABLED_FALSE_LINE, editEnabledYml, enabledValueOf, nodeSwitchFs, oldMemoryPath, oldPromisesPath,
+  switchBack, switchToDsh,
   type Ctx, type LedgerPayload, type Run, type SwitchDeps, type SwitchFs,
 } from '../../src/switch'
 
@@ -22,13 +23,21 @@ const DIRECTOR = 'com.dsh-bot.director'
 class MapFs implements SwitchFs {
   files = new Map<string, { text: string; mtime: number }>()
   launchAgents: string[] = []
+  /** 写过的路径（断言"没写"用） */
+  writes: string[] = []
+  /** 等于某个路径时 write 抛错（模拟配置写不进去） */
+  failWrite = ''
   /** 停用标记的真相在 world.disabled（stop-bot.sh 会翻它），MapFs 现读它 */
   marker = ''
   world: World | null = null
   heartbeatPath = ''
   exists(p: string): boolean { return (this.marker !== '' && p === this.marker) ? !!this.world!.disabled : this.files.has(p) }
   read(p: string): string | null { return this.files.get(p)?.text ?? null }
-  write(p: string, text: string, _mode?: number): void { this.files.set(p, { text, mtime: NOW }) }
+  write(p: string, text: string, _mode?: number): void {
+    if (this.failWrite === p) throw new Error('模拟写不进去')
+    this.writes.push(p)
+    this.files.set(p, { text, mtime: NOW })
+  }
   mkdirp(_p: string): void {}
   mtimeMs(p: string): number | null { return p === this.heartbeatPath ? this.world!.heartbeatAt : this.files.get(p)?.mtime ?? null }
   list(_p: string): string[] { return this.launchAgents }
@@ -333,4 +342,131 @@ test('back：旧 .promises.json 是坏 JSON → 一个字都不覆盖，旧侧�
     expect(w.oldSessions).toEqual([`tg-${OLD}-dispatcher`])
     expect(printed(w)).toContain('不是能读的 JSON')
   } finally { r.cleanup() }
+})
+
+/* ── 配置里的 enabled：切回旧栈标停用、切回新系统清掉 ─── */
+
+const CFG_PORT = 'dispatcher_port: 17951   # 本机接口端口，只听 127.0.0.1；每个 bot 不一样'
+const CFG_BODY = [
+  'id: bot5',
+  'bot_channel_path: "/tmp/x"',
+  CFG_PORT,
+  'life_config: /Users/x/claudebotlife/configs/bot5.yml',
+  '',
+  'brain:',
+  '  provider: deepseek-official',
+  '',
+].join('\n')
+/** CFG_BODY 加上停用行（手工切回旧栈后的样子） */
+const CFG_STOPPED = CFG_BODY.replace(`${CFG_PORT}\n`, `${CFG_PORT}\n${ENABLED_FALSE_LINE}\n`)
+
+function withCfg(w: World, body: string): { fs: MapFs; path: string } {
+  const fs = new MapFs()
+  const path = makeCtx(w.home).configPath
+  fs.files.set(path, { text: body, mtime: NOW })
+  return { fs, path }
+}
+
+test('back：新侧停住后把配置标成 enabled: false（插在 dispatcher_port 后面，其它字节不动）', () => {
+  const w = makeWorld()
+  const { fs, path } = withCfg(w, CFG_BODY)
+  expect(switchBack(makeCtx(w.home), makeDeps(w, { fs }), { dryRun: false, waitSeconds: 30 })).toBe(0)
+  expect(fs.files.get(path)!.text).toBe(CFG_STOPPED)
+  const text = printed(w)
+  expect(text.indexOf('确认新侧已停')).toBeLessThan(text.indexOf('插入 enabled: false'))
+  expect(text.indexOf('插入 enabled: false')).toBeLessThan(text.indexOf('已拉起'))
+})
+
+test('back：已经是 enabled: false → 一个字节都不动，连写都不写', () => {
+  const w = makeWorld()
+  const { fs, path } = withCfg(w, CFG_STOPPED)
+  expect(switchBack(makeCtx(w.home), makeDeps(w, { fs }), { dryRun: false, waitSeconds: 30 })).toBe(0)
+  expect(fs.files.get(path)!.text).toBe(CFG_STOPPED)
+  expect(fs.writes).not.toContain(path)
+  expect(printed(w)).toContain('已经是停用')
+})
+
+test('back：enabled: true 改成 false，行尾注释照旧', () => {
+  const w = makeWorld()
+  const { fs, path } = withCfg(w, 'id: bot5\nenabled: true   # 临时开着\nbrain:\n  provider: x\n')
+  expect(switchBack(makeCtx(w.home), makeDeps(w, { fs }), { dryRun: false, waitSeconds: 30 })).toBe(0)
+  expect(fs.files.get(path)!.text).toBe('id: bot5\nenabled: false   # 临时开着\nbrain:\n  provider: x\n')
+})
+
+test('to-dsh：旧侧停住后把配置里的 enabled 行删掉', () => {
+  const w = makeWorld()
+  const { fs, path } = withCfg(w, CFG_STOPPED)
+  expect(switchToDsh(makeCtx(w.home), makeDeps(w, { fs }), { dryRun: false, stopOld: true, waitSeconds: 30 })).toBe(0)
+  expect(fs.files.get(path)!.text).toBe(CFG_BODY)
+})
+
+test('to-dsh：配置里没有 enabled 行 → 一个字节都不动', () => {
+  const w = makeWorld()
+  const { fs, path } = withCfg(w, CFG_BODY)
+  expect(switchToDsh(makeCtx(w.home), makeDeps(w, { fs }), { dryRun: false, stopOld: true, waitSeconds: 30 })).toBe(0)
+  expect(fs.files.get(path)!.text).toBe(CFG_BODY)
+  expect(fs.writes).not.toContain(path)
+  expect(printed(w)).toContain('不用改')
+})
+
+test('两个方向 --dry-run：只打印将改哪一行，配置文件一个字节都不动', () => {
+  const w = makeWorld()
+  const back = withCfg(w, CFG_BODY)
+  expect(switchBack(makeCtx(w.home), makeDeps(w, { fs: back.fs }), { dryRun: true, waitSeconds: 30 })).toBe(0)
+  expect(back.fs.files.get(back.path)!.text).toBe(CFG_BODY)
+  expect(back.fs.writes).toEqual([])
+  expect(printed(w)).toContain('在第 4 行插入 enabled: false')
+  expect(printed(w)).toContain('这次没动任何东西')
+
+  const w2 = makeWorld()
+  const to = withCfg(w2, CFG_STOPPED)
+  expect(switchToDsh(makeCtx(w2.home), makeDeps(w2, { fs: to.fs }), { dryRun: true, stopOld: true, waitSeconds: 30 })).toBe(0)
+  expect(to.fs.files.get(to.path)!.text).toBe(CFG_STOPPED)
+  expect(to.fs.writes).toEqual([])
+  expect(printed(w2)).toContain('删掉第 4 行')
+})
+
+test('back：配置写不进去 → 只警告，旧侧照常起回来', () => {
+  const w = makeWorld()
+  const { fs, path } = withCfg(w, CFG_BODY)
+  fs.failWrite = path
+  expect(switchBack(makeCtx(w.home), makeDeps(w, { fs }), { dryRun: false, waitSeconds: 30 })).toBe(0)
+  expect(printed(w)).toContain('配置写不进去')
+  expect(w.oldSessions).toEqual([`tg-${OLD}-dispatcher`])
+})
+
+test('back：真文件系统上写 enabled —— 其它字节与文件权限都不动', () => {
+  const r = realWorld()
+  try {
+    const w = makeWorld({ home: r.home })
+    const cfgPath = join(r.home, 'configs', 'bot5.yml')
+    mkdirSync(dirname(cfgPath), { recursive: true })
+    writeFileSync(cfgPath, CFG_BODY)
+    chmodSync(cfgPath, 0o600)
+    const ctx = { ...makeCtx(r.home), configPath: cfgPath }
+    const deps = { ...makeDeps(w), fs: nodeSwitchFs() }
+    expect(switchBack(ctx, deps, { dryRun: false, waitSeconds: 30 })).toBe(0)
+    expect(readFileSync(cfgPath, 'utf8')).toBe(CFG_STOPPED)
+    if (process.platform !== 'win32') expect(statSync(cfgPath).mode & 0o777).toBe(0o600)
+  } finally { r.cleanup() }
+})
+
+test('enabled 行的判定与改写：引号、注释、缩进都不误伤（口径与 list_enabled_bots 一致）', () => {
+  const cases: [string, boolean][] = [
+    ['enabled: false', false],
+    ['enabled: False', false],
+    ['enabled: no', false],
+    ['enabled: OFF', false],
+    ['enabled: 0', false],
+    ['enabled: false   # 切回新系统时删掉这行', false],
+    ['enabled: true', true],
+    ['enabled:', true],
+    ['enabled: "false"', true],
+    ['enabled: ""', false],
+  ]
+  for (const [line, on] of cases) expect(`${line} → ${enabledValueOf(line)}`).toBe(`${line} → ${on}`)
+  // 缩进的是别的段里的键，不算顶层：to-dsh 不动它；back 另在文件开头补一行顶层的
+  const indented = 'gateway:\n  enabled: false\n'
+  expect(editEnabledYml(indented, true)).toEqual({ text: indented, changed: false, what: expect.any(String) })
+  expect(editEnabledYml(indented, false).text).toBe(`${ENABLED_FALSE_LINE}\n${indented}`)
 })
