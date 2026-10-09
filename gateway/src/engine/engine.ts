@@ -592,8 +592,11 @@ export class Engine {
 
   private async ensureDsh(): Promise<void> {
     if (this.restarting) await this.restarting
-    if (this.dsh.running) return
+    // 正在启动中的 dsh：必须等它启动完再判断。启动期间 running 已为真（proc/conn 建好就真），
+    // 但 promptKey / fingerprint 要等 start 返回后才更新；不等的话会拿"上一代的 promptKey"去比
+    // "提示词变了没"，漏掉人设/路由变更的换段与交接摘要（CI Windows 慢启动窗口里抓到的竞态）。
     if (this.dshStarting) return this.dshStarting
+    if (this.dsh.running) return
     const wait = this.dshNextTryAt - Date.now()
     if (wait > 0) throw new Error(`dsh restart backoff ${wait}ms`)
     this.dshStarting = (async () => {
