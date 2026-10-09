@@ -71,7 +71,7 @@ test.skipIf(!available)('真 dsh：只留人设、只有我们自己的 10 个�
   expect(systemText).not.toContain('MCP resource')
   // 除我们自己的 10 个工具外，还有 dsh 的 skill 工具：人设分层后按需技能要它来加载
   // （技能根只指到本 bot 的 skills 目录，见 profile.ts 的 skill-filesystem 行）。
-  expect(body.tools.map((t: any) => t.function.name).sort()).toEqual(['mcp__tg__commitment_cancel', 'mcp__tg__commitment_create', 'mcp__tg__commitment_list', 'mcp__tg__generate_image', 'mcp__tg__image_guide', 'mcp__tg__moments', 'mcp__tg__react', 'mcp__tg__remember', 'mcp__tg__reply', 'mcp__tg__stay_silent', 'skill'])
+  expect(body.tools.map((t: any) => t.function.name).sort()).toEqual(['mcp__tg__commitment_cancel', 'mcp__tg__commitment_create', 'mcp__tg__commitment_list', 'mcp__tg__generate_image', 'mcp__tg__image_guide', 'mcp__tg__moments', 'mcp__tg__react', 'mcp__tg__remember', 'mcp__tg__reply', 'mcp__tg__stay_silent', 'mcp__tg__sticker', 'skill'])
   const raw = JSON.stringify(body)
   expect(raw).not.toContain('dsh_session_log')
   expect(raw).not.toContain('dsh_plugin_packages')
