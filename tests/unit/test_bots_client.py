@@ -21,9 +21,14 @@ TG_TOKEN = "123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # §6.0 给的形�
 
 @pytest.fixture(autouse=True)
 def _no_seams(monkeypatch):
-    """任何用例都不许继承外部 env 的接缝值与真实端口。"""
+    """任何用例都不许继承外部 env 的接缝值与真实端口。
+
+    `HUB_CONFIGS_DSH_DIR=off`：管理台默认读新旧两套配置（moment/config_sources），
+    这里钉死只读 `HUB_CONFIGS_DIR`，别让用例摸到真实 `~/.dsh-bot/configs`。
+    """
     for k in ("HUB_BOTS_FILE", "HUB_RESTART_CMD", "DISPATCHER_PORT_CHENLULU"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", "off")
 
 
 @pytest.fixture
@@ -65,21 +70,25 @@ def test_名单读不出来一律抛异常(monkeypatch, tmp_path, raw):
         bots_client.list_bots()
 
 
-def test_未设接缝时走真实配置(monkeypatch):
+def test_未设接缝时走真实配置(monkeypatch, tmp_path):
     """未设 HUB_BOTS_FILE 就该回落 config_loader，与不存在该变量时行为一致。
 
-    并锁住 `include_disabled=True`：管理台列表必须含被停用的 bot，
-    否则停了以后它从页面消失，再也点不回来。
+    并锁住两点：`include_disabled=True`（管理台列表必须含被停用的 bot，
+    否则停了以后它从页面消失，再也点不回来）；`dirs` 传的是**两套配置根**
+    （混跑期新旧系统都要读，同名以新系统为准）。
     """
     seen = {}
+    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(tmp_path / "dsh"))
 
-    def fake(include_disabled=False):
+    def fake(include_disabled=False, dirs=None):
         seen["include_disabled"] = include_disabled
+        seen["dirs"] = dirs
         return [{"_bot_id": "chenlulu", "display_name": "陈璐璐"}]
 
     monkeypatch.setattr("config_loader.list_enabled_bots", fake)
     assert bots_client.list_bots() == [{"id": "chenlulu", "display_name": "陈璐璐"}]
     assert seen["include_disabled"] is True
+    assert [s for s, _d in seen["dirs"]] == ["legacy", "dsh"]
 
 
 @pytest.mark.parametrize("env,expect", [("18000", 18000), ("", None), ("abc", None),

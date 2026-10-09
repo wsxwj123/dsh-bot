@@ -24,6 +24,8 @@ def cfgdir(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(d))
     monkeypatch.setattr(config_loader, "CONFIGS_DIR", str(d))
+    # 管理台名单默认还读新系统那份（~/.dsh-bot/configs）；这里关掉，别让用例摸到真实目录
+    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", "off")
     for k in list(os.environ):
         if k.startswith("DISPATCHER_PORT_"):
             monkeypatch.delenv(k, raising=False)

@@ -46,6 +46,20 @@ Accepted = namedtuple("Accepted", "job_id started_at busy")
 
 # ---------------------------------------------------------------- 名单与端口
 
+def _source_roots():
+    """管理台读的配置根：旧系统一份 + 新系统一份（``moments/config_sources``）。
+
+    新旧混跑期面板要同时管两边的 bot，读取面统一走这里；单个根不存在时
+    读取端会跳过，不需要调用方特判。
+    """
+    from moments import config_sources       # 延迟 import：与 bots_registry 同一理由
+    return config_sources.roots()
+
+
+def _root_dirs():
+    return [str(d) for _source, d in _source_roots()]
+
+
 def bot_ports():
     """``{bot_id: port}``，**现读注册表**（唯一事实源 = ``configs/*.yml``），加 bot 零代码改动。
 
@@ -54,7 +68,7 @@ def bot_ports():
     # ponytail: 每次现读，bot 数量是个位数；真到成百上千再谈缓存。
     """
     import bots_registry      # 延迟 import：仓库根模块，别在 moments 包导入期就拉进来
-    return bots_registry.ports()
+    return bots_registry.ports(dirs=_root_dirs())
 
 
 def _entry(bot_id, display_name):
@@ -75,12 +89,16 @@ def list_bots():
     **含被停用的 bot**（``include_disabled=True``）：管理台是唯一能把它启用回来的地方，
     从列表里消失就等于停了以后再也点不回来。哪些被停了由 ``disabled_ids()`` 另外给，
     不塞进行里 —— 行的字段集是 §6.1 的契约。
+
+    **含新旧两套配置**：混跑期面板同时管两边的 bot（来源见 ``bot_sources()``），
+    同名以新系统那份为准。行的形状不变，来源不在这个出口上带。
     """
     path = os.environ.get("HUB_BOTS_FILE")
     if not path:
         import config_loader          # 延迟 import：名单是请求期才要的，别拖慢模块导入
         return [_entry(c.get("_bot_id"), c.get("display_name"))
-                for c in config_loader.list_enabled_bots(include_disabled=True)]
+                for c in config_loader.list_enabled_bots(include_disabled=True,
+                                                         dirs=_source_roots())]
     with open(path, encoding="utf-8") as f:
         raw = json.load(f)
     if not isinstance(raw, list):
@@ -95,14 +113,37 @@ def list_bots():
 
 def disabled_ids():
     """被 ``enabled: false`` 停用的 bot id 列表（排序后的）。读不出配置就回空 —— 停用标记
-    查不到时按"都启用"显示，比让整个列表 500 好；行本身的在线状态照样如实探活。"""
+    查不到时按"都启用"显示，比让整个列表 500 好；行本身的在线状态照样如实探活。
+
+    新旧两套配置都算；同名以新系统那份的 enabled 为准（``_scan`` 的覆盖规则）。
+    """
     if os.environ.get("HUB_BOTS_FILE"):
         return []                    # 名单被注入替换（测试态）：配置目录与它无关，不猜
     try:
         import bots_registry
-        return sorted(bots_registry.disabled_ids())
+        return sorted(bots_registry.disabled_ids(dirs=_root_dirs()))
     except Exception:
         return []
+
+
+def bot_sources():
+    """``{bot_id: {"source": "legacy"|"dsh", "shadowed": bool}}``：给 /hub/api/bots 标来源用。
+
+    - ``source``：这份配置来自旧系统还是新系统；
+    - ``shadowed``：两套里同名，**新系统那份生效**、旧那份被压住了（页面据此提示覆盖关系）。
+
+    读不出来回 ``{}``（来源标注缺失不该把名单本身拖成 500）。``HUB_BOTS_FILE`` 注入名单时
+    也回 ``{}``：那份名单是测试接缝，与配置目录无关，不猜来源。
+    """
+    if os.environ.get("HUB_BOTS_FILE"):
+        return {}
+    try:
+        import config_loader
+        rows = config_loader.list_enabled_bots(include_disabled=True, dirs=_source_roots())
+        return {c["_bot_id"]: {"source": c.get("_source"),
+                               "shadowed": bool(c.get("_shadowed"))} for c in rows}
+    except Exception:
+        return {}
 
 
 def bot_port(bot_id):

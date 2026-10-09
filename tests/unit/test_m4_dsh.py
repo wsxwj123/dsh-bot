@@ -63,7 +63,7 @@ class _FakeGateway(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def gateway(tmp_path, monkeypatch):
-    """新系统 bot5（state 里有口令和端口）+ 旧系统 bot1（没有），configs 指到 tmp"""
+    """新系统 bot5（state 里有口令和端口）+ 旧系统 bot1（没有）；两套配置目录都指到 tmp"""
     _FakeGateway.calls = []
     _FakeGateway.model = {"provider": "deepseek-official", "model": "deepseek-flash"}
     srv = HTTPServer(("127.0.0.1", 0), _FakeGateway)
@@ -75,11 +75,16 @@ def gateway(tmp_path, monkeypatch):
     (bot / "state" / "api.port").write_text(str(srv.server_port), encoding="utf-8")
     old = tmp_path / "old" / "channel"
     old.mkdir(parents=True)
+    # bot5 在新系统那份配置目录、bot1 在旧系统那份：管理台两套都读（moments/config_sources），
+    # 但 /hub/dsh-model 只认新系统那份里的 bot。
     cfgs = tmp_path / "configs"
     cfgs.mkdir()
-    (cfgs / "bot5.yml").write_text(f"id: bot5\ndisplay_name: 五号\nbot_channel_path: {json.dumps(str(bot / 'channel'))}\n", encoding="utf-8")
+    dsh_cfgs = tmp_path / "dsh-configs"
+    dsh_cfgs.mkdir()
+    (dsh_cfgs / "bot5.yml").write_text(f"id: bot5\ndisplay_name: 五号\nbot_channel_path: {json.dumps(str(bot / 'channel'))}\n", encoding="utf-8")
     (cfgs / "bot1.yml").write_text(f"id: bot1\nbot_channel_path: {json.dumps(str(old))}\n", encoding="utf-8")
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(cfgs))
+    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(dsh_cfgs))
     yield str(bot / "channel"), str(old)
     srv.shutdown()
 

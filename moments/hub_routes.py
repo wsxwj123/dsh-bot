@@ -988,9 +988,14 @@ def bots_list():
         return jsonify({"error": "config_unreadable", "detail": type(e).__name__}), 500
     # 探活自己吞异常，不会把故障冒成 config_unreadable；空名单是正常态，不是错误。
     # `disabled` 是**顶层**的一列 id，不塞进 bot 行里：行的字段集是 §6.1 的契约。
+    # 来源标注同理走顶层：`sources` = {id: {source, shadowed}}（混跑期页面标"新系统/旧系统"），
+    # 两边同名的以新系统为准，被压住的旧那份在 `overrides` 里点名（页面提示覆盖关系，别静默）。
+    src = bots_client.bot_sources()
     return jsonify({"bots": bots_client.probe_bots(entries),
                     "disabled": bots_client.disabled_ids(),
-                    "restart_available": bots_client.restart_plan()[1]})
+                    "restart_available": bots_client.restart_plan()[1],
+                    "sources": src,
+                    "overrides": sorted(k for k, v in src.items() if v["shadowed"])})
 
 
 @hub_bp.post("/hub/api/bots/restart")
@@ -1447,15 +1452,24 @@ import re as _dm_re                                     # noqa: E402
 import config_loader                                    # noqa: E402
 import gateway_client                                   # noqa: E402
 
+from moments import config_sources                      # noqa: E402
+
 _DM_BOT_RE = _dm_re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # §3.9：自建供应商名字规则（同网关 3.1.1）—— 不合规则的请求直接 400 bad_provider
 _DM_PROVIDER_RE = _dm_re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 
 
 def _dm_bots():
-    """[(bot_id, 显示名, 频道目录)]：网关在跑（state 里有口令和端口）的新系统 bot"""
+    """[(bot_id, 显示名, 频道目录)]：网关在跑（state 里有口令和端口）的**新系统** bot。
+
+    来源判定看配置本身在不在新系统那份里（``~/.dsh-bot/configs``，混跑期两套都读的意义
+    就在这里）—— 旧系统的 bot 配置即使带 bot_channel_path，也不进这个页面。
+    """
     out = []
-    for cfg in config_loader.list_enabled_bots(include_disabled=True):
+    for cfg in config_loader.list_enabled_bots(include_disabled=True,
+                                               dirs=config_sources.roots()):
+        if cfg.get("_source") != config_sources.SOURCE_DSH:
+            continue
         ch = cfg.get("bot_channel_path")
         if ch and gateway_client.available(ch):
             out.append((cfg["_bot_id"], cfg.get("display_name") or cfg["_bot_id"], ch))

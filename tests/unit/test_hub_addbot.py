@@ -18,7 +18,11 @@ TOKEN = "123456789:test-AAaaBBbbCCccDDddEEeeFFggHHhh11"
 
 @pytest.fixture(autouse=True)
 def _seams(tmp_path, monkeypatch):
-    """五个接缝全钉在 tmp：落盘、模板扫描、`.env` 比对、plist、自检脚本都不许出 tmp。"""
+    """五个接缝全钉在 tmp：落盘、模板扫描、`.env` 比对、plist、自检脚本都不许出 tmp。
+
+    `HUB_CONFIGS_DSH_DIR=off`：同名判定/端口占用现在也看新系统那套配置
+    （`~/.dsh-bot/configs`），这里关掉它，别让用例摸到真实目录。
+    """
     for name in ("configs", "channels", "agents"):
         (tmp_path / name).mkdir()
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(tmp_path / "configs"))
@@ -26,6 +30,7 @@ def _seams(tmp_path, monkeypatch):
     monkeypatch.setenv("HUB_LAUNCHAGENTS_DIR", str(tmp_path / "agents"))
     monkeypatch.setenv("HUB_RESTART_SCRIPT", str(tmp_path / "no-such.sh"))
     monkeypatch.setenv("HUB_TELEGRAM_API_BASE", "http://127.0.0.1:9")
+    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", "off")
     return tmp_path
 
 

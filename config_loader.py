@@ -56,10 +56,16 @@ def _life_alias(d: str, bot_id: str):
     return None
 
 
-def load_bot(bot_id: str) -> dict:
-    p = os.path.join(_configs_dir(), f"{bot_id}.yml")
+def load_bot(bot_id: str, configs_dir=None) -> dict:
+    """读一个 bot 的配置（含 ``life_config`` 合并与计算字段注入）。
+
+    ``configs_dir`` 指定从哪个配置根找（管理台的多根扫描用它）；缺省仍是
+    ``_configs_dir()``（``HUB_CONFIGS_DIR`` 接缝，运行时消费方零变化）。
+    """
+    d = configs_dir or _configs_dir()
+    p = os.path.join(d, f"{bot_id}.yml")
     if not os.path.exists(p):
-        p = _life_alias(_configs_dir(), bot_id) or p
+        p = _life_alias(d, bot_id) or p
     if not os.path.exists(p):
         raise FileNotFoundError(f"配置不存在：{p}")
     with open(p, encoding="utf-8") as f:
@@ -113,30 +119,46 @@ def load_bot(bot_id: str) -> dict:
     return cfg
 
 
-def list_enabled_bots(include_disabled: bool = False) -> list[dict]:
+def list_enabled_bots(include_disabled: bool = False, dirs=None) -> list[dict]:
     """枚举所有 configs/<bot>.yml（除 _ 开头的）。
 
     顶层 ``enabled: false`` 的 bot 默认跳过 —— 判定与 ``bots_registry._enabled`` 同一口径
     （没写字段 = 启用，只有显式假值才停），两处必须一致，否则"停了"在这条路径上不生效。
     ``include_disabled=True`` 只给管理台列表用：停用的 bot 得留在页面上才点得回来。
+
+    ``dirs=None``（默认）：只扫 ``_configs_dir()`` 一个根 —— 行为与以前一字不改。
+    ``dirs=[(source, 目录), ...]``：按顺序扫多个根，**同名以靠后的为准**（管理台传
+    ``[("legacy", 旧根), ("dsh", 新根)]`` = 新系统那份赢）；每个 cfg 多带两个下划线标记：
+    ``_source``（来自哪个根）与 ``_shadowed``（它压住了前面低优先根里的同名 bot）。
+    不存在的根跳过；坏掉的 yml 只跳过它自己（同单根口径）。
     """
-    bots = []
-    d = _configs_dir()
-    if not os.path.isdir(d):
-        return bots
-    for fn in sorted(os.listdir(d)):
-        if fn.startswith("_") or not fn.endswith(".yml"):
+    multi = dirs is not None
+    roots = list(dirs) if multi else [(None, _configs_dir())]
+    out = {}
+    for source, d in roots:
+        d = str(d)
+        if not os.path.isdir(d):
             continue
-        bot_id = fn[:-4]
-        try:
-            cfg = load_bot(bot_id)
-            if not include_disabled and not _enabled(cfg):
+        for fn in sorted(os.listdir(d)):
+            if fn.startswith("_") or not fn.endswith(".yml"):
+                continue
+            bot_id = fn[:-4]
+            try:
+                cfg = load_bot(bot_id, configs_dir=d)
+            except Exception:
                 continue
             cfg["_bot_id"] = bot_id
-            bots.append(cfg)
-        except Exception:
-            continue
-    return bots
+            if multi:
+                if bot_id in out:        # 靠后的根压住同名：旧的那条整个换掉
+                    cfg["_shadowed"] = True
+                cfg["_source"] = source
+            out[bot_id] = cfg
+    # 停用过滤放在合并**之后**：同名覆盖时停用标记以生效的那份（新系统）为准，
+    # 扫到一半就按低优先那份的 enabled 过滤会放行/漏掉错的 bot。
+    rows = [out[k] for k in sorted(out)] if multi else list(out.values())
+    if include_disabled:
+        return rows
+    return [c for c in rows if _enabled(c)]
 
 
 def in_sleep_hours(cfg: dict, now) -> bool:

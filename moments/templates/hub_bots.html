@@ -10,7 +10,8 @@
 <div class="wrap">
   <h1>bot 状态</h1>
   <div class="sub">「开关」是配置里停没停用，dispatcher 那盏灯是进程此刻在不在，
-    phase 是它托管的 worker —— 三层分开看</div>
+    phase 是它托管的 worker —— 三层分开看。新旧两套配置都读，每行标了来源，
+    两边同名时以新系统那份为准。</div>
 
   <div class="card">
     <div class="row" style="justify-content:space-between">
@@ -21,9 +22,10 @@
       </div>
     </div>
     <div class="muted" id="restart-msg" style="margin-top:6px"></div>
+    <div class="muted" id="source-note" style="display:none;margin-top:6px"></div>
     <table style="margin-top:8px">
       <thead>
-        <tr><th>bot</th><th>开关</th><th>dispatcher</th><th>worker phase</th>
+        <tr><th>bot</th><th>来源</th><th>开关</th><th>dispatcher</th><th>worker phase</th>
             <th>排队</th><th>在飞</th><th></th></tr>
       </thead>
       <tbody id="bot-rows"></tbody>
@@ -54,6 +56,23 @@ function pill(cls, text) {
   return td;
 }
 
+// 来源列：混跑期同一个面板管新旧两边的 bot，来源必须看得出来。
+// 数据在响应顶层的 sources（{id: {source, shadowed}}）——行本身（§6.1 字段集）不动。
+const SOURCE_TEXT = {legacy: '旧系统', dsh: '新系统'};
+function sourceCell(info) {
+  const td = document.createElement('td');
+  const name = info && SOURCE_TEXT[info.source];
+  if (!name) { td.textContent = '—'; return td; }
+  const span = document.createElement('span');
+  span.className = 'pill';
+  span.textContent = info.shadowed ? (name + '·覆盖旧配置') : name;
+  if (info.shadowed) {
+    span.title = '旧系统里也有同名的配置，面板与后续操作都以新系统这份为准';
+  }
+  td.appendChild(span);
+  return td;
+}
+
 function switchCell(botId, enabled) {
   const td = document.createElement('td');
   const btn = document.createElement('button');
@@ -76,11 +95,20 @@ async function loadBots() {
   }
   $('restart-all').disabled = !r.body.restart_available;
   const off = new Set(r.body.disabled || []);
+  const src = r.body.sources || {};
+  const over = r.body.overrides || [];
+  const note = $('source-note');
+  note.style.display = over.length ? '' : 'none';
+  hubSay(note, over.length
+    ? ('这些 bot 新旧两边都有配置文件，以「新系统」那份为准（旧配置被压住，不再生效）：'
+       + over.join('、'))
+    : '');
   for (const b of (r.body.bots || [])) {
     const enabled = !off.has(b.id);
     const tr = document.createElement('tr');
     if (!enabled) { tr.style.opacity = '.5'; }
     tr.appendChild(cell(b.display_name || b.id));
+    tr.appendChild(sourceCell(src[b.id]));
     tr.appendChild(pill(enabled ? 'on' : 'off', enabled ? '启用中' : '已停用'));
     const cls = b.state === 'online' ? 'on' : (b.state === 'offline' ? 'off' : '');
     tr.appendChild(pill(cls, STATE_TEXT[b.state] || b.state));

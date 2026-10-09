@@ -32,7 +32,7 @@ import requests
 import yaml
 from flask import current_app
 
-from moments import bots_client, hub_auth, redact
+from moments import bots_client, config_sources, hub_auth, redact
 from moments.provider_model import HubError
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -255,13 +255,17 @@ def _bad(why):
 
 
 def _check_free(bot_id):
-    """同名判定看两处：`configs/<id>.yml` 与 `channels/<id>/`。
+    """同名判定看三处：两套配置根（旧 + 新系统）的 `configs/<id>.yml` 与 `channels/<id>/`。
 
     只看 yml 会在频道目录已存在时把 `shutil.move` 变成"搬进人家目录里"
     （`channels/<id>/<id>/`），而那个目录里可能是用户手工建的另一个 bot。
+    只看旧系统那份还会放行一个建完就被新系统同名配置压住、根本不生效的 bot。
     """
-    if os.path.exists(os.path.join(configs_dir(), bot_id + ".yml")):
-        raise HubError(409, "bot_exists", "已经有一个叫 %s 的 bot 了" % bot_id)
+    for source, d in config_sources.roots():
+        if os.path.exists(os.path.join(str(d), bot_id + ".yml")):
+            raise HubError(409, "bot_exists",
+                           "已经有一个叫 %s 的 bot 了（%s那份配置里）"
+                           % (bot_id, config_sources.SOURCE_LABELS[source]))
     if os.path.exists(os.path.join(channels_dir(), bot_id)):
         raise HubError(409, "bot_exists", "频道目录 %s 已存在，换个名字或先手动清理" % bot_id)
 
@@ -284,8 +288,10 @@ def _check_port(port, skip=None):
 
     ``include_disabled=True``：被停用的 bot 仍占着它的端口，放行一个撞号的新 bot
     会让那个 bot 一旦重新启用就起不来（或反过来抢走新 bot 的号）。
+    注册表并**新旧两套配置**：新系统 bot 占的号（它也要在本机监听）同样不许撞。
     """
-    for bot in _registry().bots(include_disabled=True):
+    for bot in _registry().bots(include_disabled=True,
+                                dirs=[str(d) for _source, d in config_sources.roots()]):
         if bot["port"] == port and bot["id"] != skip:
             raise HubError(409, "bot_exists", "端口 %d 已被 %s 占用" % (port, bot["id"]))
     if skip is None and _listening(port):
@@ -494,11 +500,13 @@ def lay_down(fields):
 # ---------------------------------------------------------------- 停用开关
 
 def set_enabled(bot_id, enabled):
-    """把 `configs/<bot>.yml` 的顶层 `enabled` 改成布尔值，返回改完的值。
+    """把该 bot 配置文件里的顶层 `enabled` 改成布尔值，返回改完的值。
 
     停用的唯一标记就是这个字段（`bots_registry.is_enabled` 判它），所以这里也是**唯一**
-    的写入口。三条硬约束：
+    的写入口。四条硬约束：
 
+    - **写它自己所在的那份配置**：混跑期两套配置都读（新旧系统），同名以新系统为准；
+      对一个新系统 bot 点停止，落到旧系统目录会既停不掉它、又在旧仓多出一份脏文件。
     - **绝不 dump YAML**：走 `hub_config.set_scalar` 的行级编辑，注释/锚点/键序/块标量
       逐字节保真（§2.4 那条可 grep 的红线，bot 的 yml 里全是人设正文，dump 一次就毁）。
     - **原子写**：复用 `hub_config.atomic_write`，半截文件不可能出现 —— bot 的 yml 写坏了
@@ -511,7 +519,10 @@ def set_enabled(bot_id, enabled):
     from moments import hub_config          # 延迟 import：只有这一个函数要它
     if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
         raise HubError(400, "bad_bot_id", "bot id 形状非法")
-    path = os.path.join(configs_dir(), bot_id + ".yml")
+    # 两套根里按覆盖规则找：命中新系统那份就写新系统那份；都没有 → 默认根下的路径
+    # （读文件时 FileNotFoundError → 404，与改动前一致）。
+    found = config_sources.find_path(bot_id)
+    path = str(found) if found is not None else os.path.join(configs_dir(), bot_id + ".yml")
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()

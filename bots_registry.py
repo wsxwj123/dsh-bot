@@ -56,30 +56,34 @@ def _env_port(bot_id):
     return _valid_port(os.environ.get("DISPATCHER_PORT_%s" % bot_id.upper()))
 
 
-def _scan(warn=None):
-    """读 ``configs/*.yml``（跳过 ``_`` 开头的 `_global.yml` 等），返回 ``[(bot_id, cfg)]``。
+def _scan(warn=None, dirs=None):
+    """读配置目录下的 ``*.yml``（跳过 ``_`` 开头的 `_global.yml` 等），返回 ``[(bot_id, cfg)]``。
 
-    id 取文件名（与 ``config_loader.list_enabled_bots`` 同规则）。单个 yml 坏掉不影响其余：
-    记一行 ``skip <文件名>: <异常类名>`` 交给 ``warn``，**不带路径、不带异常正文**。
+    ``dirs=None``：只扫 ``configs_dir()``（原行为）。``dirs=[目录, ...]``：按顺序扫多个根，
+    **同名以靠后的为准**（管理台读新旧两套配置时靠它实现"新系统优先"）；
+    不存在的根跳过。单个 yml 坏掉不影响其余：记一行 ``skip <文件名>: <异常类名>``
+    交给 ``warn``，**不带路径、不带异常正文**。
     """
-    d = configs_dir()
-    rows = []
-    if not d.is_dir():
-        return rows
-    for path in sorted(d.glob("*.yml")):
-        if path.name.startswith("_"):
+    roots = list(dirs) if dirs is not None else [configs_dir()]
+    seen = {}
+    for d in roots:
+        d = Path(d)
+        if not d.is_dir():
             continue
-        try:
-            with open(path, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-            if not isinstance(cfg, dict):
-                raise TypeError("yml 顶层不是映射")
-        except Exception as e:
-            if warn is not None:
-                warn("skip %s: %s" % (path.name, type(e).__name__))
-            continue
-        rows.append((path.stem, cfg))
-    return rows
+        for path in sorted(d.glob("*.yml")):
+            if path.name.startswith("_"):
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f)
+                if not isinstance(cfg, dict):
+                    raise TypeError("yml 顶层不是映射")
+            except Exception as e:
+                if warn is not None:
+                    warn("skip %s: %s" % (path.name, type(e).__name__))
+                continue
+            seen[path.stem] = (path.stem, cfg)     # 后扫的根覆盖同名，最后按 id 排序吐
+    return [seen[k] for k in sorted(seen)]
 
 
 def is_enabled(cfg):
@@ -132,7 +136,7 @@ def _namespace(bot_id, cfg):
     return LEGACY_NAMESPACES.get(bot_id)
 
 
-def bots(warn=None, include_disabled=False):
+def bots(warn=None, include_disabled=False, dirs=None):
     """可用 bot，按 id 排序。CLI 与全部 Python 消费方共用这一个出口。
 
     ``enabled: false`` 的 bot **默认不出现在这里** —— 这张表就是"该起哪些 bot"的名单，
@@ -142,8 +146,11 @@ def bots(warn=None, include_disabled=False):
     过滤放在这里而不是 ``_scan``：端口按**全表**解析，停用的 bot 仍占着自己的号，
     停一个 bot 不会让别人的派生端口漂移，重新启用时端口也还是原来那个
     （端口一漂，消费方就照注册表去连了另一个服务 —— 与 F3 同一条理由）。
+
+    ``dirs`` 见 ``_scan``：默认单根（CLI 与运行时的原行为）；管理台传两套目录时，
+    "同名以新系统为准"在端口解析之前就完成，派生端口不会算两遍。
     """
-    rows = _scan(warn)
+    rows = _scan(warn, dirs)
     fixed, derived = _resolve_ports(rows)
     out = []
     for bot_id, cfg in rows:
@@ -162,19 +169,24 @@ def bots(warn=None, include_disabled=False):
     return out
 
 
-def ports():
+def ports(dirs=None):
     """``{bot_id: port}``。moments 侧端口表的唯一来源。
 
     **含停用的 bot**：这是"谁在哪个端口"的通讯录，不是"该起哪些"的名单。
     漏掉停用 bot 会让管理台把它显示成 unknown（查不到端口），而它真实状态是 offline；
     也会让端口占用检查放行一个撞号的新 bot。
+
+    ``dirs`` 见 ``_scan``：管理台传新旧两套配置根，新系统 bot 的端口才查得到。
     """
-    return {b["id"]: b["port"] for b in bots(include_disabled=True)}
+    return {b["id"]: b["port"] for b in bots(include_disabled=True, dirs=dirs)}
 
 
-def disabled_ids():
-    """被 ``enabled: false`` 停用的 bot id 集合。管理台按它给行打"已停用"徽标。"""
-    return {bot_id for bot_id, cfg in _scan() if not is_enabled(cfg)}
+def disabled_ids(dirs=None):
+    """被 ``enabled: false`` 停用的 bot id 集合。管理台按它给行打"已停用"徽标。
+
+    ``dirs`` 见 ``_scan``：多根时同名以靠后（新系统）那份的 enabled 为准。
+    """
+    return {bot_id for bot_id, cfg in _scan(dirs=dirs) if not is_enabled(cfg)}
 
 
 _safe_warned = False
