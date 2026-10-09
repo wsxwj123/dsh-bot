@@ -82,7 +82,8 @@ test.skipIf(!available)('真 dsh：只留人设、只有我们自己的 10 个�
   expect(seg.window).toBe(1000000)
   expect(seg.used_tokens).toBeGreaterThan(0)
   led.close()
-})
+}, 240_000) // 用例级超时必须比内部最长的等待链更宽：三段 until 最坏等满 120+30+30=180 秒。
+// 命令行 --timeout（CI 里是 90000）只是默认值，这里不写第三参数的话，用例会被它先砍掉，内部的等待根本走不完。
 
 test.skipIf(!available)('真 dsh：dsh 进程环境里没有 Telegram 令牌', async () => {
   if (process.platform !== 'linux') return
@@ -104,7 +105,7 @@ test.skipIf(!available)('真 dsh：改配置换模型，下一轮请求就用新
   expect(req.body.model).toBe('fake-chat-2')
   expect(JSON.stringify(req.body.messages)).toContain('[model changed:')
   expect(JSON.parse(readFileSync(join(b.botDir, 'state', 'dsh.pid'), 'utf8')).pid).toBe(pid)
-})
+}, 120_000) // 用例级超时：内部最长等 60 秒（等新模型的回复）+ 0.5 秒配置生效延迟，留够余量
 
 test.skipIf(!available)('真 dsh：用量快到线时来了新消息，先在旧会话里写摘要换段，新消息进新会话、开头带上摘要', async () => {
   const led = gw.ledger()
@@ -146,7 +147,7 @@ test.skipIf(!available)('真 dsh：用量快到线时来了新消息，先在旧
   b.brain = { ...b.brain, max_input_tokens: 1_000_000 }
   writeConfig(b)
   await sleep(500)
-})
+}, 120_000) // 用例级超时：内部最长等 60 秒（等 realD 被处理），留够余量
 
 test.skipIf(!available)('真 dsh：网关被强杀后，旧 dsh 不会一直留着（自己退出，或者网关重启时被清理）', async () => {
   const pid = JSON.parse(readFileSync(join(b.botDir, 'state', 'dsh.pid'), 'utf8')).pid
@@ -158,4 +159,4 @@ test.skipIf(!available)('真 dsh：网关被强杀后，旧 dsh 不会一直留�
   await until(() => !isAlive(pid), 'old dsh is gone after the gateway restarts', 20_000)
   tg.pushText(OWNER, 'realC')
   await until(() => llm.requests.some(r => JSON.stringify(r.body.messages).includes('realC')), 'new dsh works', 60_000)
-})
+}, 180_000) // 用例级超时：内部最坏 20（网关重启就绪）+20（等旧 dsh 退出）+60 秒（等新 dsh 干活）=100 秒
