@@ -21,7 +21,7 @@ const TIERS: StickerTier[] = ['sfw', 'nsfw']
 export const DEFAULT_STICKERS_FILE = join(homedir(), '.claude', 'channels', '_shared', 'stickers.json')
 export const DEFAULT_STICKERS_ROOT = join(homedir(), 'resource', 'stickers')
 
-/** list 一次最多列多少行（关键词太泛时防刷屏） */
+/** 带关键词 list 一次最多列多少行（关键词太泛时防刷屏）；不带关键词时全列，模型好一次看全 */
 const LIST_LIMIT = 80
 
 /** 解析库文件：两档都认；条目缺 label / path 的跳过。读不出来返回 []（不抛，由工具层如实回报）。 */
@@ -149,7 +149,8 @@ export class StickerService {
           : '这一档里没有表情包。',
       }
     }
-    const shown = hits.slice(0, LIST_LIMIT)
+    const cap = query ? LIST_LIMIT : hits.length
+    const shown = hits.slice(0, cap)
     const lines: string[] = [query ? `匹配「${query}」的 ${hits.length} 条：` : `表情包库，共 ${all.length} 条。发的时候按人设里的表情包规则选用：`]
     for (const tier of TIERS) {
       const part = shown.filter(e => e.tier === tier)
