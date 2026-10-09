@@ -25,6 +25,7 @@ import { Commitments } from '../commit/service'
 import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
 import { LifeActions } from '../life/actions'
+import { StickerService } from '../stickers/sticker'
 import {
   escapeUserText,
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
@@ -186,6 +187,7 @@ export class Engine {
   readonly hang: HangRuntime
   readonly media: Media
   readonly actions: LifeActions
+  readonly stickers: StickerService
   /** 发过图片但被 dsh 拒了的模型（看不了图）：之后对这个模型只说"有一张图"，不再附图 */
   private noImages = new Set<string>()
 
@@ -219,6 +221,7 @@ export class Engine {
       syncWaitMs: () => this.cfg.gw.imageWaitMs,
     })
     this.situation = new SituationBridge(cfg.id, cfg.configPath, log, cfg.gw.situationCmd, cfg.gw.situationTtlMs)
+    this.stickers = new StickerService({ api, ledger, log })
     this.commitments = new Commitments({
       ledger, log, situation: this.situation,
       timeZone: () => this.cfg.gw.timezone,
@@ -269,6 +272,21 @@ export class Engine {
           required: ['message_id', 'emoji'],
         },
         call: (args, ctx) => engine().toolReact(args, ctx),
+      },
+      {
+        name: 'sticker',
+        description: '发表情包（GIF/贴纸）。list：看库里有什么（可按英文标签或中文分类搜，只回标签和 id）；send：把一条发到当前聊天（按 id 或标签）。库分 sfw / nsfw 两档；什么时候发、发哪一档按人设里的表情包规则来。',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['list', 'send'], description: 'list 看有什么；send 发一条' },
+            query: { type: 'string', description: 'list：关键词（英文标签或中文分类，不填列出全部）；send：要找的标签，可以只写一部分' },
+            id: { type: 'string', description: 'send：sticker id（list 结果里 #sfw:12 这种）' },
+            tier: { type: 'string', enum: ['sfw', 'nsfw'], description: '可选：只看 / 只发这一档' },
+          },
+          required: ['action'],
+        },
+        call: (args, ctx) => engine().toolSticker(args, ctx),
       },
       {
         name: 'remember',
@@ -422,6 +440,24 @@ export class Engine {
     } catch (e) {
       this.ledger.outboundResult(outId, 'failed', { error: safeError(e) })
       return { text: '没加上（可能这个表情 Telegram 不支持，或者消息编号不对）。', isError: true }
+    }
+  }
+
+  /** 表情包：list 由 StickerService 同步读库；send 要上传文件，算一次"占着"，别让看门狗把这一轮当卡住 */
+  async toolSticker(args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
+    const at = this.activeFor(ctx.chatId, ctx.segmentId)
+    if (!at) return { text: '这一轮已经结束，消息没有发出。', isError: true }
+    if (at.mode === 'summary') return LOCKED
+    at.lastProgressAt = Date.now()
+    const action = str(args.action) ?? 'list'
+    if (action === 'list') return this.stickers.list(args)
+    if (action !== 'send') return { text: 'action 只能是 list 或 send。', isError: true }
+    at.toolsInFlight++
+    try {
+      return await this.stickers.send(at.chatId, at.turnId, args)
+    } finally {
+      at.toolsInFlight--
+      at.lastProgressAt = Date.now()
     }
   }
 
