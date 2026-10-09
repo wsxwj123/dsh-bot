@@ -581,7 +581,7 @@ export class Engine {
   private patchInput(): PatchInput {
     let persona = ''
     try { persona = readFileSync(this.personaPath(), 'utf8') } catch {}
-    return { persona, brain: this.brain, credentialsPath: this.cfg.credentialsPath, sessionsRoot: join(this.cfg.dshHome, 'sessions') }
+    return { persona, brain: this.brain, credentialsPath: this.cfg.credentialsPath, sessionsRoot: join(this.cfg.dshHome, 'sessions'), skillDir: join(this.cfg.channelDir, 'skills') }
   }
 
   private harnessVersion(): string {

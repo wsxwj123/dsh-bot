@@ -110,11 +110,16 @@ test('dsh 环境变量白名单：不含 Telegram 令牌和任何没列出的变
 
 test('补丁层：路由、凭据文件、压缩默认关、隐私行禁用', () => {
   const brain = parseBrain({ provider: 'proxy', model: 'g', routes: { proxy: { api: 'anthropic-messages', baseURL: 'http://127.0.0.1:9', apiKeyEnv: 'K', models: [{ id: 'g' }] } } })
-  const rows = buildPatchRows({ persona: '{{user}}', brain, credentialsPath: '/c.yaml', sessionsRoot: '/s' }) as any[]
+  const rows = buildPatchRows({ persona: '{{user}}', brain, credentialsPath: '/c.yaml', sessionsRoot: '/s', skillDir: '/bot/skills' }) as any[]
   expect(rows.find(r => r.id === 'llm-pi-ai').config.providers.proxy.api).toBe('anthropic-messages')
   expect(rows.find(r => r.id === 'acp').config).toEqual({ provider: 'proxy', model: 'g' })
   expect(rows.find(r => r.id === 'credentials').config).toEqual({ path: '/c.yaml' })
   expect(rows.find(r => r.id === 'compaction-basic').config).toEqual({ auto: false })
   expect(rows.find(r => r.id === 'session-log-deepseek').disabled).toBe(true)
+  // 技能机制开着：只扫本 bot 的目录，不扫项目根/用户根
+  expect(rows.some(r => r.id === 'skill' && r.disabled)).toBe(false)
+  expect(rows.some(r => r.id === 'tool-skill' && r.disabled)).toBe(false)
+  expect(rows.find(r => r.id === 'skill-filesystem').config).toEqual({ includeDefaultRoots: false, customSkillDirs: ['/bot/skills'] })
+  expect(rows.find(r => r.id === 'agent-instructions').disabled).toBe(true)
   expect(escapePersona('{{a}} {{b}}')).toBe('{⁠{a}} {⁠{b}}')
 })

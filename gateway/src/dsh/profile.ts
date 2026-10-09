@@ -6,14 +6,16 @@ import type { Brain } from '../config'
 /**
  * 要禁用的出厂行（0.1.5 与 0.2.0 的并集，不存在的行 dsh 只打一条警告）：
  * - 全部内置工具与工具说明
- * - 自动注入：AGENTS.md / CLAUDE.md、技能目录
+ * - agent-instructions：不读 AGENTS.md / CLAUDE.md（人设由我们自己注入）
  * - 隐私：session-log-deepseek（0.2.0 默认随请求上传会话日志）、plugin-package-inventory-deepseek（插件清单）、session-telemetry-otel（遥测）
  * - mcp-resources（挂 MCP 时自动加 3 个资源工具并在系统提示词末尾追加一段）
  * - session-title-llm（多一次请求给会话起标题）
+ * skill / skill-filesystem / tool-skill 不再禁用：人设分层后，工具与规则按需放进技能文件，
+ * 由这三个插件把技能目录给模型看、按需加载（技能根配置见 buildPatchRows 里的 skill-filesystem 行）。
  */
 export const DISABLE_ROWS = [
   'tool-bash', 'tool-pwsh', 'tool-jobs', 'tool-fs', 'tool-fs-search',
-  'agent-instructions', 'skill', 'skill-filesystem', 'tool-skill',
+  'agent-instructions',
   'commands', 'command-feedback', 'goal', 'goal-round-driver', 'command-goal', 'plan-mode', 'command-compact',
   'tool-subagent-control', 'tool-subagent-list-agents', 'tool-subagent', 'tool-subagent-fork',
   'workflow-worker-thread', 'tool-workflow', 'tool-todo', 'tool-goal', 'tool-ralph', 'repeat-tool-reminder',
@@ -52,6 +54,8 @@ export type PatchInput = {
   brain: Brain
   credentialsPath: string
   sessionsRoot: string
+  /** 本 bot 的技能根目录（里面的 <名>/SKILL.md 或 <名>.md 会被模型按需加载）。 */
+  skillDir: string
 }
 
 export function buildPatchRows(p: PatchInput): object[] {
@@ -59,6 +63,8 @@ export function buildPatchRows(p: PatchInput): object[] {
   const b = p.brain
   if (Object.keys(b.routes).length > 0) rows.push({ id: 'llm-pi-ai', config: { providers: b.routes } })
   rows.push({ id: 'credentials', config: { path: p.credentialsPath } })
+  // 技能只从这个 bot 自己的目录发现：关掉项目根/用户根（否则 <cwd>/.dsh/skills、<DSH_HOME>/skills 会成为额外来源）。
+  rows.push({ id: 'skill-filesystem', config: { includeDefaultRoots: false, customSkillDirs: [p.skillDir] } })
   rows.push({ id: 'acp', config: { provider: b.provider, model: b.model } })
   rows.push({ id: 'agent-default-model', config: { provider: b.provider, model: b.model } })
   rows.push({ id: 'system-prompt', config: {
@@ -78,12 +84,12 @@ export function patchText(rows: object[]): string {
 }
 
 /**
- * 补丁层里"需要重启 dsh 才生效"的部分的指纹：人设、路由、凭据路径、压缩开关。
+ * 补丁层里"需要重启 dsh 才生效"的部分的指纹：人设、路由、凭据路径、压缩开关、技能根目录。
  * 只换模型（provider + model 在已有路由里）不需要重启，走 set_config_option。
  */
 export function restartFingerprint(p: PatchInput): string {
   const b = p.brain
-  return createHash('sha256').update(JSON.stringify([p.persona, b.routes, p.credentialsPath, b.emergencyCompaction, p.sessionsRoot])).digest('hex').slice(0, 16)
+  return createHash('sha256').update(JSON.stringify([p.persona, b.routes, p.credentialsPath, b.emergencyCompaction, p.sessionsRoot, p.skillDir])).digest('hex').slice(0, 16)
 }
 
 /**
