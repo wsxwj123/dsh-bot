@@ -1,16 +1,16 @@
 // 生图多张（对齐旧 bot：一次调用传多张、网关并发）+ image_guide 交付文本的转换/降级。
-// 白盒：直接构造 LifeActions（假生图脚本，不碰 NovelAI、不用密钥），假脚本用中间文件记录每次调用的起止时间。
+// 白盒：直接构造 LifeActions。多张的接线用注入的假 py（deps.runPy）验证——不起进程、不靠 sleep/墙钟；
+// 只有"晚到通知"一条仍用假脚本 + 真子进程（它要的是真实的异步完成时机）。
 import { expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { Logger } from '../../src/log'
-import { convertGuideSection, LifeActions, runPool, type ActionsDeps } from '../../src/life/actions'
+import { convertGuideSection, LifeActions, runPool, type ActionsDeps, type RunPy } from '../../src/life/actions'
 
 type Note = { chatId: string; text: string; key: string }
-type Call = { ev: string; argv: string[]; im: Record<string, unknown>; reuse: boolean; t: number }
 
-/** 假的 novelai-skill：写 image_path、把每次调用的 argv/中间文件/起止时间记进 calls.jsonl；im.fail 时退出非 0 */
+/** 假的 novelai-skill 脚本（只给"晚到通知"用：它要一个真实慢一点的子进程）：写 image_path、im.fail 时退出非 0 */
 function fakeSkill(skillDir: string): void {
   mkdirSync(join(skillDir, 'scripts'), { recursive: true })
   mkdirSync(join(skillDir, 'assets'), { recursive: true })
@@ -33,20 +33,29 @@ function fakeSkill(skillDir: string): void {
   ].join('\n'))
 }
 
-function calls(skillDir: string): Call[] {
-  const f = join(skillDir, 'calls.jsonl')
-  return existsSync(f) ? readFileSync(f, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l) as Call) : []
+/** 假 py（注入 deps.runPy）：不起真实子进程。读中间文件决定成败（同真脚本约定：im.fail 退出非 0），记下每次调用的 argv。
+ *  调用在"运行中"状态让出一次微任务（不靠 sleep/墙钟），peak 记同时运行的调用数——并发上限由它确定性验证 */
+function fakePy() {
+  const calls: { argv: string[]; im: Record<string, unknown>; reuse: boolean }[] = []
+  let running = 0, peak = 0
+  const run: RunPy = async args => {
+    const imPath = args[args.indexOf('--intermediate') + 1]
+    const outPath = args[args.indexOf('--output-json') + 1]
+    if (!imPath || !outPath) throw new Error(`假 py 只认 novelai 脚本的调用：${args.join(' ')}`)
+    const im = JSON.parse(readFileSync(imPath, 'utf8')) as Record<string, unknown>
+    calls.push({ argv: args, im, reuse: args.includes('--reuse-seed') })
+    running++; if (running > peak) peak = running
+    await Promise.resolve()
+    running--
+    if (im.fail) return { code: 1, out: '', err: 'boom' }
+    writeFileSync(`${outPath}.png`, 'png')
+    writeFileSync(outPath, JSON.stringify({ image_path: `${outPath}.png` }))
+    return { code: 0, out: '', err: '' }
+  }
+  return { calls, run, peak: () => peak }
 }
 
-/** 从起止事件算最大并发：把所有 start 记为 +1、end 记为 -1，按时间扫一遍取峰值 */
-function maxConcurrent(cs: Call[]): number {
-  const ev = cs.map(c => ({ t: c.t, d: c.ev === 'start' ? 1 : -1 })).sort((x, y) => x.t - y.t || y.d - x.d)
-  let cur = 0, mx = 0
-  for (const e of ev) { cur += e.d; if (cur > mx) mx = cur }
-  return mx
-}
-
-function setup(opts: { provider?: string; syncWaitMs?: number; skill?: string } = {}) {
+function setup(opts: { provider?: string; syncWaitMs?: number; skill?: string; py?: RunPy } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'imgmulti-'))
   const skillDir = join(root, 'skill')
   fakeSkill(skillDir)
@@ -62,6 +71,7 @@ function setup(opts: { provider?: string; syncWaitMs?: number; skill?: string } 
     credRef: () => null,
     notify: (chatId, text, key) => { notes.push({ chatId, text, key }) },
     syncWaitMs: () => opts.syncWaitMs ?? 30_000,
+    ...(opts.py ? { runPy: opts.py } : {}),
   }
   return { root, skillDir, notes, actions: new LifeActions(deps), cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
@@ -72,47 +82,61 @@ const until = async (fn: () => boolean, ms = 10_000) => {
   throw new Error('timeout')
 }
 
-test('多张：一次传 images，网关并发跑（3 张 0.4s 全部重叠），结果一次返回 3 条路径', async () => {
-  const s = setup()
+test('多张：一次传 images 跑 3 次脚本、结果一次返回 3 条路径；每张参数各用各的、临时文件不互相覆盖', async () => {
+  const py = fakePy()
+  const s = setup({ py: py.run })
   try {
-    const r = await s.actions.generateImage('42', { images: [{ intermediate: { prompt: 'a', sleep: 0.4 } }, { intermediate: { prompt: 'b', sleep: 0.4 } }, { intermediate: { prompt: 'c', sleep: 0.4 }, ratio: 'square' }] })
+    const r = await s.actions.generateImage('42', { images: [{ intermediate: { prompt: 'a' } }, { intermediate: { prompt: 'b' } }, { intermediate: { prompt: 'c' }, ratio: 'square' }] })
     expect(r.isError).toBeFalsy()
     expect(r.text).toContain('第 1 张：')
     expect(r.text).toContain('第 3 张：')
-    const starts = calls(s.skillDir).filter(c => c.ev === 'start')
-    expect(starts).toHaveLength(3)
-    expect(maxConcurrent(calls(s.skillDir))).toBe(3) // 串行的话最多 1
-    const square = starts.find(c => c.im.prompt === 'c')!
+    expect(py.calls).toHaveLength(3) // 一次调用，3 次脚本
+    const square = py.calls.find(c => c.im.prompt === 'c')!
     expect(square.argv).toContain('square') // 每张的 ratio 各用各的
     // 每张的临时文件不同，不互相覆盖
-    const imPaths = starts.map(c => c.argv[c.argv.indexOf('--intermediate') + 1]!)
+    const imPaths = py.calls.map(c => c.argv[c.argv.indexOf('--intermediate') + 1]!)
     expect(new Set(imPaths).size).toBe(3)
   } finally { s.cleanup() }
 })
 
-test('并发上限 4：6 张同时来，最多 4 个脚本在跑', async () => {
-  const s = setup()
+test('多张并发：6 张同时来，最多 4 个脚本同时在跑（受控假 py 数同时在跑的调用数）', async () => {
+  const py = fakePy()
+  const s = setup({ py: py.run })
   try {
-    const images = Array.from({ length: 6 }, (_, i) => ({ intermediate: { prompt: `p${i}`, sleep: 0.3 } }))
+    const images = Array.from({ length: 6 }, (_, i) => ({ intermediate: { prompt: `p${i}` } }))
     const r = await s.actions.generateImage('42', { images })
     expect(r.text).toContain('第 6 张：')
-    expect(maxConcurrent(calls(s.skillDir))).toBe(4)
+    expect(py.calls).toHaveLength(6)
+    expect(py.peak()).toBe(4) // 串行的话最多 1；上限被改大就会大于 4
+  } finally { s.cleanup() }
+})
+
+test('多张参数校验：第 N 张的 intermediate 为空直接报错、不跑脚本', async () => {
+  const py = fakePy()
+  const s = setup({ py: py.run })
+  try {
+    const r = await s.actions.generateImage('42', { images: [{ intermediate: { prompt: 'a' } }, { intermediate: null }, { intermediate: { prompt: 'c' } }] })
+    expect(r.isError).toBe(true)
+    expect(r.text).toBe('第 2 张的 intermediate 不能为空。')
+    expect(py.calls).toHaveLength(0)
   } finally { s.cleanup() }
 })
 
 test('reuse_seed 与多张互斥：直接报错、不跑脚本', async () => {
-  const s = setup()
+  const py = fakePy()
+  const s = setup({ py: py.run })
   try {
     const r = await s.actions.generateImage('42', { images: [{ intermediate: { prompt: 'a' } }], reuse_seed: true })
     expect(r.isError).toBe(true)
     expect(r.text).toContain('续图只能一张一张来')
     expect(r.text).toContain('reuse_seed')
-    expect(calls(s.skillDir)).toHaveLength(0)
+    expect(py.calls).toHaveLength(0)
   } finally { s.cleanup() }
 })
 
 test('部分失败：成功照常返回、只报失败那张；整张全挂才 isError', async () => {
-  const s = setup()
+  const py = fakePy()
+  const s = setup({ py: py.run })
   try {
     const r = await s.actions.generateImage('42', { images: [{ intermediate: { prompt: 'ok1' } }, { intermediate: { prompt: 'bad', fail: true } }, { intermediate: { prompt: 'ok2' } }] })
     expect(r.isError).toBeFalsy()
@@ -126,12 +150,13 @@ test('部分失败：成功照常返回、只报失败那张；整张全挂才 i
 })
 
 test('单张用法不变：返回形状、ratio、reuse_seed 照旧', async () => {
-  const s = setup()
+  const py = fakePy()
+  const s = setup({ py: py.run })
   try {
     const r = await s.actions.generateImage('42', { intermediate: { prompt: 'solo' }, ratio: 'wide', reuse_seed: true })
     expect(r.isError).toBeFalsy()
     expect(r.text).toContain('图片生成好了：')
-    const c = calls(s.skillDir)[0]!
+    const c = py.calls[0]!
     expect(c.reuse).toBe(true)
     expect(c.argv).toContain('wide')
     expect(c.argv[c.argv.indexOf('--intermediate') + 1]).toContain(`im-`)
@@ -159,16 +184,18 @@ test('晚到通知：整批一条系统消息、路径齐全；两次调用键�
   } finally { s.cleanup() }
 })
 
-test('runPool：保序、限制并发', async () => {
+test('runPool：并发不超过上限、任务全部跑到、完成顺序乱也按入参保序返回', async () => {
   let running = 0, peak = 0
-  const tasks = Array.from({ length: 5 }, (_, i) => async () => {
+  const tasks = Array.from({ length: 6 }, (_, i) => async () => {
     running++; if (running > peak) peak = running
-    await new Promise(r => setTimeout(r, 20))
+    // 只用微任务让出（不靠 sleep/墙钟）：0 号多让两次，完成顺序变成 1、2、3、0…，返回仍要按入参顺序
+    await Promise.resolve()
+    if (i === 0) { await Promise.resolve(); await Promise.resolve() }
     running--
     return i
   })
-  expect(await runPool(tasks, 2)).toEqual([0, 1, 2, 3, 4])
-  expect(peak).toBe(2)
+  expect(await runPool(tasks, 4)).toEqual([0, 1, 2, 3, 4, 5])
+  expect(peak).toBe(4)
 })
 
 test('convertGuideSection：匹配到就换掉那段 bash 并发说明（连同紧跟的要点）', () => {

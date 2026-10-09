@@ -84,7 +84,14 @@ export type ActionsDeps = {
   notify: (chatId: string, text: string, key: string) => void
   /** 生图同步等待时长（毫秒，gateway.image_wait_ms）：到点没好就先让模型回话 */
   syncWaitMs: () => number
+  /** 跑脚本的方式（不设 = 真起 python 子进程）；白盒测试注入假实现，不起进程也不靠墙钟 */
+  runPy?: RunPy
 }
+
+/** 跑一次 python 脚本的结果 */
+export type PyResult = { code: number | null; out: string; err: string }
+/** 跑脚本的方式：argv、额外环境变量、超时毫秒 */
+export type RunPy = (args: string[], extra: Record<string, string | undefined>, timeoutMs: number) => Promise<PyResult>
 
 type Result = { text: string; isError?: boolean }
 
@@ -112,7 +119,8 @@ export class LifeActions {
     return env
   }
 
-  private async py(args: string[], extra: Record<string, string | undefined>, timeoutMs: number): Promise<{ code: number | null; out: string; err: string }> {
+  private async py(args: string[], extra: Record<string, string | undefined>, timeoutMs: number): Promise<PyResult> {
+    if (this.d.runPy) return this.d.runPy(args, extra, timeoutMs)
     const py = process.env.DSH_BOT_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
     const p = Bun.spawn([py, ...args], { cwd: REPO_ROOT, env: this.env(extra), stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' })
     const timer = setTimeout(() => p.kill(), timeoutMs)
