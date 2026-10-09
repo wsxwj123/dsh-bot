@@ -44,7 +44,18 @@ export function normText(s: string): string {
 }
 
 const MAX_CHUNK = 4096
-const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
+const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png'])
+
+/**
+ * 文件用哪条通道发：.gif 走动画（当 photo 发只显示首帧）、.webp/.tgs 走贴纸、常见图片走照片、其余走文件。
+ * reply 的 files 和 sticker 工具共用这一条判定，同一个文件在哪儿发都是同一类。
+ */
+export function fileKind(path: string): 'photo' | 'animation' | 'sticker' | 'document' {
+  const ext = extname(path).toLowerCase()
+  if (ext === '.gif') return 'animation'
+  if (ext === '.webp' || ext === '.tgs') return 'sticker'
+  return PHOTO_EXTS.has(ext) ? 'photo' : 'document'
+}
 
 export function chunkText(text: string, limit: number, mode: 'length' | 'newline'): string[] {
   if (text.length <= limit) return [text]
@@ -167,26 +178,27 @@ export class Sender {
         if (req.skipFiles?.has(filePath)) { results.push({ index: i + 1, kind: 'file', state: 'duplicate' }); continue }
         req.skipFiles?.add(filePath)
       }
-      const outKind: OutboundKind = item.kind === 'text' ? (req.kind ?? 'text') : PHOTO_EXTS.has(extname(filePath!).toLowerCase()) ? 'photo' : 'document'
+      const fk = item.kind === 'file' ? fileKind(filePath!) : null
+      const outKind: OutboundKind = fk ?? req.kind ?? 'text'
       const okey = req.turnId !== null ? `turn:${req.turnId}:c${req.callSeq}:p${i + 1}` : null
       const outId = this.ledger.outboundIntent({ okey, chatId: req.chatId, turnId: req.turnId, part: i + 1, ofParts: items.length, kind: outKind, text: item.kind === 'text' ? item.text : null, file: filePath, replyTo: replyTo ?? null })
 
       let attempt = 0
       let useReply = replyTo
       let triedWithoutReply = false
-      const shrunk = outKind === 'photo' ? shrinkPhoto(filePath!) : null
+      const shrunk = fk === 'photo' ? shrinkPhoto(filePath!) : null
       if (shrunk) this.log.info('send.photo_shrunk', { chat: req.chatId, part: i + 1, from: statSync(filePath!).size, to: statSync(shrunk).size })
       for (;;) {
         attempt++
         try {
           const m = item.kind === 'text'
             ? await this.api.sendMessage(req.chatId, item.text, { replyTo: useReply })
-            : await this.api.sendFile(outKind === 'photo' ? 'photo' : 'document', req.chatId, shrunk ?? filePath!, { replyTo: useReply })
+            : await this.api.sendFile(fk!, req.chatId, shrunk ?? filePath!, { replyTo: useReply })
           crashPoint('after_send_before_record')
           this.ledger.outboundResult(outId, 'sent', { tgMessageId: m.message_id })
           results.push({ index: i + 1, kind: item.kind, state: 'sent', messageId: m.message_id })
           if (item.kind === 'text') this.log.chatLine('bot', req.chatId, item.text)
-          this.o.onSent?.(req.chatId, m.message_id, item.kind === 'text' ? item.text : outKind === 'photo' ? '[图片]' : '[文件]')
+          this.o.onSent?.(req.chatId, m.message_id, item.kind === 'text' ? item.text : fk === 'photo' ? '[图片]' : fk === 'animation' ? '[表情包]' : fk === 'sticker' ? '[贴纸]' : '[文件]')
           if (item.kind === 'text' && req.voice) await this.sendVoice(req, i + 1, req.voiceTexts ? (req.voiceTexts[ti] ?? '') : item.text)
           if (i === 0 && items.length > 1) crashPoint('mid_reply')
           break
