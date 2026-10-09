@@ -36,6 +36,8 @@ _WIN_ESSENTIALS = ("SystemRoot", "SystemDrive", "windir", "TEMP", "TMP", "USERPR
                    "LOCALAPPDATA", "ComSpec", "PATHEXT", "NUMBER_OF_PROCESSORS")
 
 
+# 子进程的输出按 UTF-8 读（脚本自己也被要求用 UTF-8 输出）。Windows 上若按系统编码读，
+# 中文会解码失败（charmap codec can't decode）。tests/unit/test_m6_import.py 早就是这么写的。
 def _child_env(home, extra=None):
     env = {k: os.environ[k] for k in _WIN_ESSENTIALS if k in os.environ}
     env["PATH"] = os.environ.get("PATH", "")
@@ -94,7 +96,7 @@ def make_ledger(sandbox):
 
     def _make(bot="newbot", who=OWNER, text="你好"):
         r = subprocess.run([BUN, str(HERE / "make_ledger.ts"), str(sandbox["root"]), bot, "none" if who is None else str(who), text],
-                           cwd=str(GATEWAY_DIR), capture_output=True, text=True, timeout=120,
+                           cwd=str(GATEWAY_DIR), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
                            env=_child_env(sandbox["home"]))
         assert r.returncode == 0, f"生成账本失败：{r.stderr[-2000:]}"
         p = sandbox["root"] / "bots" / bot / "state" / "ledger.sqlite"
@@ -120,7 +122,7 @@ def run_import(sandbox):
     def _run(bot, from_dir, *extra):
         env = _child_env(sandbox["home"], {"DSH_BOT_HOME": str(sandbox["root"]), "PYTHONIOENCODING": "utf-8"})
         return subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "import_history.py"), bot, "--from", str(from_dir), *extra],
-                              cwd=str(sandbox["tmp"]), capture_output=True, text=True, timeout=120, env=env)
+                              cwd=str(sandbox["tmp"]), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, env=env)
     return _run
 
 
