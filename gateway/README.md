@@ -45,7 +45,7 @@ bun gateway/src/main.ts --config ~/.dsh-bot/configs/<名>.yml
 
 写完各 bot 网关会在空闲时重启 dsh，几秒内生效；只改密钥不用重启。换到另一家供应商会换段（先在旧会话写一份交接摘要，再开新会话），同一家换模型不换段。
 
-**新增的配置键**（`gateway` 段，毫秒，不是整数或超出范围启动就报错）：`wizard_timeout_ms`（引导超时，默认 600000）、`late_secret_window_ms`（引导异常结束后把"像密钥"的消息删掉的时间窗，默认 600000）、`provider_lock_wait_ms`（等锁上限，默认 10000）、`model_fetch_timeout_ms`（拉模型列表每个请求的超时，默认 15000）、`provider_key_grace_ms`（删供应商后多久才删它的密钥，默认 600000）、`provider_switch_summary_ms`（换段时写交接摘要的上限，默认 30000）。
+**新增的配置键**（`gateway` 段，毫秒，不是整数或超出范围启动就报错）：`wizard_timeout_ms`（引导超时，默认 600000）、`late_secret_window_ms`（引导异常结束后把"像密钥"的消息删掉的时间窗，默认 600000）、`provider_lock_wait_ms`（等锁上限，默认 10000）、`model_fetch_timeout_ms`（拉模型列表每个请求的超时，默认 15000）、`provider_key_grace_ms`（删供应商后多久才删它的密钥，默认 600000）、`provider_switch_summary_ms`（换段时写交接摘要的上限，默认 30000）、`image_wait_ms`（生图同步等待时长，到点没好就先让模型回话，默认 10000）。
 
 **相关入口**：本机接口 `GET /v1/model` 多返回一个 `providers` 字段、`POST /v1/provider/refresh` 刷新自建供应商；管理台在 `/hub/dsh-model` 页（bot 表格下面有自建供应商小表和「刷新模型列表」按钮）。旧系统的 `/hub/provider` 不动。
 

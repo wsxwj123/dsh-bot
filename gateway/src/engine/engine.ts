@@ -216,6 +216,7 @@ export class Engine {
       stateDb: () => this.cfg.gw.botlifeDb,
       credRef: name => this.credRef(name),
       notify: (chatId, text, key) => { this.injectSynthetic(chatId, text, key, { source: 'image' }) },
+      syncWaitMs: () => this.cfg.gw.imageWaitMs,
     })
     this.situation = new SituationBridge(cfg.id, cfg.configPath, log, cfg.gw.situationCmd, cfg.gw.situationTtlMs)
     this.commitments = new Commitments({
