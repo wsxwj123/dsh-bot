@@ -284,14 +284,26 @@ export class Engine {
       },
       {
         name: 'generate_image',
-        description: '生成一张图片（自拍、给对方看的照片、朋友圈配图）。按 image_guide 的规则写好描述再调用。返回图片路径；生成得慢时先返回"还在生成"，好了程序会告诉你。',
+        description: '生成图片（自拍、给对方看的照片、朋友圈配图）。按 image_guide 的规则写好描述再调用。互不依赖的多张（比如朋友圈配图 2–4 张不同构图）一次传 images，网关会并发跑（最多 4 张同时）；同一动作换视角要分两次、第二次带 reuse_seed，不要放进 images。返回图片路径（多张时全部返回）；生成得慢时先返回"还在生成"，好了程序会告诉你。',
         inputSchema: {
           type: 'object',
           properties: {
-            intermediate: { type: 'object', description: 'NovelAI：按 image_guide 写好的结构化描述（intermediate.json 的内容）' },
-            prompt: { type: 'string', description: 'ComfyUI：英文描述' },
+            intermediate: { type: 'object', description: 'NovelAI：单张时用，按 image_guide 写好的结构化描述（intermediate.json 的内容）' },
+            prompt: { type: 'string', description: 'ComfyUI：单张时用，英文描述' },
             ratio: { type: 'string', enum: ['portrait', 'landscape', 'square', 'wide'], description: '画幅' },
-            reuse_seed: { type: 'boolean', description: '同一场景再来一张时为 true' },
+            reuse_seed: { type: 'boolean', description: '同一动作换视角的第二张才用：为 true 沿用上一张的 seed。只能和单张配合，不能和 images 一起用' },
+            images: {
+              type: 'array',
+              description: '要一次出的多张（互不依赖：不同构图/不同场景，例如朋友圈配图 2–4 张）。每项给 intermediate（NovelAI）或 prompt（ComfyUI），可带 ratio。网关会并发跑（最多 4 张同时），全部跑完一次性返回路径；某张失败不影响其余。不要和 reuse_seed 一起用',
+              items: {
+                type: 'object',
+                properties: {
+                  intermediate: { type: 'object', description: 'NovelAI：这一张的结构化描述' },
+                  prompt: { type: 'string', description: 'ComfyUI：这一张的英文描述' },
+                  ratio: { type: 'string', enum: ['portrait', 'landscape', 'square', 'wide'], description: '这一张的画幅' },
+                },
+              },
+            },
           },
         },
         call: (args, ctx) => engine().toolLife('image', args, ctx),
