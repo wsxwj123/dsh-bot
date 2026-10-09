@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { loadBotConfig, readTelegramToken } from '../src/config'
 import { Ledger } from '../src/ledger'
+import { providersPath } from '../src/providers/store'
 
 const arg = (n: string) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : undefined }
 const path = arg('config')
@@ -56,25 +57,28 @@ w()
 w('## 长期记忆')
 w(`- 新记下的条数（remember）：${q<{ n: number }>(`SELECT COUNT(*) AS n FROM memories WHERE at > ?`, since)[0]?.n ?? 0}`)
 w()
-w('## 日志里有没有机密')
+w('## 日志、账本里有没有机密')
 const secrets: string[] = []
 try { secrets.push(readTelegramToken(cfg.channelDir, {})) } catch {}
 try {
-  const cred = readFileSync(cfg.credentialsPath, 'utf8')
-  for (const m of cred.matchAll(/^\s{2,}[A-Z0-9_]+:\s*(\S.*)$/gm)) if (m[1]!.length >= 8) secrets.push(m[1]!.trim())
+  // 按 YAML 读凭据文件：/provider add 写进去的值带引号，按行正则读会漏扫（上游 bc8727d 的修法）
+  const refs = (Bun.YAML.parse(readFileSync(cfg.credentialsPath, 'utf8')) as { refs?: Record<string, unknown> })?.refs ?? {}
+  for (const v of Object.values(refs)) if (typeof v === 'string' && v.trim().length >= 8) secrets.push(v.trim())
 } catch {}
 let hits = 0
 let scanned = 0
-for (const dir of [cfg.logsDir]) {
+// 日志目录、状态目录（账本和它的 WAL）、dsh 的补丁层、/provider add 的登记文件：机密这些地方都不该出现
+const files: string[] = [join(cfg.dshHome, 'bot.patch.yml'), providersPath(cfg.root)]
+for (const dir of [cfg.logsDir, cfg.stateDir]) {
   if (!existsSync(dir)) continue
-  for (const f of readdirSync(dir)) {
-    const p = join(dir, f)
-    if (!statSync(p).isFile()) continue
-    scanned++
-    const text = readFileSync(p, 'utf8')
-    for (const s of secrets) if (text.includes(s)) { hits++; w(`- ⚠️ ${f} 里出现了机密原文`) }
-  }
+  for (const f of readdirSync(dir)) files.push(join(dir, f))
 }
-w(`- 检查了 ${scanned} 个日志文件、${secrets.length} 个机密值：${hits === 0 ? '没有发现' : `发现 ${hits} 处`}`)
+for (const p of files) {
+  if (!existsSync(p) || !statSync(p).isFile()) continue
+  scanned++
+  const buf = readFileSync(p)
+  for (const s of secrets) if (buf.includes(s)) { hits++; w(`- ⚠️ ${p.replace(cfg.root, '<根>')} 里出现了机密原文`) }
+}
+w(`- 检查了 ${scanned} 个文件（日志、账本、补丁层、供应商登记）、${secrets.length} 个机密值：${hits === 0 ? '没有发现' : `发现 ${hits} 处`}`)
 led.close()
 console.log(out.join('\n'))
