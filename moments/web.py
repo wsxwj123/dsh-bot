@@ -34,6 +34,36 @@ if importlib.util.find_spec("moments.hub_routes") is not None:
     from moments import hub_routes as _hub_routes
     app.register_blueprint(_hub_routes.hub_bp)
 
+# ── 旧 provider 管理页（管 8770 provider-proxy 的那套）──────────────────────────
+# 从旧仓原样搬入（moments/provider_routes.py + provider_config + scripts/restart_bot_worker）：
+# URL 与旧仓一字不差（/provider、/api/providers…），与新版 /hub/provider **并存**、各自前缀
+# 不同、互不覆盖。provider_config 的接缝成组判据只由两个新接缝（CHANNELS_ROOT /
+# PROVIDER_PATH）触发：设了其一却没设全 → 导入期 RuntimeError。那种环境下不能让整个面板
+# 起不来 —— provider 面板降级为不可用（生产不设任何接缝，永远走正常分支）。
+try:
+    from moments.provider_routes import provider_bp
+    from provider_config import SeamsNotConfigured as _SeamsNotConfigured
+except RuntimeError as _seam_err:  # pragma: no cover - 仅部分重定向接缝的测试环境
+    provider_bp = None
+    _SeamsNotConfigured = None
+    sys.stderr.write("[moments.web] provider 面板未启用: %s\n" % _seam_err)
+
+if provider_bp is not None:
+    app.register_blueprint(provider_bp)
+
+    # 只读模式下的写路由不能回裸 500/HTML（「/api/* 错误体一律 {"error": ...}」）：
+    # 只捕 SeamsNotConfigured 这一类（RuntimeError 的子类），**不** catch 宽 RuntimeError。
+    from provider_config import SafetyGateTripped as _SafetyGateTripped
+
+    @app.errorhandler(_SafetyGateTripped)
+    def _safety_gate_500(e):   # 9.4：测试态安全闸，写端点 500 零写入
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    @app.errorhandler(_SeamsNotConfigured)
+    def _seams_read_only_503(_e):
+        return jsonify({"error": "测试接缝未成组设置，写操作已拒绝（只读模式）",
+                        "code": "seams_read_only"}), 503
+
 # 安审 S4：隧道（cloudflare tunnel / frp / nginx）到本进程是明文 http，Flask 默认不信
 # 转发头，于是 request.scheme 恒为 "http" —— 浏览器侧明明是 https，签出去的
 # hub_session / hub_admin 却一律不带 Secure，那道锁的凭据能被降级到明文信道带出去。
