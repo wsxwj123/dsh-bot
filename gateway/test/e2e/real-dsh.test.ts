@@ -123,11 +123,21 @@ test.skipIf(!available)('真 dsh：用量快到线时来了新消息，先在旧
   expect(sumMsgs).not.toContain('realD')
   const next = llm.requests.find(r => JSON.stringify(r.body.messages).includes('realD'))!
   const users = next.body.messages.filter((m: any) => m.role === 'user')
-  // 新会话：前情和新消息是同一条用户消息里的两个内容块。失败时把实际内容带出来，
-  // 便于分辨是真差异还是 Windows 上的环境噪声（断言本身不放松）。
-  expect(users.length, `新会话第一轮的用户消息应有 1 条，实际 ${users.length} 条：` +
-    JSON.stringify(users.map((m: any) => String(JSON.stringify(m.content)).slice(0, 200))))
-    .toBe(1)
+  // 新会话：前情和新消息是同一条用户消息里的两个内容块，所以用户消息应只有 1 条。
+  // Windows 上 dsh 会自动加载 @deepseek-ai/dsh-sandbox-windows-acl 插件，它往第一轮再追一条
+  // 装着技能清单的 <system-reminder> 消息（macOS/Linux 没有这个插件，是平台固有差异、
+  // 不是产品差异）。放行这一条，但形状仍钉死：只接受「摘要」或「摘要 + 至多一条提醒」，
+  // 出现别的块（第二条摘要、非提醒的追加、顺序颠倒、一条都没有）都失败。失败时把实际内容
+  // 带出来，便于分辨是真差异还是环境噪声。
+  const textOf = (m: any): string => {
+    if (typeof m.content === 'string') return m.content
+    if (Array.isArray(m.content)) return m.content.map((c: any) => typeof c === 'string' ? c : String(c?.text ?? '')).join('')
+    return String(m.content)
+  }
+  const shape = users.map((m: any) => textOf(m).trimStart().startsWith('<system-reminder>') ? '提醒' : '摘要').join('+')
+  expect(shape, `新会话第一轮的用户消息形状应为「摘要」或「摘要+提醒」，实际 ${users.length} 条：` +
+    JSON.stringify(users.map((m: any) => textOf(m).slice(0, 200))))
+    .toMatch(/^摘要(\+提醒)?$/)
   const first = JSON.stringify(users[0].content)
   expect(first).toContain('⟦之前聊天的交接摘要')
   expect(first).toContain('真dsh摘要')
