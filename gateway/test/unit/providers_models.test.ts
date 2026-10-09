@@ -24,14 +24,14 @@ function serve(handler: (u: URL, n: number) => Response | Promise<Response>) {
 const json = (b: unknown, status = 200) => Response.json(b, { status })
 const run = (r: Partial<FetchModelsRequest> & { baseURL: string }, timeoutMs = 5_000) => fetchModels({ api: 'openai-completions', key: KEY, ...r }, { timeoutMs })
 
-test('OpenAI：GET <地址>/models 带 Bearer 与 Accept；id 去空白、去重保序、不合格跳过；上下文按字段顺序取第一个合格整数', async () => {
+test('OpenAI：GET <地址>/models 带 Bearer 与 Accept；id 去空白、去重保序、不合格跳过、非 ASCII 照收；上下文按字段顺序取第一个合格整数', async () => {
   const s = serve(() => json({ object: 'list', data: [
     { id: ' a ', max_input_tokens: 500, context_length: 32000 }, { id: 'a' }, { id: 'bad id' }, { id: '模型' }, { id: 'x'.repeat(201) },
     { id: 'b', input_token_limit: 2048 }, { id: 'c', context_window: 99999999999 }, { id: 'd', max_model_len: 4096.5 }, { id: '<b>' }, 'not-an-object',
   ] }))
   const r = await run({ baseURL: `${s.url}/v1` })
   expect(r).toEqual({ ok: true, truncated: false, baseURL: `${s.url}/v1`, v1Added: false, models: [
-    { id: 'a', contextWindow: 32000 }, { id: 'b', contextWindow: 2048 }, { id: 'c', contextWindow: null }, { id: 'd', contextWindow: null }, { id: '<b>', contextWindow: null },
+    { id: 'a', contextWindow: 32000 }, { id: '模型', contextWindow: null }, { id: 'b', contextWindow: 2048 }, { id: 'c', contextWindow: null }, { id: 'd', contextWindow: null }, { id: '<b>', contextWindow: null },
   ] })
   expect(s.seen).toEqual([{ path: '/v1/models', auth: `Bearer ${KEY}`, xKey: null, version: null, accept: 'application/json' }])
 })

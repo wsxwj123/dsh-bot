@@ -37,7 +37,8 @@ export function decodeCb(data: unknown): { nonce: string; action: string; idx: n
   return { nonce, action, idx }
 }
 
-/** 按钮上的模型名超过 40 个字符时保留前 18 + 后 18，中间写 …（方案 3.3.2） */
+/** 按钮上的模型名超过 40 个字符时保留前 18 + 后 18，中间写 …（方案 3.3.2）。
+ *  按 UTF-16 单元计数：模型 id 允许非 ASCII（聚合商渠道前缀），中文每个 1 个单元照切；按钮只放序号，切坏也不影响回调定位 */
 export function truncLabel(name: string): string {
   return name.length > 40 ? `${name.slice(0, 18)}…${name.slice(-18)}` : name
 }

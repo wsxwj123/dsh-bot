@@ -6,7 +6,7 @@ import { join } from 'path'
 import type { Route } from '../../src/config'
 import { Logger, redact } from '../../src/log'
 import {
-  apiKeyEnvFor, checkBaseURL, checkProviderName, CredentialsUnsupported, CredentialsVerifyFailed, editRefsText, mergeRoutes, parseProviders,
+  apiKeyEnvFor, checkBaseURL, checkProviderName, cleanModelId, CredentialsUnsupported, CredentialsVerifyFailed, editRefsText, mergeRoutes, parseProviders,
   providersLockPath, ProvidersLockTimeout, ProvidersUnreadable, readProviders, registerCredentialSecrets, setCredentialRef, withProvidersLock,
 } from '../../src/providers/store'
 import { sleep } from '../../src/util'
@@ -50,6 +50,17 @@ test('键名：PROVIDER_<规整名大写>_KEY，被占用依次加 _2、_3', () 
   expect(apiKeyEnvFor('my-proxy', ['PROVIDER_MY_PROXY_KEY', 'PROVIDER_MY_PROXY_KEY_2'])).toBe('PROVIDER_MY_PROXY_KEY_3')
 })
 
+test('模型 id：去首尾空白、1–200 个字符；允许非 ASCII（聚合商把渠道写进 id）；空白、控制字符、⟦⟧、超长丢掉', () => {
+  expect(cleanModelId(' ok-1 ')).toBe('ok-1')
+  expect(cleanModelId('模型一')).toBe('模型一')
+  expect(cleanModelId('[次]deepseek-v4-pro')).toBe('[次]deepseek-v4-pro')
+  expect(cleanModelId('<b>')).toBe('<b>')
+  expect(cleanModelId('y'.repeat(200))).toBe('y'.repeat(200))
+  for (const bad of ['', '   ', 'has space', 'bad\nid', 'bad\u0001id', 'bad\u007fid', 'a b', 'x⟦y', 'x⟧y', 'y'.repeat(201)])
+    expect(cleanModelId(bad)).toBeNull()
+  expect(cleanModelId(5)).toBeNull()
+})
+
 test('读校验：不合格的条目跳过并给原因；重名（规整名）、共用键名只认先出现的', () => {
   const s = parseProviders(file({
     good: entry(),
@@ -69,13 +80,14 @@ test('读校验：不合格的条目跳过并给原因；重名（规整名）�
   expect(s.valid.good!.meta).toMatchObject({ epoch: 5, keyRev: 2, manualModels: [], lastRefresh: null })
 })
 
-test('读校验：模型条目只丢不合格的；没写上下文按 131072；思考档位声明不合格只丢这个字段', () => {
+test('读校验：模型条目只丢不合格的；非 ASCII 的 id 照收（和写入同一套规则）；没写上下文按 131072；思考档位声明不合格只丢这个字段', () => {
   const s = parseProviders(file({ p: entry({}, [
-    { id: ' ok-1 ', contextWindow: 32000 }, { id: 'has space' }, { id: 'ok-1' }, { id: 'big', contextWindow: 1e9 }, { id: 'nocw' },
+    { id: ' ok-1 ', contextWindow: 32000 }, { id: 'has space' }, { id: 'ok-1' }, { id: '模型一' }, { id: 'bad\u0001id' }, { id: 'x⟦y⟧' },
+    { id: 'big', contextWindow: 1e9 }, { id: 'nocw' },
     { id: 'r1', reasoningEfforts: { high: 'high', off: null } }, { id: 'r2', reasoningEfforts: { turbo: 'x' } }, { id: 'r3', reasoningEfforts: false },
   ]) }))
   expect(s.valid.p!.route.models).toEqual([
-    { id: 'ok-1', contextWindow: 32000 }, { id: 'nocw', contextWindow: 131072 },
+    { id: 'ok-1', contextWindow: 32000 }, { id: '模型一', contextWindow: 131072 }, { id: 'nocw', contextWindow: 131072 },
     { id: 'r1', contextWindow: 131072, reasoningEfforts: { high: 'high', off: null } }, { id: 'r2', contextWindow: 131072 }, { id: 'r3', contextWindow: 131072, reasoningEfforts: false },
   ])
 })

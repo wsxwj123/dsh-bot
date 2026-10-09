@@ -55,8 +55,11 @@ const RESERVED = ['add', 'refresh', 'list', 'status', 'default', 'help', 'deepse
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/
 const KEY_ENV_RE = /^PROVIDER_[A-Z0-9_]+_KEY(_[0-9]+)?$/
-/** 模型 id、密钥共用的"可见 ASCII、不含空白"（! 到 ~） */
+/** 密钥的"可见 ASCII、不含空白"（! 到 ~）。模型 id 不适用（见 MODEL_ID_ILLEGAL，方案 3.1.1） */
 const VISIBLE = /^[\x21-\x7e]+$/
+/** 模型 id 里不能出现的字符（方案 3.1.1、3.7）：空白、控制字符、程序标记 ⟦⟧（混进模型名会污染给模型的说明）。
+ *  其余字符连非 ASCII 都允许：第三方聚合商常把渠道写进 id，如 [次]deepseek-v4-pro */
+const MODEL_ID_ILLEGAL = /[\s\u0000-\u001f\u007f-\u009f⟦⟧]/
 
 export const providersPath = (root: string) => join(root, 'providers.json')
 export const providersLockPath = (root: string) => join(root, 'providers.lock')
@@ -115,11 +118,11 @@ export function cleanSecret(input: string): string | null {
   return s.length >= 8 && s.length <= 512 && VISIBLE.test(s) && !s.startsWith('/') ? s : null
 }
 
-/** 模型 id：去首尾空白后 1–200 个可见 ASCII、不含空白。合格返回去掉空白后的值 */
+/** 模型 id：去首尾空白后 1–200 个字符、不含空白/控制字符/⟦⟧；允许非 ASCII（方案 3.1.1）。合格返回去掉空白后的值 */
 export function cleanModelId(v: unknown): string | null {
   if (typeof v !== 'string') return null
   const s = v.trim()
-  return s.length >= 1 && s.length <= 200 && VISIBLE.test(s) ? s : null
+  return s.length >= 1 && s.length <= 200 && !MODEL_ID_ILLEGAL.test(s) ? s : null
 }
 
 export const isContextWindow = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= CONTEXT_MIN && v <= CONTEXT_MAX

@@ -2,7 +2,7 @@
 import { CONTEXT_MAX, CONTEXT_MIN } from '../providers/store'
 import { apiLabel } from '../engine/commands'
 
-/** 可见 ASCII、不含空白（! 到 ~），与 store 里模型名/密钥的判定一致 */
+/** 可见 ASCII、不含空白（! 到 ~），与 store 里的密钥判定一致（模型名不适用，它允许非 ASCII，见 store.ts 的 cleanModelId） */
 const VISIBLE = /^[\x21-\x7e]+$/
 const HAS_LETTER = /[A-Za-z]/
 const HAS_DIGIT = /[0-9]/
