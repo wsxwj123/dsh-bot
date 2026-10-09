@@ -2,11 +2,13 @@
 # 日志看板：给每个配好的 bot 起一个随时能 attach 的 tmux 会话（tg-<bot>-dsh），里面实时跟 gateway/scripts/logs.ts 的输出。
 #   bash gateway/scripts/logs_tmux.sh
 # 幂等：会话已存在就跳过，绝不关任何已有会话，更不碰旧系统的 tg-*-worker / tg-*-dispatcher。
+# 名字与安全：bot 名从配置文件名取（bot2.yml → bot2），只认 ^[A-Za-z0-9._-]+$，不合格的文件名跳过并写明原因；
+#   拼给 tmux 的命令串里路径一律走 sq 用单引号引用（内部的单引号按 '\'' 转义），不靠双引号插值。
 # 开机自启：launchd 任务 com.dsh-bot.tmux-logs（bun gateway/scripts/autostart.ts install-logs 装），
-# RunAtLoad + 每 5 分钟跑一次。launchd 拉起的进程 PATH 里不一定有 bun / tmux，所以两边都用绝对路径：
-# install-logs 会把解析到的 BUN_BIN / TMUX_BIN 写进 plist，脚本里的默认值只是手工跑时的兜底。
-# 输出：有终端时逐个 bot 打明细（手工跑就是这样）；launchd 拉起的（没有终端）只在有会话新建/失败时说话，
-#   免得 launchd 的输出文件每 5 分钟涨几行。想强制打明细：LOGS_TMUX_VERBOSE=1。
+#   RunAtLoad + 每 5 分钟跑一次。launchd 拉起的进程 PATH 里不一定有 bun / tmux，所以两边都用绝对路径：
+#   install-logs 会把解析到的 BUN_BIN / TMUX_BIN 写进 plist，脚本里的默认值只是手工跑时的兜底。
+# 输出：有终端时逐个 bot 打明细（手工跑就是这样）；launchd 拉起的（没有终端）只在有新建/失败、
+#   文件名或配置不合格时说话，免得 launchd 的输出文件每 5 分钟涨几行。想强制打明细：LOGS_TMUX_VERBOSE=1。
 # 环境变量（都有默认值，便于测试时覆盖）：
 #   DSH_BOT_CONFIGS_DIR  bot 配置目录，默认 $DSH_BOT_HOME/configs 或 ~/.dsh-bot/configs
 #   DSH_BOT_HOME         ~/.dsh-bot 的替代（和仓库其它地方同名）
@@ -15,6 +17,20 @@ set -u
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd) || { echo "logs_tmux：找不到仓库目录" >&2; exit 1; }
 CONFIGS_DIR=${DSH_BOT_CONFIGS_DIR:-${DSH_BOT_HOME:-$HOME/.dsh-bot}/configs}
+
+# 拼进 tmux 命令串的路径都过这里：整体用单引号包住，内部的单引号换成 '\''（POSIX shell 安全）
+# 逐字符拼接，不用 ${s//\'/...}：bash 3.2（macOS 自带的 /bin/bash）对替换串里的反斜杠处理不可靠
+sq() {
+  local s=$1 out="'" i c
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    case "$c" in
+      "'") out="$out'\''" ;;
+      *) out="$out$c" ;;
+    esac
+  done
+  printf "%s'" "$out"
+}
 
 # bun / tmux 都用绝对路径：launchd 环境里 PATH 不可靠（和 autostart.ts 里 Bun.which('bun') ?? process.execPath 一个思路）
 BUN=${BUN_BIN:-}
@@ -38,7 +54,8 @@ if [ ! -d "$CONFIGS_DIR" ]; then
   exit 0
 fi
 
-# 读配置文件顶层的 id:（yml 行首那一行），去掉行尾注释、引号和空白；读不到返回 1
+# 文件顶层的 id:（yml 行首那一行），去掉行尾注释、引号和空白；读不到返回 1。
+# 它不拼进命令串，只用来确认"这是个 bot 配置"（没有 id 的 yml、id 坏了的 yml，logs.ts 也加载不了）
 read_bot_id() {
   local line v
   while IFS= read -r line || [ -n "$line" ]; do
@@ -67,21 +84,31 @@ verbose=1
 found=0 created=0 skipped=0 failed=0
 for f in "$CONFIGS_DIR"/*.yml; do
   [ -f "$f" ] || continue
-  id=$(read_bot_id "$f") || { [ "$verbose" = 1 ] && echo "logs_tmux：$(basename "$f") 里没有 id，跳过"; continue; }
+  base=${f##*/}
+  stem=${base%.yml}
+  # bot 名从文件名取，只留白名单内的：带引号、$、; 等的名字不往 tmux 的命令串里拼，跳过并明确说一句
+  case "$stem" in
+    ''|*[!A-Za-z0-9._-]*)
+      echo "logs_tmux：$base 的文件名不能用（只允许字母、数字、点、下划线、连字符），跳过"
+      continue
+      ;;
+  esac
+  id=$(read_bot_id "$f") || { [ "$verbose" = 1 ] && echo "logs_tmux：$base 里没有 id，跳过"; continue; }
   case "$id" in
-    ''|*[!A-Za-z0-9_-]*) [ "$verbose" = 1 ] && echo "logs_tmux：$(basename "$f") 的 id「$id」不能用（只能字母、数字、下划线、连字符），跳过"; continue ;;
+    ''|*[!A-Za-z0-9_-]*) [ "$verbose" = 1 ] && echo "logs_tmux：$base 的 id「$id」不能用（只能字母、数字、下划线、连字符），跳过"; continue ;;
   esac
   found=$((found + 1))
-  name="tg-$id-dsh"
+  name="tg-$stem-dsh"
   # -t 加 = 前缀按名字精确匹配：tmux 默认前缀匹配，不加的话 tg-bot3 的查询会命中 tg-bot3-dispatcher
   if "$TMUX" has-session -t "=$name" 2>/dev/null; then
     [ "$verbose" = 1 ] && echo "logs_tmux：$name 已存在，跳过"
     skipped=$((skipped + 1))
     continue
   fi
-  cmd="cd \"$REPO\" && \"$BUN\" gateway/scripts/logs.ts --config \"$f\" -f --chat"
+  # --config 用校验过的文件名重建（不是原始 glob 结果）；整个命令串的路径经 sq 引用后交给 tmux
+  cmd="cd $(sq "$REPO") && $(sq "$BUN") gateway/scripts/logs.ts --config $(sq "$CONFIGS_DIR/$base") -f --chat"
   if "$TMUX" new -d -s "$name" "$cmd"; then
-    echo "logs_tmux：$name 新建（跟 $(basename "$f") 的实时日志）"
+    echo "logs_tmux：$name 新建（跟 $base 的实时日志）"
     created=$((created + 1))
   else
     echo "logs_tmux：$name 没建起来（tmux 出错）" >&2

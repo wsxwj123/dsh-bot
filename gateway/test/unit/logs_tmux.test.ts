@@ -10,7 +10,8 @@ const SCRIPT = join(REPO, 'gateway', 'scripts', 'logs_tmux.sh')
 // ─── logs_tmux.sh：假 tmux 记录器 ───
 
 const FAKE_TMUX = `#!/bin/bash
-# 假 tmux（单测用）：把每次调用记进 $FAKE_TMUX_LOG；has-session 按 $FAKE_TMUX_SESSIONS（冒号分隔）回答；不真起会话
+# 假 tmux（单测用）：把每次调用记进 $FAKE_TMUX_LOG；has-session 按 $FAKE_TMUX_SESSIONS（冒号分隔）回答；
+# 不真起会话。FAKE_TMUX_RUN=1 时把 new 的命令串（shift 后的 $4）交给 sh 真跑一遍：配合假 bun 验证转义后语义不变
 log=\${FAKE_TMUX_LOG:?}
 cmd=$1
 printf 'CALL %s' "$cmd" >> "$log"
@@ -24,6 +25,12 @@ case "$cmd" in
     for a in "$@"; do [ "$prev" = "-t" ] && target=$a; prev=$a; done
     target=\${target#=}
     case ":\${FAKE_TMUX_SESSIONS:-}:" in *":$target:"*) exit 0 ;; *) exit 1 ;; esac
+    ;;
+  new)
+    if [ "\${FAKE_TMUX_RUN:-}" = 1 ]; then
+      sh -c "$4" >/dev/null 2>&1 || true
+    fi
+    exit 0
     ;;
 esac
 exit 0
@@ -62,7 +69,7 @@ function calls(s: Env): string[][] {
   return text ? text.split('\n').map(l => l.split('\t')) : []
 }
 
-test('会话名与命令拼装：tg-<bot>-dsh，里面跟 logs.ts -f --chat，bun 用绝对路径；已存在的会话跳过', () => {
+test('会话名与命令拼装：tg-<bot>-dsh，里面跟 logs.ts -f --chat，路径用单引号引用；已存在的会话跳过', () => {
   const s = setup({ 'bot7.yml': 'id: bot7\n# 注释\nblue: 1\n', 'bot8.yml': 'id: bot8\n' }, 'tg-bot8-dsh')
   const r = run(s, { LOGS_TMUX_VERBOSE: '1' })
   expect(r.exitCode).toBe(0)
@@ -75,7 +82,7 @@ test('会话名与命令拼装：tg-<bot>-dsh，里面跟 logs.ts -f --chat，bu
   expect(cs[0]).toEqual(['CALL has-session', '-t', '=tg-bot7-dsh'])
   const news = cs.filter(c => c[0] === 'CALL new')
   expect(news).toEqual([
-    ['CALL new', '-d', '-s', 'tg-bot7-dsh', `cd "${REPO}" && "/fake/bun" gateway/scripts/logs.ts --config "${join(s.cfgDir, 'bot7.yml')}" -f --chat`],
+    ['CALL new', '-d', '-s', 'tg-bot7-dsh', `cd '${REPO}' && '/fake/bun' gateway/scripts/logs.ts --config '${join(s.cfgDir, 'bot7.yml')}' -f --chat`],
   ])
   expect(cs[cs.length - 1]).toEqual(['CALL has-session', '-t', '=tg-bot8-dsh'])
 })
@@ -117,6 +124,43 @@ test('配置文件不合格的跳过：没有 id、id 带非法字符的都不�
   expect(out).toContain('weird.yml 的 id「bad id」不能用')
   expect(out).toContain('共 1 个 bot，建了 1 个、跳过 0 个。')
   expect(calls(s).filter(c => c[0] === 'CALL new').length).toBe(1)
+})
+
+test('文件名不在白名单里的跳过（没有终端也提示）：带 ;、$(...)、双引号的名字不会进 tmux 命令串', () => {
+  const s = setup({
+    'bot7.yml': 'id: bot7\n',
+    'evil;touch pwned.yml': 'id: evil\n',
+    'evil$(whoami).yml': 'id: evil\n',
+    'evil"quote.yml': 'id: evil\n',
+  }, '')
+  const r = run(s) // 不设 LOGS_TMUX_VERBOSE：非法文件名的提示必须始终打出来
+  expect(r.exitCode).toBe(0)
+  const out = r.stdout.toString()
+  for (const base of ['evil;touch pwned.yml', 'evil$(whoami).yml', 'evil"quote.yml']) {
+    expect(out).toContain(`${base} 的文件名不能用`)
+  }
+  expect(out).toContain('共 1 个 bot，建了 1 个、跳过 0 个。')
+  const news = calls(s).filter(c => c[0] === 'CALL new')
+  expect(news.length).toBe(1)
+  expect(news[0]![3]).toBe('tg-bot7-dsh')
+  expect(news[0]![4]).not.toContain('evil')
+})
+
+test('路径含空格和单引号时按单引号转义，交给 sh 执行后语义不变（假 bun 收到原样的 --config 路径）', () => {
+  const s = setup({}, '')
+  const weirdCfg = join(s.tmp, "cfg dir 'x")
+  mkdirSync(weirdCfg, { recursive: true })
+  writeFileSync(join(weirdCfg, 'bot7.yml'), 'id: bot7\n')
+  const weirdBinDir = join(s.tmp, "bin dir 'y")
+  mkdirSync(weirdBinDir, { recursive: true })
+  const fakeBun = join(weirdBinDir, 'fake bun')
+  writeFileSync(fakeBun, `#!/bin/bash\nprintf '%s\\n' "$@" > "$FAKE_BUN_LOG"\n`)
+  chmodSync(fakeBun, 0o755)
+  const bunLog = join(s.tmp, 'bun.args')
+  const r = run(s, { DSH_BOT_CONFIGS_DIR: weirdCfg, BUN_BIN: fakeBun, FAKE_TMUX_RUN: '1', FAKE_BUN_LOG: bunLog })
+  expect(r.exitCode).toBe(0)
+  expect(r.stdout.toString()).toContain('tg-bot7-dsh 新建')
+  expect(readFileSync(bunLog, 'utf8')).toBe(['gateway/scripts/logs.ts', '--config', join(weirdCfg, 'bot7.yml'), '-f', '--chat'].join('\n') + '\n')
 })
 
 test('没有配置目录：说清楚并正常退出（还没切 bot 的机器）', () => {
