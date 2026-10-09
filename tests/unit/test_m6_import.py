@@ -105,3 +105,108 @@ def test_聊过的聊天_没有旧聊天记录只有新承诺_正式导入也整
     r = run(env, "--from", str(old), "--days", "0")
     assert r.returncode != 0 and "已经聊过" in (r.stderr + r.stdout)
     assert count() == before
+
+
+# ─── 增量模式（--since）：切回新系统时只补"切到旧系统那段时间" ───
+
+
+def append_old(tmp_path, old, lines):
+    """往 make_old 造好的旧会话文件里追加记录（时间戳自己给）"""
+    import chat_history
+    proj = tmp_path / "home" / ".claude" / "projects" / chat_history._project_slug_for(str(old))
+    with open(proj / "s.jsonl", "a", encoding="utf-8") as f:
+        for l in lines:
+            f.write(json.dumps(l, ensure_ascii=False) + "\n")
+
+
+def q(ledger, sql, args=()):
+    db = sqlite3.connect(ledger)
+    try:
+        return db.execute(sql, args).fetchall()
+    finally:
+        db.close()
+
+
+def back_to_dsh(tmp_path):
+    """先把旧记录正式导入一次（模拟已经聊过），再插一个还活着的段（模拟切走前新系统还在用），
+    然后往旧会话文件里追加"切到旧系统那几天"的记录。返回 (old, env, ledger, watermark_ms, seg_id)。"""
+    old, env, ledger = make_old(tmp_path)
+    assert run(env, "--from", str(old)).returncode == 0
+    db = sqlite3.connect(ledger)
+    try:
+        db.execute("INSERT INTO segments (chat_id, mcp_token, state, created_at, needs_seed) VALUES ('42', 'tok', 'active', ?, 0)",
+                   (int(time.time() * 1000),))
+        db.commit()
+        # 水位线的基准：脚本按"这个聊天最后一条记录（对方说的或她发的，取较晚的）"算
+        wm = db.execute("SELECT MAX(t) FROM ("
+                        "SELECT MAX(ts) AS t FROM inbound WHERE chat_id = '42' UNION ALL"
+                        " SELECT MAX(COALESCE(sent_at, created_at)) AS t FROM outbound WHERE chat_id = '42')").fetchone()[0]
+        seg = db.execute("SELECT id FROM segments WHERE state = 'active'").fetchone()[0]
+    finally:
+        db.close()
+    append_old(tmp_path, old, [
+        {"type": "user", "timestamp": iso(wm / 1000 + 60), "message": {"content": '<channel source="telegram" chat_id="42">\n补料的这句\n</channel>'}},
+        {"type": "assistant", "timestamp": iso(wm / 1000 + 120), "message": {"content": [{"type": "tool_use", "name": "mcp__telegram-worker__reply", "input": {"text": "补料的回复"}}]}},
+        {"type": "user", "timestamp": iso(wm / 1000 + 180), "message": {"content": '<channel source="telegram" chat_id="-100">\n群里的话不要\n</channel>'}},
+    ])
+    return old, env, ledger, wm, seg
+
+
+def test_增量导入_只补水位线之后的记录_并把还活着的段标成重新取前情(tmp_path):
+    old, env, ledger, _, seg = back_to_dsh(tmp_path)
+    n_before = q(ledger, "SELECT COUNT(*) FROM inbound WHERE chat_id = '42'")[0][0]
+    promises = json.loads((old / ".promises.json").read_text(encoding="utf-8"))
+    promises.append({"text": "回程补的新承诺", "due_at": int((time.time() + 86400) * 1000)})
+    (old / ".promises.json").write_text(json.dumps(promises, ensure_ascii=False), encoding="utf-8")
+
+    r = run(env, "--from", str(old), "--since", "auto")
+    assert r.returncode == 0, r.stderr
+    assert "增量导入" in r.stdout and "还没到点的旧承诺：3 条" in r.stdout
+    assert "补料的这句" not in r.stdout  # 只出数字，不打印内容
+
+    texts = [t for (t,) in q(ledger, "SELECT text FROM inbound WHERE chat_id = '42'")]
+    assert "补料的这句" in texts                                  # 水位线之后的补进来了
+    assert not any("群里的话" in t for t in texts)               # 群聊记录不导
+    assert q(ledger, "SELECT COUNT(*) FROM inbound WHERE chat_id = '42'")[0][0] == n_before + 1  # 老记录没重复
+    assert [t for (t,) in q(ledger, "SELECT text FROM outbound WHERE chat_id = '42'")] == ["嗨，在呢", "补料的回复"]
+    assert q(ledger, "SELECT needs_seed FROM segments WHERE id = ?", (seg,))[0][0] == 1  # 下一轮重新取前情
+    assert q(ledger, "SELECT text FROM commitments WHERE state = 'pending' AND source = 'import' AND text = '回程补的新承诺'")
+
+    # 再跑一次：水位线已经推到刚导入的最后一条，旧文件里没有更新的了
+    again = run(env, "--from", str(old), "--since", "auto")
+    assert again.returncode == 0 and "这段时间没有新记录" in again.stdout
+    assert q(ledger, "SELECT COUNT(*) FROM inbound WHERE chat_id = '42'")[0][0] == n_before + 1
+
+
+def test_增量导入_账本里没有这个聊天的行_明确报错并提示怎么手动指定(tmp_path):
+    old, env, ledger = make_old(tmp_path)
+    r = run(env, "--from", str(old), "--since", "auto")
+    assert r.returncode != 0 and "拿不到水位线" in (r.stderr + r.stdout) and "--since" in (r.stderr + r.stdout)
+    assert not ledger.exists()
+
+
+def test_增量导入_dry_run_只数条数什么都不写(tmp_path):
+    old, env, ledger, _, seg = back_to_dsh(tmp_path)
+    n_before = q(ledger, "SELECT COUNT(*) FROM inbound")[0][0]
+    r = run(env, "--from", str(old), "--since", "auto", "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "增量导入" in r.stdout and "什么都没写" in r.stdout
+    assert q(ledger, "SELECT COUNT(*) FROM inbound")[0][0] == n_before
+    assert q(ledger, "SELECT needs_seed FROM segments WHERE id = ?", (seg,))[0][0] == 0
+
+
+def test_增量导入_水位线不是数字或不是正数就拒绝(tmp_path):
+    old, env, _ = make_old(tmp_path)
+    for bad in ("昨天", "0", "-5"):
+        r = run(env, "--from", str(old), "--since", bad)
+        assert r.returncode != 0 and "--since" in (r.stderr + r.stdout), bad
+
+
+def test_增量导入_网关还在跑就先停掉再导(tmp_path):
+    old, env, ledger, _, seg = back_to_dsh(tmp_path)
+    hb = tmp_path / "dsh" / "bots" / "bot5" / "state" / "heartbeat"
+    hb.write_text("{}", encoding="utf-8")
+    r = run(env, "--from", str(old), "--since", "auto")
+    assert r.returncode != 0 and "网关还在运行" in (r.stderr + r.stdout)
+    assert q(ledger, "SELECT COUNT(*) FROM inbound WHERE chat_id = '42'")[0][0]  # 账本没被写坏，行数照旧
+    assert len(q(ledger, "SELECT id FROM segments WHERE state = 'active'")) == 1

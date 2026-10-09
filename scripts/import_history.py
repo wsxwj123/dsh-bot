@@ -4,6 +4,7 @@
 
 用法（网关先停掉；只出数字，不打印聊天内容）：
     python3 scripts/import_history.py <新 bot 名> --from <旧频道目录> [--old-bot <旧名>] [--days 30] [--dry-run]
+    python3 scripts/import_history.py <新 bot 名> --from <旧频道目录> [--old-bot <旧名>] --since auto [--dry-run]
     python3 scripts/import_history.py <新 bot 名> --from <旧频道目录> --inspect-promises
 
 - 私聊记录：从旧的 Claude Code 会话文件里取出对方说的话和 bot 真正发出去的话（调用了 reply 的），
@@ -12,6 +13,11 @@
   这个聊天在新系统里已经聊过（账本里有段）就不导，免得新旧记录交错。
 - 承诺：旧频道目录的 .promises.json，只导还没到点、也没完成的，登记成新系统的承诺（来源记为 import）。
   旧文件的格式没有文档，脚本按常见字段名宽松识别；先用 --inspect-promises 看结构（只打印字段名和类型）。
+- 增量模式（--since）：切回新系统时只补"切到旧系统那段时间"的记录。水位线是
+  --since auto 时取账本里该聊天最后一条记录的时刻（对方说的或她真正发出去的，取较晚的那个）；
+  也可以直接给 unix 毫秒。只导 ts 晚于水位线的旧记录（--days 不再起作用），承诺照常导；
+  导入后把这个聊天还活着的段标成"下一轮重新取前情"，网关下一轮会把这段带进她的上下文。
+  不传 --since 时语义不变。
 """
 from __future__ import annotations
 
@@ -57,8 +63,12 @@ def _chat_of(raw: str) -> str | None:
     return m.group(1) if m else None
 
 
-def read_old_dialog(old_dir: str, old_bot: str | None, chat: str, days: int) -> list[tuple[str, str, int]]:
-    """[(who, text, ts_ms)]，who = user / bot，时间正序。只取这个私聊的。"""
+def read_old_dialog(old_dir: str, old_bot: str | None, chat: str, days: int,
+                   since_ms: int = 0) -> list[tuple[str, str, int]]:
+    """[(who, text, ts_ms)]，who = user / bot，时间正序。只取这个私聊的。
+
+    since_ms > 0（增量模式）时只取 ts 晚于水位线的（水位线那条本身不导，它已经在账本里），--days 不再起作用。
+    """
     proj = chat_history._project_dir(old_dir)
     if not os.path.isdir(proj):
         return []
@@ -83,7 +93,13 @@ def read_old_dialog(old_dir: str, old_bot: str | None, chat: str, days: int) -> 
                 if typ not in ("user", "assistant") or o.get("isCompactSummary"):
                     continue
                 ts = chat_history._parse_iso_safe(o.get("timestamp", ""))
-                if not ts or ts < cutoff:
+                if not ts:
+                    continue
+                ts_ms = int(ts * 1000)
+                if since_ms:
+                    if ts_ms <= since_ms:  # 增量模式：水位线那条本身不导（它已经在账本里）
+                        continue
+                elif ts < cutoff:
                     continue
                 content = (o.get("message") or {}).get("content", "")
                 if typ == "assistant":
@@ -95,14 +111,14 @@ def read_old_dialog(old_dir: str, old_bot: str | None, chat: str, days: int) -> 
                             text = (inp.get("text") or inp.get("message") or "").strip()
                             to = str(inp.get("chat_id") or "") or None
                             if text and (to is None or to == chat):
-                                out.append(("bot", text, int(ts * 1000)))
+                                out.append(("bot", text, ts_ms))
                     continue
                 raw = chat_history._extract_text(content)
                 if not raw or chat_history._is_internal_injection(raw) or _chat_of(raw) != chat:
                     continue
                 text = chat_history._strip_crossmem(chat_history._strip_channel_wrapper(raw)).strip()
                 if len(text) >= 1:
-                    out.append(("user", text, int(ts * 1000)))
+                    out.append(("user", text, ts_ms))
     # 同一条可能出现在多个会话文件里：按（谁、时间、内容）去重
     uniq = []
     for r in sorted(out, key=lambda r: r[2]):
@@ -161,10 +177,11 @@ def dry_run_seen(bot: str, chat: str) -> None:
         print("这个聊天在新系统里已经聊过（账本里有会话段），正式导入会跳过：聊天记录和承诺都不会导入。")
 
 
-def import_dialog(db: sqlite3.Connection, chat: str, rows: list[tuple[str, str, int]]) -> int:
+def import_dialog(db: sqlite3.Connection, chat: str, rows: list[tuple[str, str, int]],
+                  allow_existing: bool = False) -> int:
     if not rows:
         return 0
-    if _has_segments(db, chat):
+    if not allow_existing and _has_segments(db, chat):
         raise SystemExit(SEEN_EXIT)
     now = int(time.time() * 1000)
     first, last = rows[0][2], rows[-1][2]
@@ -192,6 +209,91 @@ def import_dialog(db: sqlite3.Connection, chat: str, rows: list[tuple[str, str, 
                 (now, chat, json.dumps({"rows": len(rows), "segment": seg})))
     db.commit()
     return len(rows)
+
+
+# ─── 增量模式（切回新系统时的回程补料） ───
+
+WM_EXIT = ("拿不到水位线：账本里没有这个聊天的记录，算不出「切走之前最后一条」是哪个时刻。\n"
+           "手动指定从哪个时刻之后开始导：--since <unix 毫秒>（date +%s 得到的是秒，乘 1000）")
+
+
+def _read_watermark(bot: str, chat: str) -> int:
+    """水位线 = 账本里该聊天最后一条记录的时刻（毫秒）。
+
+    对方说的（inbound）和 bot 真正发出去的（outbound）取较晚的：只按 inbound 算的话，
+    切走前最后一条若是她的回复，回程补料会把这条再数一遍（内容有去重、账不重，但白记数）。
+    只读打开（不建目录、不建文件）；账本不在、没有该聊天的行、或读不了，都算取不到。
+    """
+    path = _ledger_path(bot)
+    if not os.path.exists(path):
+        raise SystemExit(WM_EXIT)
+    try:
+        db = sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            row = db.execute(
+                "SELECT MAX(t) FROM ("
+                " SELECT MAX(ts) AS t FROM inbound WHERE chat_id = ?"
+                " UNION ALL"
+                " SELECT MAX(COALESCE(sent_at, created_at)) AS t FROM outbound"
+                "  WHERE chat_id = ? AND kind = 'text' AND state IN ('sent', 'ambiguous'))",
+                (chat, chat)).fetchone()
+        finally:
+            db.close()
+    except Exception as e:  # 文件坏了、被锁、不是账本：只报类名，不带路径和内容
+        raise SystemExit(f"读不了账本（{type(e).__name__}），拿不到水位线。手动指定：--since <unix 毫秒>")
+    if not row or row[0] is None:
+        raise SystemExit(WM_EXIT)
+    return int(row[0])
+
+
+def mark_reseed(db: sqlite3.Connection, chat: str) -> int:
+    """把这个聊天还活着的段标成"下一轮重新取前情"。
+
+    网关下一轮碰到这个段（续接或重开）会照常构建"前情"（长期记忆 + 摘要 + 最近原话），
+    刚导入的旧系统记录就在原话里——这样她开口时能接上，而不是让记录躺在账本里没人看。
+    """
+    cur = db.execute("UPDATE segments SET needs_seed = 1 WHERE chat_id = ? AND state = 'active'", (chat,))
+    db.commit()
+    return cur.rowcount
+
+
+def run_incremental(a, old: str, promises: str, chat: str) -> None:
+    """只导水位线之后的旧记录与还没到点的承诺；导入后标 needs_seed 让下一轮重新取前情。"""
+    if not a.dry_run and _gateway_running(a.bot):
+        raise SystemExit("这个 bot 的网关还在运行，先停掉再导入")
+    if a.since == "auto":
+        since = _read_watermark(a.bot, chat)
+    else:
+        try:
+            since = int(str(a.since).strip())
+        except ValueError:
+            raise SystemExit(f"--since 要么是 auto，要么是 unix 毫秒数：{a.since}")
+        if since <= 0:
+            raise SystemExit(f"--since 的毫秒数要大于 0：{a.since}")
+    when = time.strftime("%m-%d %H:%M", time.localtime(since / 1000))
+    try:
+        rows = read_old_dialog(old, a.old_bot, chat, a.days, since_ms=since)
+    except Exception as e:  # 旧会话文件读不了：只报类名（与现有风格一致）
+        raise SystemExit(f"读不了旧记录（{type(e).__name__}），没法导入。")
+    if not rows:
+        print(f"这段时间没有新记录（旧系统里没有晚于水位线 {since}（{when}）的私聊记录）。")
+        return
+    items = pending_promises(promises, chat, int(time.time() * 1000)) if os.path.exists(promises) else []
+    print(f"增量导入（水位线 {since}，{when}）：对方 {sum(1 for r in rows if r[0] == 'user')} 条，bot {sum(1 for r in rows if r[0] == 'bot')} 条")
+    print(f"还没到点的旧承诺：{len(items)} 条")
+    if a.dry_run:
+        print("（--dry-run：只数条数，什么都没写）")
+        return
+    db = _open_ledger(a.bot)
+    try:
+        n = import_dialog(db, chat, rows, allow_existing=True)
+        m = import_promises(db, items)
+        marked = mark_reseed(db, chat)
+    finally:
+        db.close()
+    tail = "这个聊天还活着的会话已标成「下一轮重新取前情」，她下一轮就会带上这段。" if marked \
+        else "她下一轮开新会话时会照常带上这段前情。"
+    print(f"已导入：聊天记录 {n} 条，承诺 {m} 条。{tail}")
 
 
 # ─── 旧承诺 ───
@@ -282,6 +384,8 @@ def main() -> None:
     ap.add_argument("--from", dest="old", required=True, help="旧频道目录")
     ap.add_argument("--old-bot", help="旧系统里的 bot 名（用来精确找到它的会话文件）")
     ap.add_argument("--days", type=int, default=30)
+    ap.add_argument("--since", metavar="毫秒|auto",
+                    help="增量模式：只补这个时刻（unix 毫秒）之后的旧记录；auto = 账本里该聊天最后一条记录的时刻")
     ap.add_argument("--dry-run", action="store_true", help="只数条数，不写")
     ap.add_argument("--inspect-promises", action="store_true", help="只看 .promises.json 的结构")
     a = ap.parse_args()
@@ -296,6 +400,9 @@ def main() -> None:
     chat = _owner(old)
     if not chat:
         raise SystemExit("旧频道目录的 access.json 里没有 allowFrom，不知道主人的私聊是哪个")
+    if a.since is not None:
+        run_incremental(a, old, promises, chat)
+        return
     if not a.dry_run and _gateway_running(a.bot):
         raise SystemExit("这个 bot 的网关还在运行，先停掉再导入")
     rows = read_old_dialog(old, a.old_bot, chat, a.days)
