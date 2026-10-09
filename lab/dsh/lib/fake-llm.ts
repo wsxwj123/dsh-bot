@@ -43,7 +43,13 @@ function lastUserText(messages: any[]): string {
     const m = messages[i]
     if (m.role !== 'user') continue
     const t = textOf(m.content)
-    if (t) return t
+    if (!t) continue
+    // dsh 在会话第一轮会把技能目录追加成一条 <system-reminder> 开头的 user 消息，
+    // 排在真实用户消息之后（技能目录非空时才发；Windows 上 sandbox-windows-acl 插件
+    // 自带一个技能，所以 Windows 上必然出现）。它不是「用户说的话」：剧本匹配要越过它
+    // 往前找，否则第一轮永远匹配不到用户文本（CI 上 real-dsh 首条用例整轮无回复就是这么来的）。
+    if (t.trimStart().startsWith('<system-reminder>')) continue
+    return t
   }
   return ''
 }
