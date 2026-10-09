@@ -30,6 +30,20 @@ from _pw_util import OWNER  # noqa: E402
 BUN = shutil.which("bun")
 REAL_DSH_HOME = Path(os.path.expanduser("~")) / ".dsh-bot"   # 在任何 monkeypatch 之前定住
 
+# Windows 上只给 PATH / HOME 会让子进程起不来（bun 直接 abort，python 报哈希随机化初始化失败），
+# 把系统必需的那几个变量照原样带过去。HOME 仍指向每个用例的隔离家目录。
+_WIN_ESSENTIALS = ("SystemRoot", "SystemDrive", "windir", "TEMP", "TMP", "USERPROFILE", "APPDATA",
+                   "LOCALAPPDATA", "ComSpec", "PATHEXT", "NUMBER_OF_PROCESSORS")
+
+
+def _child_env(home, extra=None):
+    env = {k: os.environ[k] for k in _WIN_ESSENTIALS if k in os.environ}
+    env["PATH"] = os.environ.get("PATH", "")
+    env["HOME"] = str(home)
+    if extra:
+        env.update({k: str(v) for k, v in extra.items()})
+    return env
+
 
 def _free_port():
     s = socket.socket()
@@ -81,7 +95,7 @@ def make_ledger(sandbox):
     def _make(bot="newbot", who=OWNER, text="你好"):
         r = subprocess.run([BUN, str(HERE / "make_ledger.ts"), str(sandbox["root"]), bot, "none" if who is None else str(who), text],
                            cwd=str(GATEWAY_DIR), capture_output=True, text=True, timeout=120,
-                           env={"PATH": os.environ.get("PATH", ""), "HOME": str(sandbox["home"])})
+                           env=_child_env(sandbox["home"]))
         assert r.returncode == 0, f"生成账本失败：{r.stderr[-2000:]}"
         p = sandbox["root"] / "bots" / bot / "state" / "ledger.sqlite"
         assert p.exists(), "网关没有生成账本"
@@ -104,8 +118,7 @@ def old_channel(sandbox):
 def run_import(sandbox):
     """(bot, from_dir, *extra) -> CompletedProcess。在隔离环境里运行 scripts/import_history.py。"""
     def _run(bot, from_dir, *extra):
-        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(sandbox["home"]), "DSH_BOT_HOME": str(sandbox["root"]),
-               "PYTHONIOENCODING": "utf-8"}
+        env = _child_env(sandbox["home"], {"DSH_BOT_HOME": str(sandbox["root"]), "PYTHONIOENCODING": "utf-8"})
         return subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "import_history.py"), bot, "--from", str(from_dir), *extra],
                               cwd=str(sandbox["tmp"]), capture_output=True, text=True, timeout=120, env=env)
     return _run
