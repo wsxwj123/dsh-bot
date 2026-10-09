@@ -1,8 +1,15 @@
 // logs_tmux.sh 的行为（用假 tmux 记录器，不真起会话）。launchd 项本身（tmuxLogsAgent）的测试在 autostart.test.ts。
+//
+// 整个文件在 Windows 上跳过：被测的 logs_tmux.sh 是一份 POSIX shell 脚本（launchd 登录项专用，
+// 产品侧本来就不在 Windows 上跑），用例要用 /bin/bash 起它——Windows 上没有这个路径，
+// 14 条会全部挂在 ENOENT 上。按需求书第 75 行的口径（非 macOS 上要能跳过），
+// 用统一的 testIf 让整个文件在 Windows 上注册为 skip，不在每个用例里散加判平台。
 import { expect, test } from 'bun:test'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, resolve } from 'path'
+
+const testIf = process.platform === 'win32' ? test.skip : test
 
 const REPO = resolve(import.meta.dir, '..', '..', '..')
 const SCRIPT = join(REPO, 'gateway', 'scripts', 'logs_tmux.sh')
@@ -70,7 +77,7 @@ function calls(s: Env): string[][] {
   return text ? text.split('\n').map(l => l.split('\t')) : []
 }
 
-test('会话名与命令拼装：tg-<bot>-dsh，里面跟 logs.ts -f --chat，路径用单引号引用；已存在的会话跳过', () => {
+testIf('会话名与命令拼装：tg-<bot>-dsh，里面跟 logs.ts -f --chat，路径用单引号引用；已存在的会话跳过', () => {
   const s = setup({ 'bot7.yml': 'id: bot7\n# 注释\nblue: 1\n', 'bot8.yml': 'id: bot8\n' }, 'tg-bot8-dsh')
   const r = run(s, { LOGS_TMUX_VERBOSE: '1' })
   expect(r.exitCode).toBe(0)
@@ -88,7 +95,7 @@ test('会话名与命令拼装：tg-<bot>-dsh，里面跟 logs.ts -f --chat，�
   expect(cs[cs.length - 1]).toEqual(['CALL has-session', '-t', '=tg-bot8-dsh'])
 })
 
-test('幂等：已存在的会话一个都不动（只 has-session，没有 new，更没有 kill）', () => {
+testIf('幂等：已存在的会话一个都不动（只 has-session，没有 new，更没有 kill）', () => {
   const s = setup({ 'bot7.yml': 'id: bot7\n', 'bot8.yml': 'id: bot8\n' }, 'tg-bot7-dsh:tg-bot8-dsh')
   const r = run(s, { LOGS_TMUX_VERBOSE: '1' })
   expect(r.exitCode).toBe(0)
@@ -96,7 +103,7 @@ test('幂等：已存在的会话一个都不动（只 has-session，没有 new�
   expect(calls(s).map(c => c[0])).toEqual(['CALL has-session', 'CALL has-session'])
 })
 
-test('launchd 场景（没有终端）：一切正常时完全静默，不刷 launchd 的日志文件', () => {
+testIf('launchd 场景（没有终端）：一切正常时完全静默，不刷 launchd 的日志文件', () => {
   const s = setup({ 'bot7.yml': 'id: bot7\n' }, 'tg-bot7-dsh')
   const r = run(s)
   expect(r.exitCode).toBe(0)
@@ -104,7 +111,7 @@ test('launchd 场景（没有终端）：一切正常时完全静默，不刷 la
   expect(r.stderr.toString()).toBe('')
 })
 
-test('不碰旧系统的会话：worker / dispatcher 名字相近也照常只看自己的精确会话名，从不 kill', () => {
+testIf('不碰旧系统的会话：worker / dispatcher 名字相近也照常只看自己的精确会话名，从不 kill', () => {
   const s = setup({ 'bot7.yml': 'id: bot7\n' }, 'tg-bot7-worker:tg-bot7-dispatcher:tg-bot7-dsh-2')
   const r = run(s, { LOGS_TMUX_VERBOSE: '1' })
   expect(r.exitCode).toBe(0)
@@ -116,7 +123,7 @@ test('不碰旧系统的会话：worker / dispatcher 名字相近也照常只看
   expect(src).not.toMatch(/kill-session|kill-server|tmux attach/)
 })
 
-test('配置文件不合格的跳过：没有 id、id 带非法字符的都不建；其余照常', () => {
+testIf('配置文件不合格的跳过：没有 id、id 带非法字符的都不建；其余照常', () => {
   const s = setup({ '_global.yml': '# 没有 id\nfoo: 1\n', 'bot7.yml': 'id: bot7\n', 'weird.yml': 'id: "bad id"\n' }, '')
   const r = run(s, { LOGS_TMUX_VERBOSE: '1', LANG: 'en_US.UTF-8' }) // 这一条会打到「$id」那句
   expect(r.exitCode).toBe(0)
@@ -127,7 +134,7 @@ test('配置文件不合格的跳过：没有 id、id 带非法字符的都不�
   expect(calls(s).filter(c => c[0] === 'CALL new').length).toBe(1)
 })
 
-test('文件名不在白名单里的跳过（没有终端也提示）：带 ;、$(...)、双引号的名字不会进 tmux 命令串', () => {
+testIf('文件名不在白名单里的跳过（没有终端也提示）：带 ;、$(...)、双引号的名字不会进 tmux 命令串', () => {
   const s = setup({
     'bot7.yml': 'id: bot7\n',
     'evil;touch pwned.yml': 'id: evil\n',
@@ -147,7 +154,7 @@ test('文件名不在白名单里的跳过（没有终端也提示）：带 ;、
   expect(news[0]![4]).not.toContain('evil')
 })
 
-test('路径含空格和单引号时按单引号转义，交给 sh 执行后语义不变（假 bun 收到原样的 --config 路径）', () => {
+testIf('路径含空格和单引号时按单引号转义，交给 sh 执行后语义不变（假 bun 收到原样的 --config 路径）', () => {
   const s = setup({}, '')
   const weirdCfg = join(s.tmp, "cfg dir 'x")
   mkdirSync(weirdCfg, { recursive: true })
@@ -164,14 +171,14 @@ test('路径含空格和单引号时按单引号转义，交给 sh 执行后语�
   expect(readFileSync(bunLog, 'utf8')).toBe(['gateway/scripts/logs.ts', '--config', join(weirdCfg, 'bot7.yml'), '-f', '--chat'].join('\n') + '\n')
 })
 
-test('没有配置目录：说清楚并正常退出（还没切 bot 的机器）', () => {
+testIf('没有配置目录：说清楚并正常退出（还没切 bot 的机器）', () => {
   const s = setup({}, '')
   const r = run(s, { DSH_BOT_CONFIGS_DIR: join(s.tmp, '不存在的目录'), LANG: 'en_US.UTF-8' })
   expect(r.exitCode).toBe(0)
   expect(r.stdout.toString()).toContain('没有配置目录')
 })
 
-test('目录里没有（启用中的）bot 配置：提示一行', () => {
+testIf('目录里没有（启用中的）bot 配置：提示一行', () => {
   const s = setup({ 'note.txt': 'x', 'bot3.yml': 'id: bot3\nenabled: false\n' }, '')
   const r = run(s)
   expect(r.exitCode).toBe(0)
@@ -179,7 +186,7 @@ test('目录里没有（启用中的）bot 配置：提示一行', () => {
   expect(calls(s).length).toBe(0) // 停用的连 has-session 都不查
 })
 
-test('只给启用中的 bot 建会话：enabled 假值的跳过，没写/真值/带引号的照常（口径与 list_enabled_bots 一致）', () => {
+testIf('只给启用中的 bot 建会话：enabled 假值的跳过，没写/真值/带引号的照常（口径与 list_enabled_bots 一致）', () => {
   const s = setup({
     'bot2.yml': 'id: bot2\n',
     'bot3.yml': 'id: bot3\ndispatcher_port: 17953\nenabled: false   # 现在跑在旧栈\n',
@@ -201,7 +208,7 @@ test('只给启用中的 bot 建会话：enabled 假值的跳过，没写/真值
 
 // launchd 的 plist 设了 LANG=en_US.UTF-8：bash 3.2 会把中文标点的首字节吃进变量名，
 // 手工跑（shell 的 locale 是 C）不复现。下面两条把 summary 的两个分支都过一遍。
-test('UTF-8 locale 下建会话：summary 行正常，没有 unbound variable', () => {
+testIf('UTF-8 locale 下建会话：summary 行正常，没有 unbound variable', () => {
   const s = setup({ 'bot7.yml': 'id: bot7\n' }, '')
   const r = run(s, { LANG: 'en_US.UTF-8', LOGS_TMUX_VERBOSE: '1' })
   expect(r.exitCode).toBe(0)
@@ -209,7 +216,7 @@ test('UTF-8 locale 下建会话：summary 行正常，没有 unbound variable', 
   expect(r.stdout.toString()).toContain('共 1 个 bot，建了 1 个、跳过 0 个。')
 })
 
-test('UTF-8 locale 下建会话失败：失败数写进 summary、退出码 1，也不炸', () => {
+testIf('UTF-8 locale 下建会话失败：失败数写进 summary、退出码 1，也不炸', () => {
   const s = setup({ 'bot7.yml': 'id: bot7\n' }, '')
   const r = run(s, { LANG: 'en_US.UTF-8', LOGS_TMUX_VERBOSE: '1', FAKE_TMUX_NEW_FAIL: '1' })
   expect(r.exitCode).toBe(1)
@@ -217,7 +224,7 @@ test('UTF-8 locale 下建会话失败：失败数写进 summary、退出码 1，
   expect(r.stdout.toString()).toContain('共 1 个 bot，建了 0 个、跳过 0 个、失败 1 个。')
 })
 
-test('找不到 bun：报错退出（BUN_BIN、~/.bun/bin/bun、PATH 三处都没有）', () => {
+testIf('找不到 bun：报错退出（BUN_BIN、~/.bun/bin/bun、PATH 三处都没有）', () => {
   const s = setup({ 'bot7.yml': 'id: bot7\n' }, '')
   const r = run(s, { BUN_BIN: '' })
   expect(r.exitCode).toBe(1)
@@ -225,7 +232,7 @@ test('找不到 bun：报错退出（BUN_BIN、~/.bun/bin/bun、PATH 三处都�
   expect(calls(s).length).toBe(0)
 })
 
-test('没有 tmux：报错退出', () => {
+testIf('没有 tmux：报错退出', () => {
   const s = setup({ 'bot7.yml': 'id: bot7\n' }, '')
   const r = Bun.spawnSync(['/bin/bash', SCRIPT], {
     env: { PATH: '/var/empty', HOME: join(s.tmp, 'home'), BUN_BIN: '/fake/bun', DSH_BOT_CONFIGS_DIR: s.cfgDir, FAKE_TMUX_LOG: s.log, FAKE_TMUX_SESSIONS: '' },
