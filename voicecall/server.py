@@ -1155,5 +1155,6 @@ async def login_submit(request: Request):
 
 if __name__ == "__main__":
     host = os.environ.get("HOST", "127.0.0.1")  # R9：默认只绑本地，Tailscale serve 反代；不再裸奔 0.0.0.0
-    print(f"voicecall demo → http://{host}:8766")
-    uvicorn.run(app, host=host, port=8766, log_level="warning")
+    port = int(os.environ.get("VOICECALL_PORT", "8766"))  # 切换期间新旧两套同时跑时，新的换个端口
+    print(f"voicecall demo → http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port, log_level="warning")

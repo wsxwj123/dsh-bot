@@ -443,6 +443,26 @@ def tick_one_bot(bot_id: str, jiwen_cfg: dict, state_dir: str, dry_run: bool = F
 
 # ─── 主入口 ────────────────────────────────────────────────
 
+def choose_bots(explicit, jiwen_bots, dsh_bots, channels_dir="~/.claude/channels"):
+    """选这次要跑的 bot（单测直接调它）。
+
+    优先级：--bot 指定单个 > 新系统的 bot（dsh_bots）> _global.yml 的 jiwen.bots > 旧系统 channels 下带
+    access.json 的目录。有 dsh_bots 时忽略 jiwen.bots 里的旧名字：切换期间旧 bot 由旧系统自己的积温任务管，
+    两边同时跑也不会重复更新同一个 bot。
+    """
+    if explicit:
+        return [explicit]
+    if dsh_bots:
+        return list(dsh_bots)
+    bots = list(jiwen_bots or [])
+    if not bots:
+        d = os.path.expanduser(channels_dir)
+        if os.path.isdir(d):
+            bots = sorted(x for x in os.listdir(d)
+                          if os.path.isfile(os.path.join(d, x, "access.json")))
+    return bots
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--bot", help="只跑单个 bot（默认全跑）")
@@ -462,15 +482,8 @@ def main():
         sys.exit(2)
 
     # 默认：新系统的 bot；没有就扫旧系统 channels 下所有带 access.json 的目录。也可用 --bot 指定单个
-    if args.bot:
-        bots = [args.bot]
-    else:
-        bots = jiwen_cfg.get("bots") or dsh_bots
-        if not bots:
-            _chdir = os.path.expanduser("~/.claude/channels")
-            if os.path.isdir(_chdir):
-                bots = sorted(d for d in os.listdir(_chdir)
-                              if os.path.isfile(os.path.join(_chdir, d, "access.json")))
+    # （有 dsh_bots 时只跑它们，忽略 _global.yml 里的旧名字，见 choose_bots）
+    bots = choose_bots(args.bot, jiwen_cfg.get("bots"), dsh_bots)
     print(f"[jiwen.tick] 开始 ts={int(time.time())} bots={bots}", file=sys.stderr)
 
     for bot_id in bots:

@@ -74,6 +74,20 @@ export const SHARED: { name: string; script: string[]; interval?: number; calend
   { name: 'voicecall', script: ['voicecall/server.py'] },
 ]
 
+/** install-shared 要装哪几项：不给 --only 就全装，给了就只装列出的。认不出的名字单独返回（要报错） */
+export function pickShared(only: string[] | undefined): { items: typeof SHARED; unknown: string[] } {
+  const unknown = (only ?? []).filter(n => !SHARED.some(j => j.name === n))
+  return { items: SHARED.filter(x => !only || only.includes(x.name)), unknown }
+}
+
+/** 和旧系统的朋友圈网页、电话同时跑时换端口：把 --web-port/--call-port 翻译成对应服务的环境变量 */
+export function sharedPortEnv(webPort?: string, callPort?: string): Record<string, Record<string, string>> {
+  return {
+    'moments-web': webPort ? { MOMENTS_WEB_PORT: webPort } : {},
+    voicecall: callPort ? { VOICECALL_PORT: callPort } : {},
+  }
+}
+
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
 export function plist(a: Agent): string {
