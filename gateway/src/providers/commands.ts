@@ -2,7 +2,7 @@
 // 从不进账本/chat.log/群聊记录/模型）与 `/provider refresh <名字>`。纯执行层：
 // - 识别、删除消息、校验、调 ProviderService、拼回复文字；回复经注入的 reply 走普通发送（kind=system）。
 // - `/provider add` 的识别排在引导拦截与群聊"只记录"之前（poller.interceptBeforeGate）：任何聊天、任何人发来都先接走。
-import { checkProviderName, checkBaseURL, cleanSecret, normName, readProviders, ProvidersUnreadable, type ProviderApi } from './store'
+import { checkProviderName, checkBaseURL, cleanSecret, normName, providersPath, readProviders, ProvidersUnreadable, type ProviderApi } from './store'
 import { deleteMessageWithRetry, type TelegramApi, type TgMessage } from '../telegram/api'
 import { registerSecret, safeError, type Logger } from '../log'
 import { fetchFailText, TRUNCATED_NOTE } from './models'
@@ -152,7 +152,7 @@ export class ProviderCommands {
     try {
       snap = readProviders(`${this.root()}/providers.json`)
     } catch (e) {
-      if (e instanceof ProvidersUnreadable) return `【系统】共用供应商文件读不了（格式坏了），先修好 ${this.root()}/providers.json`
+      if (e instanceof ProvidersUnreadable) return `【系统】共用供应商文件读不了（格式坏了），先修好 ${providersPath(this.root())}`
       throw e
     }
     const found = this.findValid(snap, name)
@@ -183,7 +183,7 @@ export class ProviderCommands {
       snap = readProviders(`${root}/providers.json`)
     } catch (e) {
       if (e instanceof ProvidersUnreadable) {
-        return { status: 503, body: { ok: false, error: 'providers_unreadable', text: noPrefix(`【系统】共用供应商文件读不了（格式坏了），先修好 ${root}/providers.json`) } }
+        return { status: 503, body: { ok: false, error: 'providers_unreadable', text: noPrefix(`【系统】共用供应商文件读不了（格式坏了），先修好 ${providersPath(root)}`) } }
       }
       throw e
     }
@@ -280,7 +280,7 @@ export function refreshResultText(root: string, name: string, r: RefreshResult):
     case 'busy': return `【系统】「${name}」正在刷新，请稍候。`
     case 'key_missing': return `【系统】「${name}」缺密钥，先用 /provider →「修改」→「密钥」补上。`
     case 'lock_timeout': return '【系统】别的 bot 正在改供应商，请稍后再试。'
-    case 'unreadable': return `【系统】共用供应商文件读不了（格式坏了），先修好 ${root}/providers.json`
+    case 'unreadable': return `【系统】共用供应商文件读不了（格式坏了），先修好 ${providersPath(root)}`
     case 'disabled': return `【系统】「${name}」配置有误，未启用，不能刷新。`
     case 'not_found': return `【系统】没有 ${name} 这个供应商。用 /provider 看有哪些。`
   }

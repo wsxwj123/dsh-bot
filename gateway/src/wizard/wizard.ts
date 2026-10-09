@@ -10,7 +10,7 @@ import { registerSecret, safeError } from '../log'
 import { deleteMessageWithRetry, isNotModified, type TelegramApi, type TgCallbackQuery, type TgInlineKeyboard, type TgMessage } from '../telegram/api'
 import { formatProviders, type ModelChoice, type ProviderView } from '../engine/commands'
 import { refreshResultText, saveResultText } from '../providers/commands'
-import { checkBaseURL, checkProviderName, cleanModelId, cleanSecret, hostOf, normName, type ProviderApi } from '../providers/store'
+import { checkBaseURL, checkProviderName, cleanModelId, cleanSecret, hostOf, normName, providersPath, type ProviderApi } from '../providers/store'
 import type { ProviderService, SaveResult } from '../providers/service'
 import { fetchFailText } from '../providers/models'
 import { decodeCb, makeNonce, toKeyboard, type Btn } from './keyboard'
@@ -240,7 +240,7 @@ export class Wizard {
     const cur = this.d.engine.current()
     let text = formatProviders(views, { provider: cur.provider, model: cur.model })
     if (!this.d.engine.providersReadable()) {
-      const warn = `⚠️ 共用供应商文件读不了（格式坏了），自建供应商暂时都不可用，也不能新建/修改/删除。请修好 ${this.d.root}/providers.json。`
+      const warn = `⚠️ 共用供应商文件读不了（格式坏了），自建供应商暂时都不可用，也不能新建/修改/删除。请修好 ${providersPath(this.d.root)}。`
       const lines = text.split('\n')
       lines.splice(1, 0, warn)
       text = lines.join('\n')
@@ -721,7 +721,7 @@ export class Wizard {
 
   private async unreadableGuard(chatId: string, st: St): Promise<boolean> {
     if (this.d.engine.providersReadable()) return false
-    await this.sendMenu(chatId, st, `【系统】共用供应商文件读不了（格式坏了），先修好 ${this.d.root}/providers.json`, [])
+    await this.sendMenu(chatId, st, `【系统】共用供应商文件读不了（格式坏了），先修好 ${providersPath(this.d.root)}`, [])
     this.endNormal(chatId)
     return true
   }
