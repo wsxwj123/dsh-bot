@@ -1,5 +1,5 @@
 // 供应商的一行快捷命令（方案 3.6）：`/provider add <名字> <地址> <密钥> [openai|anthropic]`（含密钥，
-// 从不进账本/chat.log/群聊记录/模型）与 `/provider refresh <名字>`。纯执行层：
+// 从不进账本/chat.log/群聊记录/模型）、`/provider refresh <名字>` 与 `/provider remove <名字>`。纯执行层：
 // - 识别、删除消息、校验、调 ProviderService、拼回复文字；回复经注入的 reply 走普通发送（kind=system）。
 // - `/provider add` 的识别排在引导拦截与群聊"只记录"之前（poller.interceptBeforeGate）：任何聊天、任何人发来都先接走。
 import { checkProviderName, checkBaseURL, cleanSecret, normName, providersPath, readProviders, ProvidersUnreadable, type ProviderApi } from './store'
@@ -36,6 +36,8 @@ export type CommandsDeps = {
   recordUpdate: (updateId: number) => void
   /** 有进行中的引导：先结束它（旧菜单去掉按钮、回"已退出引导。"）。返回 true = 该引导正处理中（本条只删不处理） */
   endWizardForAdd?: (chatId: string) => boolean
+  /** 删除正在用的那家时要用：读当前覆盖、清覆盖换回配置文件里的模型（与引导「删除」一致，方案 3.4.4） */
+  engine?: { current: () => { provider: string; model: string }; clearOverride: () => { provider: string; model: string } }
 }
 
 export class ProviderCommands {
@@ -169,6 +171,42 @@ export class ProviderCommands {
   /** 3.4.5 的刷新结果文案（无按钮） */
   refreshText(name: string, r: RefreshResult): string {
     return refreshResultText(this.root(), name, r)
+  }
+
+  /**
+   * `/provider remove <名字>`（方案 3.6）：只删自建供应商。复用 ProviderService.remove()——密钥进
+   * pendingKeyRemovals、按 provider_key_grace_ms 到点才删（D8），不立即删。删正在用的那家时与引导「删除」一致
+   * （3.4.4）：立即清覆盖、换回配置文件里的模型，并在文案里说明。
+   */
+  async runRemove(args: string, chatId = ''): Promise<string> {
+    const parts = args.trim().split(/\s+/).filter(Boolean)
+    if (parts.length !== 1) return '【系统】用法：/provider remove <名字>'
+    const name = parts[0]!
+    let snap
+    try {
+      snap = readProviders(`${this.root()}/providers.json`)
+    } catch (e) {
+      if (e instanceof ProvidersUnreadable) return `【系统】共用供应商文件读不了（格式坏了），先修好 ${providersPath(this.root())}`
+      throw e
+    }
+    const found = this.findValid(snap, name)
+    if (!found) {
+      const deny = (reason: string, text: string) => { this.d.log.info('command.provider_remove', { chat: chatId, ok: false, reason }); return text }
+      if (snap.invalid.some(i => normName(i.name) === normName(name))) return deny('disabled', `【系统】「${name}」配置有误，未启用，不能删除。`)
+      if (normName(name) === 'deepseek-official') return deny('builtin', `【系统】只有自建供应商能删除；${name} 是内置的。`)
+      if (this.d.configRouteNames().map(normName).includes(normName(name))) return deny('config', `【系统】只有自建供应商能删除；${name} 是配置文件里的。`)
+      return deny('not_found', `【系统】没有 ${name} 这个供应商。用 /provider 看有哪些。`)
+    }
+    const wasInUse = this.d.engine ? normName(this.d.engine.current().provider) === normName(found.name) : false
+    const r = await this.d.service.remove(found.name)
+    if (r.status === 'not_found') return `【系统】「${found.name}」已经不在了。`
+    if (r.status === 'lock_timeout') return '【系统】没删成：别的 bot 正在改供应商，请稍后再试。'
+    if (r.status === 'unreadable') return '【系统】没删成：共用供应商文件读不了（格式坏了）。'
+    if (r.status === 'save_failed') return `【系统】没删成：${r.why}。`
+    let text = `【系统】已删除供应商「${r.name}」。它的密钥会在 ${Math.round(r.graceMs / 60_000)} 分钟后从凭据文件删除（让正在用它的 bot 先切走）。注意：这只是从本机删掉，不会在供应商那边作废这把密钥；如果担心泄露，请到供应商后台作废它。`
+    if (wasInUse && this.d.engine) { const c = this.d.engine.clearOverride(); text += `这个 bot 已换回配置文件里的模型：${c.provider} / ${c.model}。` }
+    this.d.log.info('command.provider_remove', { chat: chatId, ok: true, name: r.name })
+    return text
   }
 
   /**

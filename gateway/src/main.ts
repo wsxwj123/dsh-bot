@@ -115,8 +115,9 @@ async function main(): Promise<void> {
     reply: (chatId, text) => void sender.send({ chatId, turnId: null, callSeq: 0, text, kind: 'system' }).catch(() => {}),
     recordUpdate: updateId => { ledger.recordUpdate(updateId, null) },
     endWizardForAdd: (chatId: string) => wizard.endForAdd(chatId),
+    engine: engine.wizardFacade(),
   })
-  engine.providerCommand = (_name, args) => commands.runRefresh(args)
+  engine.providerCommand = (name, args, chatId) => name === 'remove' ? commands.runRemove(args, chatId) : commands.runRefresh(args)
   engine.onPoll = () => { void service.processPendingKeys().catch(e => log.warn('provider.key_removal_failed', { err: safeError(e) })) }
   // 凭据文件 refs 的全部值登记为机密（方案 3.11：启动时）
   registerCredentialSecrets(cfg.credentialsPath)

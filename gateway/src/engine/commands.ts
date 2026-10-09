@@ -5,6 +5,7 @@
 //   /model default             换回配置文件里的
 //   /provider（/providers）     供应商列表、密钥配没配
 //   /provider <供应商>          换到这个供应商的默认模型
+//   /provider add / refresh / remove <名字>  一行新建、刷新、删除自建供应商
 //   /compact [要特别留意的内容]  把这段对话压缩成摘要，换新会话（带着摘要和最近的原话）
 // 这里只放纯函数（解析、格式），副作用在 engine 里。
 
@@ -132,6 +133,7 @@ export const HELP_TEXT = [
   '/provider <供应商> —— 换到这个供应商的第一个模型',
   '/provider add <名字> <地址> <密钥> [openai|anthropic] —— 一行新建/更新自建供应商（不写格式按 Anthropic）',
   '/provider refresh <名字> —— 重新拉这个自建供应商的模型列表',
+  '/provider remove <名字> —— 删掉这个自建供应商（它的密钥过一会儿才从凭据文件删掉）',
   '/cancel —— 退出正在进行的按钮引导',
   '/compact [要特别留意的事] —— 把这段对话压缩成摘要、换新会话，带着摘要和最近的原话',
   '/clear —— 清空这段对话的上下文，只留一份摘要',

@@ -1302,13 +1302,14 @@ export class Engine {
 
   private async cmdProvider(chatId: string, args: string): Promise<string | null> {
     const a = args.trim()
-    // /provider refresh <名字>：交给注入的 ProviderCommands（本批的 T4）。不在命令队列里等，立刻让出，
-    // 好让"同一家正在刷新"的第二次请求能被接住（方案 3.6、3.4.5）
-    const m = a.match(/^refresh(?:\s+([\s\S]*))?$/i)
+    // /provider refresh <名字>、/provider remove <名字>：交给注入的 ProviderCommands（本批的 T4）。不在命令队列里等，
+    // 立刻让出，好让"同一家正在刷新"的第二次请求能被接住（方案 3.6、3.4.5）
+    const m = a.match(/^(refresh|remove)(?:\s+([\s\S]*))?$/i)
     if (m) {
-      const rest = (m[1] ?? '').trim()
-      if (!this.providerCommand) return '【系统】暂时不能刷新供应商。'
-      void this.providerCommand('refresh', rest, chatId)
+      const sub = m[1]!.toLowerCase()
+      const rest = (m[2] ?? '').trim()
+      if (!this.providerCommand) return `【系统】暂时不能${sub === 'remove' ? '删除' : '刷新'}供应商。`
+      void this.providerCommand(sub, rest, chatId)
         .then(t => (t ? this.sender.send({ chatId, turnId: null, callSeq: 0, text: t, kind: 'system' }) : undefined))
         .catch(e => this.log.warn('command.failed', { name: 'provider', err: safeError(e) }))
       return null

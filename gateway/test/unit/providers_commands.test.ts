@@ -113,6 +113,8 @@ test('apiRefresh：读不了 503、内置/配置文件 400 not_custom、不存�
   })
 })
 
+// ─── /provider remove（方案 3.6）：复用 ProviderService.remove，保持我们"密钥延迟删"的语义（D8） ───
+
 test('apiRefresh：缺密钥 409 key_missing；刷新失败 502 fetch_failed 带 reason；被删/被改 409 changed；忙 409 busy', async () => {
   await withRoot(async (root, put) => {
     put(snapOf(['p1', entry('p1')]))
@@ -123,5 +125,66 @@ test('apiRefresh：缺密钥 409 key_missing；刷新失败 502 fetch_failed 带
     expect(await apiCmd({ root, refresh: async () => ({ status: 'changed', name: 'p1' }) }).apiRefresh('p1')).toMatchObject({ status: 409, body: { error: 'changed' } })
     expect(await apiCmd({ root, refresh: async () => ({ status: 'busy', name: 'p1' }) }).apiRefresh('p1')).toMatchObject({ status: 409, body: { error: 'busy' } })
     expect(await apiCmd({ root, refresh: async () => ({ status: 'lock_timeout' }) }).apiRefresh('p1')).toMatchObject({ status: 409, body: { error: 'busy' } })
+  })
+})
+
+type RemoveResult = { status: 'ok'; name: string; keyEnv: string | null; graceMs: number } | { status: 'not_found' } | { status: 'lock_timeout' } | { status: 'unreadable' } | { status: 'save_failed'; why: string }
+
+function removeCmd(o: { root: string; remove?: (name: string) => Promise<RemoveResult>; configRoutes?: string[]; engine?: { current: () => { provider: string; model: string }; clearOverride: () => { provider: string; model: string } } }): ProviderCommands {
+  const service = { remove: o.remove ?? (async (name: string) => ({ status: 'ok', name, keyEnv: 'PROVIDER_P1_KEY', graceMs: 600_000 })) } as unknown as ProviderService
+  return new ProviderCommands({ service, api: {} as never, log: new Logger({}), root: o.root, isOwner: () => true, botUsername: () => 'b', configRouteNames: () => o.configRoutes ?? [], reply: () => {}, recordUpdate: () => {}, engine: o.engine })
+}
+
+test('runRemove：参数不对 / 读不了文件 / 内置、配置文件、不合格、不存在', async () => {
+  await withRoot(async (root) => {
+    const c = removeCmd({ root, configRoutes: ['myroute'] })
+    expect(await c.runRemove('')).toBe('【系统】用法：/provider remove <名字>')
+    expect(await c.runRemove('a b')).toBe('【系统】用法：/provider remove <名字>')
+    expect(await c.runRemove('nosuch')).toBe('【系统】没有 nosuch 这个供应商。用 /provider 看有哪些。')
+    expect(await c.runRemove('deepseek-official')).toBe('【系统】只有自建供应商能删除；deepseek-official 是内置的。')
+    expect(await c.runRemove('myroute')).toBe('【系统】只有自建供应商能删除；myroute 是配置文件里的。')
+  })
+
+  await withRoot(async (root, put) => {
+    put(snapOf(['p1', entry('p1')], ['broken', { route: { api: 'grpc', baseURL: 'https://x/v1', apiKeyEnv: 'PROVIDER_B_KEY', models: [] }, meta: {} }]))
+    expect(await removeCmd({ root }).runRemove('broken')).toBe('【系统】「broken」配置有误，未启用，不能删除。')
+  })
+
+  await withRoot(async (root) => {
+    expect(await removeCmd({ root }).runRemove('p1')).toContain('共用供应商文件读不了（格式坏了），先修好')
+  }, { raw: '[[[' })
+})
+
+test('runRemove：成功走 service.remove（延迟删密钥），名字按规整名匹配', async () => {
+  await withRoot(async (root, put) => {
+    put(snapOf(['p1', entry('p1')]))
+    let removed = ''
+    const c = removeCmd({ root, remove: async (name) => { removed = name; return { status: 'ok', name, keyEnv: 'PROVIDER_P1_KEY', graceMs: 600_000 } } })
+    const t = await c.runRemove('P1')
+    expect(removed).toBe('p1')
+    expect(t).toContain('已删除供应商「p1」')
+    expect(t).toContain('密钥会在 10 分钟后从凭据文件删除')
+    expect(t).toContain('不会在供应商那边作废这把密钥')
+  })
+})
+
+test('runRemove：删正在用的那家，文案与引导「删除」一致（换回配置文件里的模型）', async () => {
+  await withRoot(async (root, put) => {
+    put(snapOf(['p1', entry('p1')]))
+    let cleared = 0
+    const engine = { current: () => ({ provider: 'p1', model: 'm1' }), clearOverride: () => { cleared++; return { provider: 'deepseek-official', model: 'deepseek-flash' } } }
+    const t = await removeCmd({ root, engine }).runRemove('p1')
+    expect(cleared).toBe(1)
+    expect(t).toContain('这个 bot 已换回配置文件里的模型：deepseek-official / deepseek-flash。')
+  })
+})
+
+test('runRemove：服务端失败文案（忙 / 读不了 / 写失败 / 已不在）', async () => {
+  await withRoot(async (root, put) => {
+    put(snapOf(['p1', entry('p1')]))
+    expect(await removeCmd({ root, remove: async () => ({ status: 'lock_timeout' }) }).runRemove('p1')).toBe('【系统】没删成：别的 bot 正在改供应商，请稍后再试。')
+    expect(await removeCmd({ root, remove: async () => ({ status: 'unreadable' }) }).runRemove('p1')).toBe('【系统】没删成：共用供应商文件读不了（格式坏了）。')
+    expect(await removeCmd({ root, remove: async () => ({ status: 'save_failed', why: '写文件失败（Error）' }) }).runRemove('p1')).toBe('【系统】没删成：写文件失败（Error）。')
+    expect(await removeCmd({ root, remove: async () => ({ status: 'not_found' }) }).runRemove('p1')).toBe('【系统】「p1」已经不在了。')
   })
 })
