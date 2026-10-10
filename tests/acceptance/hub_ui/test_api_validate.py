@@ -132,7 +132,14 @@ def test_模型_没有网关_503_no_gateway(hub):
     assert (body(r) or {}).get("error") == "no_gateway", "实得 %s" % body(r)
 
 
-def test_思考POST_没有网关_503_no_gateway(hub):
+def test_思考POST_没有网关_503_no_gateway(hub, dsh_bot):
+    """bot 在列表里但网关连不上，仍走 503 no_gateway 这条路径。
+
+    只带 hub 时 bot 名单为空，请求会先落成 404 bot_not_found（见下面的 GET 用例），
+    所以这里要造一个带端口的 bot，端口选个没人监听的。
+    """
+    from conftest import free_port
+    dsh_bot(name="testbot", port=free_port())
     r = hub.post(EFFORT.format("testbot"), json={"effort": "low"})
     assert r.status_code == 503, "期望 503，实得 %s" % r.status_code
     assert (body(r) or {}).get("error") == "no_gateway", "实得 %s" % body(r)
