@@ -68,6 +68,38 @@ def roots():
     return out
 
 
+def panel_bot_configs():
+    """面板展示面（朋友圈页、画风页）要的 bot 名单：两套根都读，**含停用的 bot**。
+
+    停用的 bot 不是"没有这个 bot"，是"这会儿跑在另一套系统里"，展示面照样要列出来
+    才点得回去（与 /hub 页同口径）。``config_loader.list_enabled_bots`` 的默认口径
+    （单根、只启用）是给运行时消费方（拉起、投递）用的，展示面别直接用它的默认值。
+    形状见 ``list_enabled_bots`` 的多根分支：每条多带 ``_source`` / ``_shadowed``。
+    """
+    import config_loader       # 延迟 import：本模块导入期不读 env、不碰磁盘
+    return config_loader.list_enabled_bots(include_disabled=True, dirs=roots())
+
+
+def active_bot_configs():
+    """每个 bot 取**在跑的那一份**配置，供"往 bot 投东西"的路径使用。
+
+    混跑期新系统那份 ``enabled: false`` 的意思是"现在跑在旧系统"，通道目录与 inbox
+    都在旧系统那边；投递若拿了新系统那份，东西会落进没人读的目录。规则是取优先级
+    最高的**启用份**：新系统启用就用新系统，否则回落到旧系统启用那份，两边都没有
+    启用份的 bot 不进名单。
+    """
+    import config_loader
+    from bots_registry import is_enabled
+    picked = {}
+    for source, d in roots():      # 顺序 = 优先级，靠后（新系统）赢
+        for cfg in config_loader.list_enabled_bots(include_disabled=True, dirs=[(source, d)]):
+            cur = picked.get(cfg["_bot_id"])
+            if cur is not None and is_enabled(cur) and not is_enabled(cfg):
+                continue           # 已有启用份，靠后的停用份不覆盖它
+            picked[cfg["_bot_id"]] = cfg
+    return [c for _k, c in sorted(picked.items()) if is_enabled(c)]
+
+
 def find_path(bot_id):
     """该 bot 的配置文件路径（按覆盖规则：新系统优先）；两套都没有 → None。
 

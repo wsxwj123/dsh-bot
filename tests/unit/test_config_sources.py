@@ -106,6 +106,39 @@ def test_不传dirs时形状与以前一字不变(roots):
     assert "_source" not in rows[0] and "_shadowed" not in rows[0]
 
 
+# ------------------------------------------------------------ 面板名单 / 投递名单
+
+def test_面板名单含停用的bot_两套根都在(roots):
+    """停用的 bot 是"跑在另一套系统里"，展示面照样要列出来（与 /hub 页同口径）。"""
+    _write(roots[0], "bot2")                       # 旧系统在跑
+    _write(roots[1], "bot2", enabled="false")      # 新系统那份停用
+    _write(roots[1], "bot4")
+    assert [(c["_bot_id"], c["_source"]) for c in cs.panel_bot_configs()] == [
+        ("bot2", cs.SOURCE_DSH), ("bot4", cs.SOURCE_DSH)]
+
+
+def test_投递名单取在跑那份_新系统停用则回落旧系统(roots):
+    """投递拿错那份会把通知写进没人读的目录，所以要按"哪份在跑"取。"""
+    _write(roots[0], "bot2", bot_channel_path="/old/bot2")
+    _write(roots[1], "bot2", enabled="false", bot_channel_path="/new/bot2")
+    _write(roots[1], "bot4", bot_channel_path="/new/bot4")
+    _write(roots[0], "dead", enabled="false")
+    assert [(c["_bot_id"], c["bot_channel_path"]) for c in cs.active_bot_configs()] == [
+        ("bot2", "/old/bot2"), ("bot4", "/new/bot4")]
+
+
+def test_投递名单新系统启用时新系统赢(roots):
+    _write(roots[0], "same", bot_channel_path="/old")
+    _write(roots[1], "same", bot_channel_path="/new")
+    assert [c["bot_channel_path"] for c in cs.active_bot_configs()] == ["/new"]
+
+
+def test_两边都停用不进投递名单(roots):
+    _write(roots[0], "x", enabled="false")
+    _write(roots[1], "x", enabled="false")
+    assert cs.active_bot_configs() == []
+
+
 # ------------------------------------------------------------ 写路径落点
 
 def test_find_path新系统优先_其次旧系统_都没有None(roots):

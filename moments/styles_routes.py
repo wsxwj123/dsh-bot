@@ -46,7 +46,7 @@ SAMPLE_PROMPT = ("1girl, year 2024, cover page, -1::monocrome, flat color, simpl
                  "hospital, indoors, sunlight, lens flare")
 
 
-# per-bot 画风的 bot 列表现在从 configs/*.yml 动态取（见 _enabled_bots），不再硬编码。
+# per-bot 画风的 bot 列表现在从配置根动态取（见 _style_bots），不再硬编码。
 
 # ── 生图参数白名单 ──────────────────────────────────────────────
 # 同一份清单同时供前端下拉渲染与后端校验：加新模型/采样器只改这里一行，
@@ -153,12 +153,17 @@ def _save_styles(data: dict) -> None:
         f.write("\n")
 
 
-def _enabled_bots() -> list:
-    """从 configs/*.yml 动态拿 enabled bot 列表 [{id, name}]（不再硬编码 chenlulu）。"""
+def _style_bots() -> list:
+    """画风页的 bot 列表 [{id, name}]：新旧两套配置根都读，含停用的 bot（不再硬编码 chenlulu）。
+
+    id 一律用配置文件名（``_bot_id``），生图脚本按这个名字查 active_by_bot；
+    换成 life 别名（如 chenlulu）会让绑定查不到，画风静默失效。停用的 bot 也列出，
+    画风是数据，切回新系统时要接着用。
+    """
     try:
-        import config_loader
+        from moments import config_sources
         return [{"id": b["_bot_id"], "name": b.get("display_name") or b["_bot_id"]}
-                for b in config_loader.list_enabled_bots()]
+                for b in config_sources.panel_bot_configs()]
     except Exception:
         return []
 
@@ -169,7 +174,7 @@ def styles_page():
     return render_template("styles.html", styles=data.get("styles", []),
                             active=data.get("active", ""),
                             active_by_bot=data.get("active_by_bot", {}),
-                            bots=_enabled_bots())
+                            bots=_style_bots())
 
 
 @styles_bp.route("/api/styles", methods=["GET"])
@@ -258,7 +263,7 @@ def api_set_active():
         if not any(s["id"] == style_id for s in data["styles"]):
             return jsonify({"error": "style not found"}), 404
         if bot:  # 设某个 bot 的画风
-            if bot not in {b["id"] for b in _enabled_bots()}:
+            if bot not in {b["id"] for b in _style_bots()}:
                 return jsonify({"error": f"unknown bot {bot}"}), 400
             data.setdefault("active_by_bot", {})[bot] = style_id
         else:  # 无 bot：设全局兜底（兼容旧调用）

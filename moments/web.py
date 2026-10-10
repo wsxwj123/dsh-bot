@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import db
 import config_loader
 from moments.styles_routes import styles_bp
+from moments import config_sources
 from moments import env_file
 from moments import hub_auth
 from moments import redact
@@ -218,6 +219,18 @@ def _moments_id(b: dict) -> str:
     return b.get("_life_id") or b["_bot_id"]
 
 
+def _bot_cfg_by_name(uid: str):
+    """按朋友圈里记的名字反查 bot 配置（取"在跑的那份"）。
+
+    旧系统的 bot 记的就是配置名，新系统的 bot 记的是 life 别名（如 chenlulu），
+    单根 load_bot 找不到后者，会让整条通知发不出去。查不到回 None，调用方兜底。
+    """
+    for cfg in config_sources.active_bot_configs():
+        if _moments_id(cfg) == uid:
+            return cfg
+    return None
+
+
 def _bot_meta(b: dict) -> dict:
     bot_id = _moments_id(b)
     profile = db.get_profile(bot_id)
@@ -257,7 +270,8 @@ def feed():
     ids = [m["id"] for m in moments]
     likes_map = db.likers_bulk(ids)
     comments_map = db.comments_bulk(ids)
-    bots = config_loader.list_enabled_bots()
+    # 新旧两套配置根都读，含停用的 bot（"跑在另一套系统里"不等于页面上没有这个 bot）
+    bots = config_sources.panel_bot_configs()
     bot_meta_by_id = {_moments_id(b): _bot_meta(b) for b in bots}
     # 用户自己作为"虚拟 bot"，其朋友圈卡片头像/名字也走这里
     bot_meta_by_id[USER_PROFILE_KEY] = _user_meta()
@@ -400,7 +414,7 @@ def api_comment():
 
     if target_bot:
         try:
-            cfg = config_loader.load_bot(target_bot)
+            cfg = _bot_cfg_by_name(target_bot) or config_loader.load_bot(target_bot)
             if _trigger_bot_moment_reply(cfg, moment, text, cid, user_display) is None:
                 db.mark_pending(cid, False)  # bot 已停用：没人会回，别让评论一直挂"待回复"
         except Exception as e:
@@ -591,8 +605,9 @@ def api_post_user_moment():
         kind="user_post", visibility=visibility,
     )
 
-    # 触发每个 bot 异步读 + 决策评论
-    for b in config_loader.list_enabled_bots():
+    # 触发每个 bot 异步读 + 决策评论。名单取"每个 bot 在跑的那份"配置：
+    # 拿新系统那份去投旧系统还在跑的 bot，通知会落进没人读的目录
+    for b in config_sources.active_bot_configs():
         try:
             _trigger_bot_see_user_moment(b, moment_id, text, image_path, visibility)
         except Exception as e:
@@ -632,8 +647,8 @@ def _trigger_bot_see_user_moment(bot_cfg: dict, moment_id: int, text: str,
         if c["from_user"] == USER_PROFILE_KEY or c["from_user"] == user_display:
             speaker = user_address
         else:
-            # 其他 bot 的 display_name
-            other_cfg = config_loader.load_bot(c["from_user"])
+            # 其他 bot 的 display_name（新旧两套根都认，新系统的 bot 记的是 life 别名）
+            other_cfg = _bot_cfg_by_name(c["from_user"]) or {}
             speaker = other_cfg.get("display_name", c["from_user"])
         others.append(f"  {speaker}: {c['text']}")
     history_block = (
