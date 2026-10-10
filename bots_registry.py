@@ -16,6 +16,11 @@ CLI 契约（INTERFACE §6，契约即测试点）::
 **停用标记**：``configs/<bot>.yml`` 顶层 ``enabled: false``。本表不吐它，
 于是所有消费方（重启脚本 / Windows 启动与注册 / 门户名单）都不认它 ——
 "停了不被任何路径拉回来"就是这一处判定负责的，不另设第二张开关表。
+
+**"某个 bot 现在算不算在跑"** 也收敛在这一处：``running_ids`` / ``disabled_ids``
+（``bot_states`` 一次扫描出两个集合）。混跑期两套配置根时，名字下**有一份启用就算在跑** ——
+新系统那份 ``enabled: false`` 的意思是"跑在旧系统"，不是停用。投递、启停徽标、
+后台生产者全按这一个答案走，谁都不许另立第二套口径。
 """
 import json
 import os
@@ -35,9 +40,11 @@ LEGACY_NAMESPACES = {"chenlulu": "550e8400-e29b-41d4-a716-446655440001"}
 
 
 def configs_dir() -> Path:
-    """配置根。测试接缝 ``HUB_CONFIGS_DIR``（INTERFACE §7），未设才走仓库 ``configs/``。
+    """旧系统的配置根。测试接缝 ``HUB_CONFIGS_DIR``（INTERFACE §7），未设才走仓库 ``configs/``。
 
-    本模块任何路径都经它取，绝不 expanduser 出真路径 —— 否则用例会去动生产配置。
+    单根读取（CLI、启动脚本、``disabled_ids`` 的默认口径）一律经它取，绝不 expanduser
+    出真路径 —— 否则用例会去动生产配置。新系统那边的根由 ``moments.config_sources``
+    定义（``_config_dirs`` 借它），本模块不自己再认一遍 ``HUB_CONFIGS_DSH_DIR``。
     """
     return Path(os.environ.get("HUB_CONFIGS_DIR") or (REPO_ROOT / "configs"))
 
@@ -56,16 +63,14 @@ def _env_port(bot_id):
     return _valid_port(os.environ.get("DISPATCHER_PORT_%s" % bot_id.upper()))
 
 
-def _scan(warn=None, dirs=None):
-    """读配置目录下的 ``*.yml``（跳过 ``_`` 开头的 `_global.yml` 等），返回 ``[(bot_id, cfg)]``。
+def _iter_configs(warn=None, dirs=None):
+    """按根顺序逐个吐 ``(bot_id, cfg)``，**同名会重复出现**（同名怎么合由调用方定）。
 
     ``dirs=None``：只扫 ``configs_dir()``（原行为）。``dirs=[目录, ...]``：按顺序扫多个根，
-    **同名以靠后的为准**（管理台读新旧两套配置时靠它实现"新系统优先"）；
     不存在的根跳过。单个 yml 坏掉不影响其余：记一行 ``skip <文件名>: <异常类名>``
     交给 ``warn``，**不带路径、不带异常正文**。
     """
     roots = list(dirs) if dirs is not None else [configs_dir()]
-    seen = {}
     for d in roots:
         d = Path(d)
         if not d.is_dir():
@@ -82,7 +87,14 @@ def _scan(warn=None, dirs=None):
                 if warn is not None:
                     warn("skip %s: %s" % (path.name, type(e).__name__))
                 continue
-            seen[path.stem] = (path.stem, cfg)     # 后扫的根覆盖同名，最后按 id 排序吐
+            yield path.stem, cfg
+
+
+def _scan(warn=None, dirs=None):
+    """读配置目录下的 ``*.yml``，返回 ``[(bot_id, cfg)]``（同名以靠后的根为准）。"""
+    seen = {}
+    for bot_id, cfg in _iter_configs(warn, dirs):
+        seen[bot_id] = (bot_id, cfg)     # 后扫的根覆盖同名，最后按 id 排序吐
     return [seen[k] for k in sorted(seen)]
 
 
@@ -181,29 +193,68 @@ def ports(dirs=None):
     return {b["id"]: b["port"] for b in bots(include_disabled=True, dirs=dirs)}
 
 
-def disabled_ids(dirs=None):
-    """被 ``enabled: false`` 停用的 bot id 集合。管理台按它给行打"已停用"徽标。
+def bot_states(warn=None, dirs=None):
+    """``(running, known)``：一次扫描出两个集合，"在跑与否"的**唯一判定**。
 
-    ``dirs`` 见 ``_scan``：多根时同名以靠后（新系统）那份的 enabled 为准。
+    - ``running``：现在在跑的 bot 名，**某个名字下只要有一份启用配置就算在跑**。
+      多根（新旧两套配置）时这条是要害：新系统那份 ``enabled: false`` 的意思是
+      "这会儿跑在另一套系统里"，不是"停用" —— 按"同名以新系统为准"判会把旧栈
+      正在跑的 bot 判成停的，通知写进没人读的目录。
+    - ``known``：扫到的全部名字（含停用的）。
+
+    ``dirs`` 见 ``_iter_configs``：单根时 running 就是 ``enabled`` 为真的那些，
+    与 ``bots()`` 同口径。
     """
-    return {bot_id for bot_id, cfg in _scan(dirs=dirs) if not is_enabled(cfg)}
+    running, known = set(), set()
+    for bot_id, cfg in _iter_configs(warn, dirs):
+        known.add(bot_id)
+        if is_enabled(cfg):
+            running.add(bot_id)
+    return running, known
+
+
+def running_ids(warn=None, dirs=None):
+    """现在在跑的 bot 名集合。投递、启停徽标、后台生产者都按它判。"""
+    return bot_states(warn, dirs)[0]
+
+
+def disabled_ids(warn=None, dirs=None):
+    """被停用的 bot 名（一份启用配置都没有的）。管理台按它给行打"已停用"徽标。
+
+    与 ``running_ids`` 出自同一次扫描，两处不可能给出不同答案。``dirs`` 见 ``_iter_configs``。
+    """
+    running, known = bot_states(warn, dirs)
+    return known - running
 
 
 _safe_warned = False
 
 
+def _config_dirs():
+    """读配置用的根：旧 + 新两套。根的定义只在 ``moments.config_sources`` 一处，这里借它的顺序。
+
+    多根是要紧的：某个 bot 迁到新系统以后，旧系统那份会留着 ``enabled: false``
+    （那句的意思是"跑在新系统"），只扫旧根会把正在跑的 bot 判成停的。
+    """
+    from moments import config_sources      # 延迟 import：本模块被运行时脚本与 CLI 共用
+    return [d for _source, d in config_sources.roots()]
+
+
 def disabled_ids_safe():
     """``disabled_ids()`` 的 fail-open 包装：后台生产者（导演 / 主动消息 / 朋友圈 / 语音）判"停用"的唯一入口。
 
-    逐文件容错由 ``_scan`` 负责（别的 bot 的 yml 坏了不影响本 bot 被判停用）；这里只兜目录级异常：
-    整个 configs 读不了 → 空集（= 都当启用，退回改动前行为），stderr 只报一次类名。
+    判定与投递面、启停徽标同一处（``disabled_ids``，新旧两套根、只要有一份启用就算在跑）。
+    逐文件容错由 ``_iter_configs`` 负责（别的 bot 的 yml 坏了不影响本 bot 被判停用）；
+    这里只兜目录级异常：整个配置读不了 → 空集（= 都当启用，退回改动前行为），
+    stderr 只报一次类名。
     """
     global _safe_warned
     try:
-        d = configs_dir()
-        if d.is_dir():
-            os.listdir(d)   # glob 会静默吞掉 PermissionError：显式探一次，让"目录读不了"可观测
-        return disabled_ids()
+        dirs = _config_dirs()
+        for d in dirs:
+            if Path(d).is_dir():
+                os.listdir(d)   # glob 会静默吞掉 PermissionError：显式探一次，让"目录读不了"可观测
+        return disabled_ids(dirs=dirs)
     except Exception as e:
         if not _safe_warned:
             _safe_warned = True

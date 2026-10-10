@@ -112,10 +112,12 @@ def list_bots():
 
 
 def disabled_ids():
-    """被 ``enabled: false`` 停用的 bot id 列表（排序后的）。读不出配置就回空 —— 停用标记
-    查不到时按"都启用"显示，比让整个列表 500 好；行本身的在线状态照样如实探活。
+    """现在没在跑的 bot id 列表（排序后的）。读不出配置就回空 —— 判定不出来时按"都启用"
+    显示，比让整个列表 500 好；行本身的在线状态照样如实探活。
 
-    新旧两套配置都算；同名以新系统那份的 enabled 为准（``_scan`` 的覆盖规则）。
+    新旧两套配置都算，口径与投递面、后台生产者**同一处**（``bots_registry.disabled_ids``）：
+    名字下只要有一份启用就算在跑（新系统那份 ``enabled: false`` 的意思是跑在旧系统，
+    不是停用）。这个列表就是"哪个 bot 现在算不算在跑"在页面上的那张脸。
     """
     if os.environ.get("HUB_BOTS_FILE"):
         return []                    # 名单被注入替换（测试态）：配置目录与它无关，不猜
@@ -129,8 +131,12 @@ def disabled_ids():
 def bot_sources():
     """``{bot_id: {"source": "legacy"|"dsh", "shadowed": bool}}``：给 /hub/api/bots 标来源用。
 
-    - ``source``：这份配置来自旧系统还是新系统；
+    - ``source``：**这个 bot 生效的那份**配置来自哪一套（在跑的那份优先，没有在跑的
+      按覆盖规则取优先级最高那份）——与停用徽标、启停开关写哪份文件同一口径，
+      一行里的三个东西不会各指一份文件；
     - ``shadowed``：两套里同名，**新系统那份生效**、旧那份被压住了（页面据此提示覆盖关系）。
+      只有新系统那份真在生效才算"压住"：旧系统那份还在跑时，新系统那份只是停着，
+      说"旧配置不再生效"就成了谎话。
 
     读不出来回 ``{}``（来源标注缺失不该把名单本身拖成 500）。``HUB_BOTS_FILE`` 注入名单时
     也回 ``{}``：那份名单是测试接缝，与配置目录无关，不猜来源。
@@ -139,9 +145,17 @@ def bot_sources():
         return {}
     try:
         import config_loader
-        rows = config_loader.list_enabled_bots(include_disabled=True, dirs=_source_roots())
-        return {c["_bot_id"]: {"source": c.get("_source"),
-                               "shadowed": bool(c.get("_shadowed"))} for c in rows}
+        from moments import config_sources
+        eff = config_sources.effective_configs()
+        out = {}
+        for c in config_loader.list_enabled_bots(include_disabled=True, dirs=_source_roots()):
+            cur = eff.get(c["_bot_id"]) or c
+            out[c["_bot_id"]] = {
+                "source": cur.get("_source"),
+                "shadowed": bool(c.get("_shadowed")) and
+                            cur.get("_source") == config_sources.SOURCE_DSH,
+            }
+        return out
     except Exception:
         return {}
 

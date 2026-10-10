@@ -215,52 +215,39 @@ def _ago(ts: int) -> str:
 
 
 def _moments_id(b: dict) -> str:
-    """朋友圈库里记这个 bot 用的名字：新系统的 bot 用旧系统里的名字（config_loader 的 _life_id）"""
-    return b.get("_life_id") or b["_bot_id"]
+    """朋友圈库里记这个 bot 用的名字（= "这个人"的键）。实现只有一处，见 config_sources.person_id。"""
+    return config_sources.person_id(b)
 
 
 def _bot_cfg_by_name(uid: str):
-    """按朋友圈里记的名字反查 bot 配置（取"在跑的那份"）。
+    """按朋友圈里记的名字反查 bot 配置（取"这个人在跑的那份"）。
 
     旧系统的 bot 记的就是配置名，新系统的 bot 记的是 life 别名（如 chenlulu），
-    单根 load_bot 找不到后者，会让整条通知发不出去。查不到回 None，调用方兜底。
+    单根 load_bot 找不到后者，会让整条通知发不出去。查不到回 None 表示这个人
+    没在跑（停用 / 没有对应配置），调用方据此不投递 —— 这里不去别处再查一遍。
     """
-    for cfg in config_sources.active_bot_configs():
-        if _moments_id(cfg) == uid:
-            return cfg
-    return None
+    return config_sources.delivery_config_for(uid)
 
 
-def _cfg_rank(cfg: dict) -> tuple:
-    """撞名时两份配置谁赢。在跑的那份优先，其次新系统（dsh）优先。"""
-    return (1 if is_enabled(cfg) else 0,
-            1 if cfg.get("_source") == config_sources.SOURCE_DSH else 0)
-
-
-def _cfg_tag(cfg: dict) -> str:
-    """日志里指认一份配置，如 bot5(dsh)。"""
-    return "%s(%s)" % (cfg.get("_bot_id") or cfg.get("id"), cfg.get("_source") or "单根")
+def _warn_collision(key: str, dropped: dict, kept: dict):
+    """撞名留痕：撞了哪两份配置写一行 stderr，将来两个不同的人撞同一个 life 名时不至于看不出丢了谁。"""
+    sys.stderr.write("[moments.web] 朋友圈名 %s 撞车，%s 与 %s，留 %s\n"
+                     % (key, config_sources.config_tag(dropped),
+                        config_sources.config_tag(kept), config_sources.config_tag(kept)))
 
 
 def _moments_bot_meta(bots: list) -> dict:
     """朋友圈名到 bot meta 的映射，撞名时只留一份。
 
     朋友圈数据按 life 名存，新系统的 bot5 与旧栈的 yasuna 都记 yasuna，名字相同
-    即同一份数据，只能出一个 chip。挑法是在跑的那份优先，其次新系统优先；
-    撞车往 stderr 记一行，将来两个不同的人撞同一个 life 名时不至于看不出丢了谁。
+    即同一份数据，只能出一个 chip。挑法（``config_sources.pick_per_person``）与
+    投递面共用一处：展示面指哪个 bot，通知就投给哪个 bot，不许两张脸各指一个。
+    撞车不静默，留痕见 ``_warn_collision``。
     """
-    picked = {}
-    for b in bots:
-        key = _moments_id(b)
-        cur = picked.get(key)
-        if cur is None:
-            picked[key] = b
-            continue
-        win = b if _cfg_rank(b) > _cfg_rank(cur) else cur
-        sys.stderr.write("[moments.web] 朋友圈名 %s 撞车，%s 与 %s，留 %s\n"
-                         % (key, _cfg_tag(cur), _cfg_tag(b), _cfg_tag(win)))
-        picked[key] = win
-    return {k: _bot_meta(v) for k, v in picked.items()}
+    picked, collisions = config_sources.pick_per_person(bots)
+    for c in collisions:
+        _warn_collision(c["key"], c["dropped"], c["kept"])
+    return {config_sources.person_id(v): _bot_meta(v) for v in picked}
 
 
 def _bot_meta(b: dict) -> dict:
@@ -447,9 +434,10 @@ def api_comment():
 
     if target_bot:
         try:
-            cfg = _bot_cfg_by_name(target_bot) or config_loader.load_bot(target_bot)
-            if _trigger_bot_moment_reply(cfg, moment, text, cid, user_display) is None:
-                db.mark_pending(cid, False)  # bot 已停用：没人会回，别让评论一直挂"待回复"
+            cfg = _bot_cfg_by_name(target_bot)
+            if cfg is None or _trigger_bot_moment_reply(cfg, moment, text, cid,
+                                                        user_display) is None:
+                db.mark_pending(cid, False)  # 这个人没在跑：没人会回，别让评论一直挂"待回复"
         except Exception as e:
             db.mark_pending(cid, False)
             print(f"[api_comment] trigger {target_bot} failed: {e}", flush=True)
@@ -475,11 +463,17 @@ def _deliver_dsh(bot_dir: str, chat_id: str, text: str, source: str, key: str) -
 
 def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
                               comment_id: int, user_display: str):
-    """写 inbox JSON 让 dispatcher 唤起 worker；worker 通过 Bash 调脚本回写朋友圈。"""
+    """写 inbox JSON 让 dispatcher 唤起 worker；worker 通过 Bash 调脚本回写朋友圈。
+
+    ``cfg`` 必须来自 ``config_sources.delivery_config_for`` / ``delivery_configs``
+    （"这个人在跑的那份"）。停用这道闸照旧守着（需求⑤：停用的 bot 不写 inbox），
+    只是判定改问"算不算在跑"那一处（``config_sources.is_running``）—— 旧版问的是
+    只扫旧根的单根口径，迁到新系统的 bot 会被误判成停的。
+    """
     bot_dir = cfg["bot_channel_path"]
     chat_id = str(cfg["chat_id"])
     target = cfg["_bot_id"] if "_bot_id" in cfg else cfg.get("id")
-    if target in disabled_ids_safe():  # 需求⑤：停用的 bot 不写 inbox、不拉起（停用期间的评论不在启用后补发）
+    if not config_sources.is_running(target):
         sys.stderr.write(f"[moments.web] {target} stopped, skip\n")
         return None
     inbox = os.path.join(bot_dir, "chats", chat_id, "inbox")
@@ -572,7 +566,6 @@ def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
 # 混跑期投递路径手里有 bot 的"在跑的那份"配置，端口以那份自己的 dispatcher_port 为准，
 # 注册表按名字查的是"新系统优先"那份，旧栈还在跑的 bot 会连到新栈的端口上。
 from moments.bots_client import bot_port as _bot_port
-from bots_registry import disabled_ids_safe, is_enabled  # noqa: E402  需求⑤ 停用判定唯一入口
 import urllib.request  # noqa: E402
 
 _urlopen = urllib.request.urlopen  # HTTP 注入点（INTERFACE §10.4），测试换成记录器
@@ -582,13 +575,15 @@ def _ensure_worker_alive(bot_id: str, chat_id: str, bot_dir: str, cfg: dict = No
     """POST 该 bot dispatcher 的 /ensure_worker：查活+拉起原子完成（跨平台，替代 tmux）。
     session uuid/slug 由 dispatcher 内部算，这里不再猜（旧版按 mtime 猜 uuid + 手拼
     slug 是丢记忆隐患，且旧 per-chat 会话名根本匹配不上 unified worker）。
-    停用的 bot（需求⑤）→ 不拉起。
+
+    停用的 bot（需求⑤）不拉起。判"停用"问的是 ``config_sources.is_running`` ——
+    全仓唯一那处"算不算在跑"，不再是一次只扫旧根的单根判定。
 
     ``cfg`` 传 bot 的"在跑的那份"配置时，端口用这份自己的 ``dispatcher_port``。
     混跑期同名 bot 两套根里各有一份，全局注册表按"新系统优先"合并，旧栈还在跑的
     bot 会查到新栈那个没人听的端口（真机实测 bot2 旧栈 17802 在听、新栈 17952 拒连），
     通知写进了正确的 inbox，拉起那一跳却静默失败。"""
-    if bot_id in disabled_ids_safe():
+    if not config_sources.is_running(bot_id):
         sys.stderr.write(f"[moments.web] {bot_id} stopped, skip\n")
         return None
     port = _bot_port(bot_id, cfg)
@@ -646,9 +641,10 @@ def api_post_user_moment():
         kind="user_post", visibility=visibility,
     )
 
-    # 触发每个 bot 异步读 + 决策评论。名单取"每个 bot 在跑的那份"配置：
-    # 拿新系统那份去投旧系统还在跑的 bot，通知会落进没人读的目录
-    for b in config_sources.active_bot_configs():
+    # 触发每个 bot 异步读 + 决策评论。名单就是投递名单（"谁在跑、每个投给谁"的唯一来源）：
+    # 拿新系统那份去投旧系统还在跑的 bot，通知会落进没人读的目录；同一个人两份配置
+    # 都启用时也只投一份，不重复打扰。
+    for b in config_sources.delivery_configs():
         try:
             _trigger_bot_see_user_moment(b, moment_id, text, image_path, visibility)
         except Exception as e:
