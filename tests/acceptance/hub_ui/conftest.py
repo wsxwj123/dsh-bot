@@ -106,6 +106,18 @@ def sandbox(tmp_path, monkeypatch):
     return {"root": root, "home": home, "tmp": tmp_path, "env": env}
 
 
+@pytest.fixture
+def allow_private_base_url(monkeypatch):
+    """打开内网地址逃生门，对应产品里的 HUB_ALLOW_PRIVATE_BASE_URL=1。
+
+    默认口径下内网与回环地址在管理台保存时就被拒，这条默认行为由
+    tests/unit/test_m4_dsh.py::test_保存供应商_内网地址在管理台侧就被拒且不转发给网关 覆盖。
+    本目录真网关那批用例要拿 http://127.0.0.1 的本机桩当上游，只能显式开门，
+    不是放松判定。故意不做 autouse，谁需要谁声明依赖，作用域收窄到那几条用例。
+    """
+    monkeypatch.setenv("HUB_ALLOW_PRIVATE_BASE_URL", "1")
+
+
 def _load_app():
     mod = sys.modules.get("moments.web")
     mod = importlib.reload(mod) if mod else importlib.import_module("moments.web")

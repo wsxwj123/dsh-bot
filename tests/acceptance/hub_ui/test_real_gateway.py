@@ -3,6 +3,8 @@
 
 假件只用在最外层：假 Telegram、假模型列表接口。中间的管理台与网关都是真进程（Flask 用 test_client，
 网关用 bun 子进程）。没有 bun 时整批 skip。
+
+上游桩只能落在本机回环地址，用它的用例依赖 conftest 的 allow_private_base_url 开逃生门。
 """
 import json
 import urllib.error
@@ -22,8 +24,12 @@ KEY = "test-key-7e2e-unique-0000000001"
 
 
 @pytest.fixture
-def models_stub():
-    """假模型列表接口（对方那一层）：OpenAI 形，路径以 /models 结尾。"""
+def models_stub(allow_private_base_url):
+    """假模型列表接口（对方那一层）：OpenAI 形，路径以 /models 结尾。
+
+    桩挂在本机回环地址上，默认口径下管理台会拒这个地址，所以用本桩的用例
+    依赖 allow_private_base_url 显式开逃生门。
+    """
     s = StubGateway(key=KEY).start()
     s.on("/v1/models", 200, {"object": "list", "data": [
         {"id": "m1", "object": "model"}, {"id": "m2", "object": "model"}]})
