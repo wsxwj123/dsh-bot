@@ -20,7 +20,7 @@ def _cfg(tmp_path, **over):
 
 def _stub(monkeypatch, web, spawned):
     monkeypatch.setattr(web, "_ensure_worker_alive",
-                        lambda bid, cid, d: spawned.append(bid))
+                        lambda bid, cid, d, cfg=None: spawned.append(bid))
     monkeypatch.setattr(web, "_deliver_dsh", lambda *a, **k: False)
     monkeypatch.setattr(web, "_user_display_name", lambda: "我")
     monkeypatch.setattr(web.db, "list_comments", lambda mid: [])

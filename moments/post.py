@@ -575,7 +575,8 @@ def _write_moment_image(bot_id: str, bot_cfg: dict, moment_id: int,
     with open(fname, "w", encoding="utf-8") as f:
         _json.dump(payload, f, ensure_ascii=False)
     from moments.web import _ensure_worker_alive
-    _ensure_worker_alive(bot_id, chat_id, bot_dir)
+    # 端口用 bot_cfg 自己的（在跑的那份），全局注册表对跑在旧栈的 bot 会查到新栈端口
+    _ensure_worker_alive(bot_id, chat_id, bot_dir, bot_cfg)
     return fname
 
 

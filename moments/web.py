@@ -560,14 +560,17 @@ def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
     with open(fname, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False)
 
-    # 关键：worker 没活就 spawn（dispatcher 监听的是 telegram 不是 inbox）
-    _ensure_worker_alive(target, chat_id, bot_dir)
+    # 关键：worker 没活就 spawn（dispatcher 监听的是 telegram 不是 inbox）。
+    # 端口从 cfg 取（在跑的那份），别再按名字查全局注册表
+    _ensure_worker_alive(target, chat_id, bot_dir, cfg)
     return fname
 
 
 # bot 端口：唯一事实源 = bots_registry（扫 configs/*.yml），加 bot 零代码改动。
 # 直接用 bots_client.bot_port 而不再自建派生表：那张表是导入期快照，
 # 既看不见新加的 bot，也漏掉了 DISPATCHER_PORT_<BOT> 覆盖（探活认、这里不认，两处不一致）。
+# 混跑期投递路径手里有 bot 的"在跑的那份"配置，端口以那份自己的 dispatcher_port 为准，
+# 注册表按名字查的是"新系统优先"那份，旧栈还在跑的 bot 会连到新栈的端口上。
 from moments.bots_client import bot_port as _bot_port
 from bots_registry import disabled_ids_safe, is_enabled  # noqa: E402  需求⑤ 停用判定唯一入口
 import urllib.request  # noqa: E402
@@ -575,15 +578,20 @@ import urllib.request  # noqa: E402
 _urlopen = urllib.request.urlopen  # HTTP 注入点（INTERFACE §10.4），测试换成记录器
 
 
-def _ensure_worker_alive(bot_id: str, chat_id: str, bot_dir: str):
+def _ensure_worker_alive(bot_id: str, chat_id: str, bot_dir: str, cfg: dict = None):
     """POST 该 bot dispatcher 的 /ensure_worker：查活+拉起原子完成（跨平台，替代 tmux）。
     session uuid/slug 由 dispatcher 内部算，这里不再猜（旧版按 mtime 猜 uuid + 手拼
     slug 是丢记忆隐患，且旧 per-chat 会话名根本匹配不上 unified worker）。
-    停用的 bot（需求⑤）→ 不拉起。"""
+    停用的 bot（需求⑤）→ 不拉起。
+
+    ``cfg`` 传 bot 的"在跑的那份"配置时，端口用这份自己的 ``dispatcher_port``。
+    混跑期同名 bot 两套根里各有一份，全局注册表按"新系统优先"合并，旧栈还在跑的
+    bot 会查到新栈那个没人听的端口（真机实测 bot2 旧栈 17802 在听、新栈 17952 拒连），
+    通知写进了正确的 inbox，拉起那一跳却静默失败。"""
     if bot_id in disabled_ids_safe():
         sys.stderr.write(f"[moments.web] {bot_id} stopped, skip\n")
         return None
-    port = _bot_port(bot_id)
+    port = _bot_port(bot_id, cfg)
     if not port:
         sys.stderr.write(f"[ensure_worker] 未知 bot {bot_id}，跳过 spawn\n")
         return
@@ -743,7 +751,9 @@ def _trigger_bot_see_user_moment(bot_cfg: dict, moment_id: int, text: str,
     # 拉起用配置文件名而不是上面的 bot_id。端口注册表按 configs/<名>.yml 建键，
     # 新系统的 bot 在朋友圈里记的是 life 名（bot4 记 chenlulu），拿它查不到端口，
     # 通知会写进 inbox 却没人被拉起，静默积压。
-    _ensure_worker_alive(bot_cfg.get("_bot_id") or bot_id, chat_id, bot_dir)
+    # 端口跟着 bot_cfg 走（在跑的那份），注册表的"新系统优先"合并对旧栈在跑的
+    # bot 会给错端口（真机 bot2 旧栈 17802 在听、新栈 17952 拒连），拉起同样静默失败。
+    _ensure_worker_alive(bot_cfg.get("_bot_id") or bot_id, chat_id, bot_dir, bot_cfg)
 
 
 @app.route("/api/comment/<int:comment_id>", methods=["DELETE"])

@@ -146,14 +146,24 @@ def bot_sources():
         return {}
 
 
-def bot_port(bot_id):
-    """端口优先级：``DISPATCHER_PORT_<BOT大写>`` → 注册表；都查不到回 None（unknown 态）。
+def bot_port(bot_id, cfg=None):
+    """端口优先级：``DISPATCHER_PORT_<BOT大写>`` → 传入配置的 ``dispatcher_port`` → 注册表；
+    都查不到回 None（unknown 态）。
+
+    ``cfg`` 是"这个 bot 在跑的那份配置"（``config_sources.active_bot_configs`` 给的）时，
+    端口取它自己写的那个。混跑期同名 bot 两套配置根里各有一份，注册表按"新系统优先"
+    合并，旧栈还在跑的 bot 会查到新栈那个没在听的端口，拉起 worker 静默失败。
+    不传 ``cfg`` 或那份没写端口仍走注册表，单根机器与既有调用方行为不变。
 
     口径与 scripts/self_initiate.py 一致，env 覆盖优先级**不变**（[I1] §6.1）。
     非法值（空串/不是数字/越界）当查不到处理，
     宁可显示 unknown 也不要拿垃圾端口去连一个不相干的服务。
     """
-    raw = os.environ.get("DISPATCHER_PORT_%s" % bot_id.upper(), bot_ports().get(bot_id))
+    raw = os.environ.get("DISPATCHER_PORT_%s" % bot_id.upper())
+    if raw is None and isinstance(cfg, dict):
+        raw = cfg.get("dispatcher_port")
+    if raw is None:
+        raw = bot_ports().get(bot_id)
     try:
         port = int(raw)
     except (TypeError, ValueError):
