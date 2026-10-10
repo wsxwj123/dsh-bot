@@ -111,11 +111,83 @@ def test_投递系统消息_带口令和电话里bot说过的话(gateway):
     assert body == {"chat_id": "42", "source": "call", "text": "⟦系统·电话⟧ 回顾", "key": "k1", "bot_lines": ["三点提醒你"]}
 
 
-def test_管理台换新系统bot的模型(gateway):
+def _hub_client():
     from moments.hub_routes import hub_bp
     app = Flask(__name__, template_folder=str(ROOT / "moments" / "templates"))
     app.register_blueprint(hub_bp)
-    c = app.test_client()
+    return app.test_client()
+
+
+_SAVE_PROVIDER = "/hub/api/dsh-model/provider/save"
+
+
+def _save_body(base_url, key="sk-unit-000000000001"):
+    return {"name": "myproxy", "api": "openai-completions", "baseURL": base_url,
+            "key": key, "mode": "create"}
+
+
+def _forwarded():
+    """假网关收到的 /v1/provider/save 调用（管理台转发没转发，看这里）。"""
+    return [call for call in _FakeGateway.calls if call[1] == "/v1/provider/save"]
+
+
+def test_保存供应商_内网地址在管理台侧就被拒且不转发给网关(gateway, monkeypatch):
+    """新页面这条保存路径必须与老路径（POST /hub/api/provider）同一把 SSRF 尺子。
+
+    老路径走 provider_model._check_base_url，内网、回环、链路本地、保留网段一律拒。
+    这里钉住审计实测的两条（127.0.0.1 的任意端口、169.254.169.254）加几个同类。
+    被拒就不能转发：转发就等于让持密钥的网关去打内网。
+    """
+    from moments import provider_model
+    monkeypatch.setattr(provider_model, "resolve_host", lambda host: [])   # 单测不联网
+    monkeypatch.delenv("HUB_ALLOW_PRIVATE_BASE_URL", raising=False)
+    c = _hub_client()
+    for url in ("http://127.0.0.1:8317/v1", "https://169.254.169.254/latest/meta-data",
+                "http://10.1.2.3/v1", "http://192.168.0.1/v1", "http://[::1]/v1",
+                "http://198.18.0.1/v1"):
+        r = c.post(_SAVE_PROVIDER, json=_save_body(url))
+        assert r.status_code == 400, "%s 应被拒，实得 %s" % (url, r.status_code)
+        j = r.get_json()
+        assert j["ok"] is False and j["error"] == "bad_url", "%s 实得 %s" % (url, j)
+        assert j["text"], "%s 的正文要有原因，实得 %s" % (url, j)
+    assert _forwarded() == [], "被拒的地址一个都不该转发给网关"
+
+
+def test_保存供应商_公网地址放行_转发给网关(gateway, monkeypatch):
+    """另一侧：公网地址照旧放行（解析不出按放行处理，这是老尺子的既有口径）。"""
+    from moments import provider_model
+    monkeypatch.setattr(provider_model, "resolve_host", lambda host: [])
+    monkeypatch.delenv("HUB_ALLOW_PRIVATE_BASE_URL", raising=False)
+    c = _hub_client()
+    c.post(_SAVE_PROVIDER, json=_save_body("https://api.example.com/v1"))
+    assert _forwarded(), "公网地址该转发给网关，实得 %s" % _FakeGateway.calls
+
+
+def test_保存供应商_逃生门开着时内网地址放行_转发给网关(gateway, monkeypatch):
+    """HUB_ALLOW_PRIVATE_BASE_URL=1 是老路径的逃生门（真在内网自建网关的用户），新路径同一扇门。"""
+    monkeypatch.setenv("HUB_ALLOW_PRIVATE_BASE_URL", "1")
+    c = _hub_client()
+    c.post(_SAVE_PROVIDER, json=_save_body("http://127.0.0.1:8088/v1"))
+    assert _forwarded(), "开了逃生门就该转发，实得 %s" % _FakeGateway.calls
+
+
+def test_保存供应商_网关客户端的本地错误翻成写端点JSON形状(gateway, monkeypatch):
+    """非网络异常（响应体不是 JSON、读不到 state 文件之类）也要是 {"ok","error","text"}。
+
+    冒泡出去会变成框架级 500，没有 text 可显示，页面只能报"失败"。
+    """
+    def boom(ch, body):
+        raise ValueError("boom")               # 本地错误：不是 URLError，也不是超时或中断
+    monkeypatch.setattr(gateway_client, "provider_save", boom)
+    c = _hub_client()
+    r = c.post(_SAVE_PROVIDER, json=_save_body("https://api.example.com/v1"))
+    assert r.status_code == 500, "实得 %s" % r.status_code
+    j = r.get_json() or {}
+    assert j.get("ok") is False and j.get("error") == "internal" and j.get("text"), "实得 %s" % j
+
+
+def test_管理台换新系统bot的模型(gateway):
+    c = _hub_client()
     page = c.get("/hub/dsh-model").get_data(as_text=True)
     assert 'href="/hub/dsh-model"' in page and page.count('class="chip on"') == 1
     bots = c.get("/hub/api/dsh-model").get_json()["bots"]
