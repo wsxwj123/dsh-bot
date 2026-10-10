@@ -49,6 +49,8 @@ body { font-family:var(--font-body); background:var(--bg); color:var(--ink);
 .bot-switcher { flex:1; display:flex; gap:6px; overflow-x:auto;
   scrollbar-width:none; }
 .bot-switcher::-webkit-scrollbar { display:none; }
+/* 画风/管理台/日期这几个不定宽入口。窄屏下它们要能给 bot 那排让路（见 480 断点） */
+.nav-tools { display:flex; align-items:center; gap:12px; }
 .bot-chip { padding:4px 11px; border-radius:999px; font-size:13px;
   white-space:nowrap; background:transparent; color:var(--ink-soft);
   border:1px solid var(--hairline-strong); cursor:pointer;
@@ -290,6 +292,12 @@ body { font-family:var(--font-body); background:var(--bg); color:var(--ink);
                      to { opacity:1; transform:translateY(0); } }
 
 @media (max-width:480px) {
+  /* 窄屏：bot 那排独占一整行（桌面上它与工具项抢宽度，手机上会被挤成一条缝看不全），
+     画风/管理台/日期换到第二行；工具项自己放不下时能横滑，不撑破页面 */
+  .topnav-inner { flex-wrap:wrap; row-gap:8px; }
+  .bot-switcher { flex:1 0 100%; }
+  .nav-tools { width:100%; overflow-x:auto; scrollbar-width:none; }
+  .nav-tools::-webkit-scrollbar { display:none; }
   .topnav-inner, .profile, .moment, .chapter, .range-bar { padding-left:14px; padding-right:14px; }
   .moment { padding-top:16px; }
   .profile { margin-top:-48px; }
@@ -313,12 +321,14 @@ body { font-family:var(--font-body); background:var(--bg); color:var(--ink);
       <a class="bot-chip {% if active_bot == b.id %}active{% endif %}" href="/?bot={{ b.id }}">{{ b.name }}</a>
       {% endfor %}
     </div>
-    <button class="bot-chip" id="img-provider-chip" title="点击切换 ComfyUI / NovelAI（也可在 telegram 用 /img 切换）">
-      🎨 {{ image_provider }}
-    </button>
-    <a class="bot-chip" href="/styles" title="管理 NovelAI 画风预设">🎨 画风</a>
-    <a class="bot-chip" href="/hub" title="模型来源与 bot 状态">← 管理台</a>
-    <span class="date-link">{{ moments|length }} 条</span>
+    <div class="nav-tools">
+      <button class="bot-chip" id="img-provider-chip" title="点击切换 ComfyUI / NovelAI（也可在 telegram 用 /img 切换）">
+        🎨 {{ image_provider }}
+      </button>
+      <a class="bot-chip" href="/styles" title="管理 NovelAI 画风预设">🎨 画风</a>
+      <a class="bot-chip" href="/hub" title="模型来源与 bot 状态">← 管理台</a>
+      <span class="date-link">{{ moments|length }} 条</span>
+    </div>
   </div>
 </nav>
 
