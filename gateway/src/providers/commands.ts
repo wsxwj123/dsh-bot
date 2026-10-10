@@ -10,7 +10,7 @@ import { deleteMessageWithRetry, type TelegramApi, type TgMessage } from '../tel
 import { registerSecret, safeError, type Logger } from '../log'
 import { fetchFailText, TRUNCATED_NOTE } from './models'
 import type { ProviderService, RefreshResult, SaveResult } from './service'
-import { effortLabel } from '../wizard/text'
+import { effortLabel, looksLikeSecret } from '../wizard/text'
 
 /** 本机接口 `POST /v1/provider/refresh` 的返回（方案 3.8）：HTTP 状态码 + 机读错误码 + 文案 */
 export type ApiRefreshResult = { status: number; body: { ok: boolean; error?: string; reason?: string; count?: number; added?: number; removed?: number; kept_manual?: number; text: string } }
@@ -29,6 +29,20 @@ export function isProviderAdd(text: string | undefined | null): boolean {
   return !!text && /^\/provider(@\S+)?\s+add(\s|$)/i.test(text.trim())
 }
 
+/** 名字栏里填的是密钥时的拒文（本机接口版）。句式沿用 Telegram 的 KEY_AS_ANSWER_BAD
+ *  （「这条像是密钥，没有当作…」），去掉【系统】前缀，也不说「已删除」（本机接口没有删
+ *  任何东西）。**不回显输入值**。 */
+const NAME_IS_SECRET_TEXT = '这条像是密钥，没有当作供应商名字（密钥要填在密钥那一栏），换个名字'
+
+/** sk- / sk_ 打头的密钥前缀（OpenAI、Anthropic、DeepSeek 几家都是这个形状） */
+const SECRET_NAME_PREFIX = /^sk[-_]/i
+
+/** 名字栏像不像密钥。主判据是与 Telegram 同源的 looksLikeSecret；再加一条密钥前缀：
+ *  审计复现用的 sk-SECRETNAME-abcdefgh 全是字母、不含数字，looksLikeSecret 判不出来
+ *  （它要求字母加数字是为了不误删聊天字，名字场景没有这个约束），只搬那一条等于放走
+ *  审计给出的复现 payload。 */
+const nameLooksLikeSecret = (name: string): boolean =>
+  looksLikeSecret(name) || SECRET_NAME_PREFIX.test(name.trim())
 const DELETED_NOTE = '（你发的密钥消息已删除。）'
 const NOT_DELETED_NOTE = '（你发的密钥消息没能删除，请手动删掉它。）'
 const ADD_USAGE = '【系统】用法：/provider add <名字> <地址> <密钥> [openai|anthropic]（不写格式按 Anthropic）。'
@@ -288,6 +302,10 @@ export class ProviderCommands {
     const rawKey = typeof body.key === 'string' ? body.key : ''
     if (rawKey) { registerSecret(rawKey); registerSecret(rawKey.trim()) }
     const name = body.name
+    // 名字框里塞了密钥：硬拦（nameLooksLikeSecret）。网页这条路原来只有前端一道软拦，
+    // 判据与网关不同，直连本机接口就能绕过去，密钥会被写进 providers.json 的键名、
+    // 回显进 text、落进 gateway.log。文案与判定都不回显输入值。
+    if (typeof name === 'string' && nameLooksLikeSecret(name)) return apiErr(400, 'bad_name', NAME_IS_SECRET_TEXT)
     if (typeof name !== 'string' || !isProviderName(name)) return apiErr(400, 'bad_name', NAME_FORMAT_WHY)
     if (RESERVED.includes(normName(name)) || this.d.configRouteNames().map(normName).includes(normName(name))) {
       return apiErr(400, 'name_taken', `${name} 是内置、配置文件里的供应商或保留字，不能用，换个名字`)
@@ -348,6 +366,8 @@ export class ProviderCommands {
 
   /** `POST /v1/provider/remove`（3.3）：与 /provider remove 同一套判定与文案（去掉【系统】前缀） */
   async apiRemove(name: unknown): Promise<ApiResult> {
+    // 与 apiSave 同一道硬拦：删除端点的名字也会进 text 与日志，像密钥的一律拒
+    if (typeof name === 'string' && nameLooksLikeSecret(name)) return apiErr(400, 'bad_name', NAME_IS_SECRET_TEXT)
     if (typeof name !== 'string' || !isProviderName(name)) return apiErr(400, 'bad_name', NAME_FORMAT_WHY)
     const o = await this.removeCore(name, '')
     switch (o.kind) {
