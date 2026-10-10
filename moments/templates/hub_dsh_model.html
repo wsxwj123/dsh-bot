@@ -305,10 +305,20 @@ async function removeProvider(p) {
   if (!confirm('删除供应商「' + p.name + '」？会同时删除它的密钥，10 分钟后从凭据文件删掉。')) return;
   const s = await hubApi('/hub/api/dsh-model/provider/' + encodeURIComponent(p.name) + '/remove',
                          {method: 'POST', body: JSON.stringify({})});
-  persistMsg(p.name + '：' + ((s.body && (s.body.text || s.body.detail || s.body.error)) || ('失败（' + s.status + '）')));
+  const t = p.name + '：' + ((s.body && (s.body.text || s.body.detail || s.body.error)) || ('失败（' + s.status + '）'));
   if (s.body && s.body.error === 'providers_unreadable') providersUnreadable = true;
   paintBanner();
-  if (s.status === 200) await load();
+  if (s.status === 200) {
+    persistMsg(t);
+    await load();
+  } else if (s.status === 504) {
+    // 504 贴着网关最坏情况，这次删除可能已经写进去了，重拉列表让用户核对，
+    // 不能停留在原状诱导用户再点一次（那就是第二次写）。
+    persistMsg(t + '，列表已重新拉取，请核对。');
+    await load();
+  } else {
+    persistMsg(t);
+  }
 }
 
 // ── 「管理」面板：同一时间只开一个 ────────────────────────
