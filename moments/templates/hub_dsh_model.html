@@ -3,106 +3,514 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>新系统模型 · 管理台</title>
+<title>供应商与模型 · 管理台</title>
 </head>
 <body>
 {% include "_nav.html" %}
 <div class="wrap">
-  <h1>新系统模型</h1>
-  <div class="sub">新系统（dsh）bot 用的模型。和在 Telegram 里发 /model 是一回事：换了以后这个 bot 的所有聊天从下一条消息起生效，重启后保持；选「配置文件里的」换回去。</div>
+  <h1>供应商与模型</h1>
+  <div class="sub">新系统（dsh）bot 用的模型与供应商，在这里做完整闭环。改完几秒内生效，正在用它的聊天下一条消息会先写交接摘要再开新会话。</div>
+  <div class="muted" style="margin-bottom:12px">三个来源：内置（网关自带）、配置文件（bot 的 yml 里写的）、自建（在这里加，对全部新系统 bot 生效）。</div>
+
+  <div class="card" id="banner" hidden><div id="banner-text" class="muted"></div></div>
+
   <div class="card">
     <div class="row" style="justify-content:space-between">
-      <h2 style="margin:0">bot</h2>
+      <h2 style="margin:0">bot 用什么模型</h2>
       <button class="btn ghost mini" type="button" id="refresh">刷新</button>
     </div>
-    <div class="muted" id="msg" style="margin-top:6px"></div>
-    <table style="margin-top:8px">
-      <thead><tr><th>bot</th><th>现在用的</th><th>换成</th><th></th></tr></thead>
+    <div class="row" id="msg" style="margin-top:6px"></div>
+    <table class="stack" style="margin-top:8px">
+      <thead><tr><th>bot</th><th>现在用的</th><th>换成</th><th>思考</th><th></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
     <div class="empty" id="empty" hidden>没有在跑的新系统 bot。</div>
   </div>
+
   <div class="card" style="margin-top:14px">
-    <h2 style="margin:0">自建供应商</h2>
-    <table style="margin-top:8px">
-      <thead><tr><th>名字</th><th>格式</th><th>模型数</th><th>密钥</th><th>启用</th><th>上次刷新</th><th></th></tr></thead>
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">供应商</h2>
+      <button class="btn ghost mini" type="button" id="prefresh">刷新</button>
+    </div>
+    <button class="btn" type="button" id="add-open" style="width:100%;margin-top:8px">添加供应商</button>
+
+    <form id="pform" hidden style="margin-top:10px">
+      <div class="muted" id="form-title"></div>
+      <label for="f-name">名字</label>
+      <input id="f-name" autocomplete="off" spellcheck="false" placeholder="英文字母、数字、-、_，最长 32 个字符">
+      <div class="muted" id="f-name-hint" style="display:none;color:var(--danger)">名字框里这串看起来像密钥，密钥请填在下面的密钥框。</div>
+      <label>接口格式</label>
+      <div class="row">
+        <button class="btn mini" type="button" id="f-api-anthropic">Anthropic 格式</button>
+        <button class="btn mini ghost" type="button" id="f-api-openai">OpenAI 格式</button>
+      </div>
+      <label for="f-base">接口地址</label>
+      <input id="f-base" autocomplete="off" spellcheck="false" placeholder="https://api.example.com">
+      <div class="muted" id="f-key-note" style="display:none">换了主机或格式，需要重新输入密钥（旧密钥不会发给新地址）。</div>
+      <label for="f-key">密钥</label>
+      <input id="f-key" type="password" autocomplete="new-password">
+      <div class="muted" id="f-state" style="margin-top:6px"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" type="submit" id="f-save">保存</button>
+        <button class="btn ghost" type="button" id="f-cancel">取消</button>
+      </div>
+    </form>
+
+    <div class="muted" id="pmsg" style="margin-top:8px"></div>
+    <table class="stack" style="margin-top:8px">
+      <thead><tr><th>名字</th><th>来源</th><th>格式</th><th>模型</th><th>密钥</th><th>正在用</th><th></th></tr></thead>
       <tbody id="prows"></tbody>
     </table>
-    <div class="empty" id="pempty" hidden>没有自建供应商。</div>
+    <div class="empty" id="pempty" hidden>还没有供应商。</div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h2>说明</h2>
+    <div class="muted">自建供应商写着网关的 providers.json，改完几秒生效，正在用它的聊天下一条消息换段。加供应商要填密钥，密钥只收不显，列表上只看得到「已配密钥 / 缺密钥」。删除后密钥 10 分钟才从凭据文件删掉，要彻底作废请到供应商后台操作。内置与配置文件来源只读，要改就改网关那边的配置。</div>
   </div>
 </div>
-<script>
-const msg = document.getElementById('msg');
-function el(tag, text, cls) { const e = document.createElement(tag); if (text) e.textContent = text; if (cls) e.className = cls; return e; }
-const API_LABEL = {'openai-completions': 'OpenAI 格式', 'anthropic-messages': 'Anthropic 格式', 'openai-responses': 'OpenAI Responses 格式', 'deepseek-official': 'DeepSeek 官方'};
-const KEY_LABEL = {ok: '已配', missing: '缺密钥', none: '不需要', unknown: '不明'};
-function lastRefreshText(lr) {
-  if (!lr) return '—';
-  if (!lr.ok) return '失败：' + (lr.reason || '未知');
-  return '成功（' + (lr.count != null ? lr.count + ' 个' : '?') + '）';
+
+<template id="tpl-prov-acts">
+  <button class="btn mini" type="button" data-act="refresh">刷新模型列表</button>
+  <button class="btn mini ghost" type="button" data-act="manage">管理</button>
+  <button class="btn mini ghost" type="button" data-act="edit">编辑</button>
+  <button class="btn mini danger" type="button" data-act="del">删除</button>
+</template>
+
+<style>
+.ppanel td{background:var(--soft-bg);border-radius:8px;}
+@media (max-width:430px){
+  .stack thead{display:none;}
+  .stack tr{display:block;padding:6px 0;border-bottom:1px solid var(--hairline);}
+  .stack td{display:block;width:100%;border:none;padding:2px 0;}
+  .stack td::before{content:attr(data-label) " ";color:var(--ink-faint);font-size:12px;}
 }
+</style>
+<script>
+const $ = (id) => document.getElementById(id);
+const msg = $('msg'), pmsg = $('pmsg');
+function el(tag, text, cls) {
+  const e = document.createElement(tag);
+  if (text != null && text !== '') e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+}
+function td(label, node, cls) {
+  const c = el('td', typeof node === 'string' ? node : '', cls);
+  c.setAttribute('data-label', label);
+  if (node && typeof node !== 'string') c.appendChild(node);
+  return c;
+}
+const API_LABEL = {'openai-completions': 'OpenAI 格式', 'anthropic-messages': 'Anthropic 格式',
+                   'openai-responses': 'OpenAI Responses 格式', 'deepseek-official': 'DeepSeek 官方'};
+const SOURCE_LABEL = {custom: '自建', file: '配置文件', builtin: '内置'};
+const KEY_LABEL = {ok: '已配密钥', missing: '缺密钥', unknown: '密钥不明', none: '不需要'};
+// 档位名只在点开「思考」之后由 JS 生成，初始 HTML 里没有（验收测试钉住这一条）。
+const EFFORT_LABEL = {off: '关', low: '低', high: '高', max: '最高'};
+
+let bots = [], provs = [], provEls = {};
+let formMode = null, formApi = 'anthropic-messages', formInit = {name: '', base: '', api: 'anthropic-messages'};
+let openPanel = null;             // {name, tr, msg}
+let providersUnreadable = false;
+
+// 名字框里粘了密钥形状的串就地拦下（网关的成功文案会把名字回显出来，
+// 粘进名字框的话密钥会以「供应商名」的身份出现在页面与日志里）。
+function looksLikeSecret(s) {
+  if (typeof s !== 'string' || s.length < 8) return false;
+  if (/\s/.test(s) || s.startsWith('http')) return false;
+  return /[A-Za-z]/.test(s) && /[0-9]/.test(s);
+}
+function hostOf(url) {
+  try { return new URL(url).host; } catch (e) { return ''; }
+}
+
 async function load() {
-  hubSay(msg, '读取中…');
   const r = await hubApi('/hub/api/dsh-model');
-  const rows = document.getElementById('rows');
-  rows.textContent = '';
-  const bots = (r.body && r.body.bots) || [];
-  document.getElementById('empty').hidden = bots.length > 0;
-  hubSay(msg, r.status === 200 ? '' : '读取失败');
-  for (const b of bots) {
+  if (r.status !== 200) { showRetry(r.status); return; }   // 读失败不清空旧内容
+  const body = r.body || {};
+  bots = body.bots || [];
+  provs = body.providers || [];
+  renderBots(bots);
+  renderProviders(provs);
+  paintBanner();
+  restorePanel();
+}
+function showRetry(code) {
+  msg.textContent = '';
+  msg.appendChild(el('span', '读取失败（' + code + '）', 'muted'));
+  const b = el('button', '重试', 'btn ghost mini');
+  b.type = 'button';
+  b.onclick = load;
+  msg.appendChild(b);
+}
+function paintBanner() {
+  const alive = bots.some((b) => !b.error);
+  let t = '', block = false;
+  if (providersUnreadable) {
+    t = '共用供应商文件读不了，先修好 ~/.dsh-bot/providers.json。';
+    block = true;
+  } else if (!alive) {
+    t = '没有在运行的新系统 bot，供应商现在看不到也改不了。先把 bot 起起来。';
+    block = true;
+  }
+  $('banner').hidden = !t;
+  $('banner-text').textContent = t;
+  $('add-open').disabled = block;
+}
+
+// ── bot 表 ────────────────────────────────────────────────
+function renderBots(list) {
+  const tbody = $('rows');
+  tbody.textContent = '';
+  $('empty').hidden = list.length > 0;
+  for (const b of list) {
     const tr = document.createElement('tr');
-    tr.appendChild(el('td', b.name + (b.name !== b.id ? '（' + b.id + '）' : '')));
-    if (b.error) { tr.appendChild(el('td', '网关没响应：' + b.error, 'muted')); tr.appendChild(el('td')); tr.appendChild(el('td')); rows.appendChild(tr); continue; }
+    tr.appendChild(td('bot', b.name + (b.name !== b.id ? '（' + b.id + '）' : '')));
+    if (b.error) {
+      tr.appendChild(td('现在用的', '网关没响应：' + b.error, 'muted'));
+      tbody.appendChild(tr);
+      continue;
+    }
     const cur = b.current.provider + ' / ' + b.current.model;
     const same = b.current.provider === b.config.provider && b.current.model === b.config.model;
-    tr.appendChild(el('td', cur + (same ? '' : '（命令换的）'), 'mono'));
+    tr.appendChild(td('现在用的', cur + (same ? '' : '（命令换的）'), 'mono'));
     const sel = document.createElement('select');
     const def = document.createElement('option');
-    def.value = 'default'; def.textContent = '配置文件里的：' + b.config.provider + ' / ' + b.config.model;
+    def.value = 'default';
+    def.textContent = '配置文件里的：' + b.config.provider + ' / ' + b.config.model;
     sel.appendChild(def);
     for (const c of b.choices || []) {
       const o = document.createElement('option');
-      o.value = c.provider + '/' + c.model; o.textContent = c.provider + ' / ' + c.model;
+      o.value = c.provider + '/' + c.model;
+      o.textContent = c.provider + ' / ' + c.model;
       if (c.provider === b.current.provider && c.model === b.current.model && !same) o.selected = true;
       sel.appendChild(o);
     }
-    const td = el('td'); td.appendChild(sel); tr.appendChild(td);
-    const btn = el('button', '换', 'btn mini'); btn.type = 'button';
+    tr.appendChild(td('换成', sel));
+    const effBtn = el('button', '思考', 'btn mini ghost');
+    effBtn.type = 'button';
+    effBtn.onclick = () => toggleEffort(tr, b);
+    tr.appendChild(td('思考', effBtn));
+    const btn = el('button', '换', 'btn mini');
+    btn.type = 'button';
     btn.onclick = async () => {
       btn.disabled = true;
-      const s = await hubApi('/hub/api/dsh-model/' + encodeURIComponent(b.id), {method: 'POST', body: JSON.stringify({spec: sel.value})});
+      const s = await hubApi('/hub/api/dsh-model/' + encodeURIComponent(b.id),
+                             {method: 'POST', body: JSON.stringify({spec: sel.value})});
       btn.disabled = false;
-      hubSay(msg, b.name + '：' + ((s.body && (s.body.text || s.body.detail)) || ('失败（' + s.status + '）')));
+      showMsg(b.name + '：' + ((s.body && (s.body.text || s.body.detail)) || ('失败（' + s.status + '）')));
       if (s.status === 200) load();
     };
-    const td2 = el('td'); td2.appendChild(btn); tr.appendChild(td2);
-    rows.appendChild(tr);
-  }
-  const prowss = document.getElementById('prows');
-  prowss.textContent = '';
-  const provs = (r.body && r.body.custom_providers) || [];
-  document.getElementById('pempty').hidden = provs.length > 0;
-  for (const p of provs) {
-    const tr = document.createElement('tr');
-    tr.appendChild(el('td', p.name, 'mono'));
-    tr.appendChild(el('td', API_LABEL[p.api] || p.api || '?'));
-    tr.appendChild(el('td', p.models != null ? String(p.models) : '?'));
-    tr.appendChild(el('td', KEY_LABEL[p.key] || p.key || '?'));
-    tr.appendChild(el('td', p.enabled ? '是' : '否' + (p.note ? '（' + p.note + '）' : '')));
-    tr.appendChild(el('td', lastRefreshText(p.last_refresh), 'muted'));
-    const btn = el('button', '刷新模型列表', 'btn mini'); btn.type = 'button';
-    btn.onclick = async () => {
-      btn.disabled = true;
-      const s = await hubApi('/hub/api/dsh-model/provider/' + encodeURIComponent(p.name) + '/refresh', {method: 'POST', body: JSON.stringify({})});
-      btn.disabled = false;
-      hubSay(msg, p.name + '：' + ((s.body && (s.body.text || s.body.detail || s.body.error)) || ('失败（' + s.status + '）')));
-      if (s.status === 200) load();
-    };
-    const td = el('td'); td.appendChild(btn); tr.appendChild(td);
-    prowss.appendChild(tr);
+    tr.appendChild(td('', btn));
+    tbody.appendChild(tr);
   }
 }
-document.getElementById('refresh').onclick = load;
+
+// 档位懒加载：点开才问网关。自建供应商的模型不声明档位，choices 是空数组。
+function toggleEffort(tr, b) {
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('effpanel')) { next.remove(); return; }
+  document.querySelectorAll('tr.effpanel').forEach((x) => x.remove());
+  const panel = document.createElement('tr');
+  panel.className = 'effpanel';
+  const cell = el('td', '读取中…', 'muted');
+  cell.colSpan = 5;
+  panel.appendChild(cell);
+  tr.after(panel);
+  (async () => {
+    const r = await hubApi('/hub/api/dsh-model/' + encodeURIComponent(b.id) + '/effort');
+    cell.textContent = '';
+    if (r.status !== 200) {
+      cell.textContent = (r.body && (r.body.detail || r.body.text)) || ('读取失败（' + r.status + '）');
+      return;
+    }
+    const choices = (r.body && r.body.choices) || [];
+    if (!choices.length) { cell.textContent = '这个模型不支持调思考强度'; return; }
+    const row = el('div', null, 'row');
+    row.appendChild(el('span', '思考强度', 'muted'));
+    for (const c of choices) {
+      const isCur = r.body.current === c;
+      const b2 = el('button', EFFORT_LABEL[c] || c, isCur ? 'btn mini' : 'btn mini ghost');
+      b2.type = 'button';
+      b2.disabled = isCur;
+      b2.onclick = async () => {
+        b2.disabled = true;
+        const s = await hubApi('/hub/api/dsh-model/' + encodeURIComponent(b.id) + '/effort',
+                               {method: 'POST', body: JSON.stringify({effort: c})});
+        showMsg(b.name + '：' + ((s.body && (s.body.text || s.body.detail)) || ('失败（' + s.status + '）')));
+        if (s.status === 200) load(); else b2.disabled = false;
+      };
+      row.appendChild(b2);
+    }
+    cell.appendChild(row);
+  })();
+}
+
+// ── 供应商表 ──────────────────────────────────────────────
+function renderProviders(list) {
+  const tbody = $('prows');
+  tbody.textContent = '';
+  provEls = {};
+  $('pempty').hidden = list.length > 0;
+  const users = {};
+  for (const b of bots) {
+    const p = b.current && b.current.provider;
+    if (p) (users[p] = users[p] || []).push(b.id);
+  }
+  for (const p of list) {
+    const tr = document.createElement('tr');
+    provEls[p.name] = tr;
+    const nameTd = td('名字', p.name, 'mono');
+    if (users[p.name]) { nameTd.style.fontWeight = '700'; nameTd.style.background = 'var(--soft-bg)'; }
+    tr.appendChild(nameTd);
+    tr.appendChild(td('来源', el('span', SOURCE_LABEL[p.source] || p.source || '?', 'pill')));
+    tr.appendChild(td('格式', API_LABEL[p.api] || p.api || '?'));
+    tr.appendChild(td('模型', (p.models != null ? p.models : '?') + ' 个模型'));
+    const keyCls = p.key === 'ok' ? 'pill on' : (p.key === 'missing' ? 'pill off' : 'pill');
+    tr.appendChild(td('密钥', el('span', KEY_LABEL[p.key] || p.key || '?', keyCls)));
+    tr.appendChild(td('正在用', users[p.name] ? ('正在用 ' + users[p.name].join('、')) : '—', 'muted'));
+    const act = td('', '');
+    if (p.enabled === false) act.appendChild(el('div', '未启用：' + (p.note || '原因未知'), 'muted'));
+    if (p.source === 'custom') {
+      act.appendChild(provActs(p));
+    } else {
+      act.appendChild(el('span', '改配置文件才能动', 'muted'));
+    }
+    tr.appendChild(act);
+    tbody.appendChild(tr);
+  }
+}
+
+function provActs(p) {
+  const box = el('div', null, 'row');
+  box.appendChild($('tpl-prov-acts').content.cloneNode(true));
+  const q = (a) => box.querySelector('[data-act="' + a + '"]');
+  q('refresh').onclick = () => refreshProvider(p, q('refresh'));
+  q('manage').onclick = () => togglePanel(p);
+  q('edit').onclick = () => openForm('modify', p);
+  q('del').onclick = () => removeProvider(p);
+  return box;
+}
+
+async function refreshProvider(p, btn) {
+  btn.disabled = true;
+  const s = await hubApi('/hub/api/dsh-model/provider/' + encodeURIComponent(p.name) + '/refresh',
+                         {method: 'POST', body: JSON.stringify({})});
+  btn.disabled = false;
+  persistMsg(p.name + '：' + ((s.body && (s.body.text || s.body.detail || s.body.error)) || ('失败（' + s.status + '）')));
+  if (s.status === 200) load();
+}
+
+async function removeProvider(p) {
+  if (!confirm('删除供应商「' + p.name + '」？会同时删除它的密钥，10 分钟后从凭据文件删掉。')) return;
+  const s = await hubApi('/hub/api/dsh-model/provider/' + encodeURIComponent(p.name) + '/remove',
+                         {method: 'POST', body: JSON.stringify({})});
+  persistMsg(p.name + '：' + ((s.body && (s.body.text || s.body.detail || s.body.error)) || ('失败（' + s.status + '）')));
+  if (s.body && s.body.error === 'providers_unreadable') providersUnreadable = true;
+  paintBanner();
+  if (s.status === 200) await load();
+}
+
+// ── 「管理」面板：同一时间只开一个 ────────────────────────
+function closePanel() {
+  if (openPanel && openPanel.tr) {
+    const next = openPanel.tr.nextElementSibling;
+    if (next && next.classList.contains('ppanel')) next.remove();
+  }
+  openPanel = null;
+}
+function togglePanel(p) {
+  if (openPanel && openPanel.name === p.name) { closePanel(); return; }
+  closePanel();
+  const tr = provEls[p.name];
+  if (!tr) return;
+  const panel = document.createElement('tr');
+  panel.className = 'ppanel';
+  const cell = el('td', '', '');
+  cell.colSpan = 7;
+  panel.appendChild(cell);
+  tr.after(panel);
+  const m = el('div', '', 'muted');
+  const body = el('div', '', '');
+  cell.appendChild(m);
+  cell.appendChild(body);
+  openPanel = {name: p.name, tr: tr, msg: m};
+  drawPanel(body, p);
+}
+function drawPanel(body, p) {
+  body.textContent = '';
+  const models = p.model_list || [];
+  body.appendChild(el('div', models.length + ' 个模型', 'muted'));
+  for (const m of models) {
+    const row = el('div', null, 'row');
+    row.style.marginTop = '6px';
+    row.appendChild(el('span', m.id, 'mono'));
+    row.appendChild(el('span', '上下文 ' + (m.contextWindow != null ? m.contextWindow : '?'), 'muted'));
+    const bEdit = el('button', '改上下文', 'btn mini ghost');
+    bEdit.type = 'button';
+    bEdit.onclick = () => editContext(row, m, body, p);
+    const bDel = el('button', '删', 'btn mini danger');
+    bDel.type = 'button';
+    bDel.onclick = () => modelAction(p, {action: 'remove', id: m.id});
+    row.appendChild(bEdit);
+    row.appendChild(bDel);
+    body.appendChild(row);
+  }
+  const add = el('div', null, 'row');
+  add.style.marginTop = '10px';
+  add.appendChild(el('span', '加一个模型', 'muted'));
+  const nameIn = document.createElement('input');
+  nameIn.placeholder = '模型名';
+  nameIn.style.maxWidth = '180px';
+  nameIn.autocomplete = 'off';
+  const ctxIn = document.createElement('input');
+  ctxIn.placeholder = '上下文长度（可留空）';
+  ctxIn.style.maxWidth = '180px';
+  ctxIn.autocomplete = 'off';
+  const bAdd = el('button', '保存', 'btn mini');
+  bAdd.type = 'button';
+  bAdd.onclick = () => {
+    const payload = {action: 'add', id: nameIn.value.trim()};
+    const t = ctxIn.value.trim();
+    if (t) payload.contextWindow = Number(t);
+    modelAction(p, payload);
+  };
+  add.appendChild(nameIn);
+  add.appendChild(ctxIn);
+  add.appendChild(bAdd);
+  body.appendChild(add);
+}
+function editContext(row, m, body, p) {
+  row.textContent = '';
+  row.appendChild(el('span', m.id, 'mono'));
+  const inp = document.createElement('input');
+  inp.style.maxWidth = '160px';
+  inp.placeholder = '1024 到 100000000 的整数';
+  inp.inputMode = 'numeric';
+  inp.value = m.contextWindow != null ? String(m.contextWindow) : '';
+  row.appendChild(inp);
+  const bSave = el('button', '保存', 'btn mini');
+  bSave.type = 'button';
+  bSave.onclick = () => modelAction(p, {action: 'set_context', id: m.id, contextWindow: Number(inp.value)});
+  const bCancel = el('button', '取消', 'btn mini ghost');
+  bCancel.type = 'button';
+  bCancel.onclick = () => drawPanel(body, p);
+  row.appendChild(bSave);
+  row.appendChild(bCancel);
+}
+async function modelAction(p, payload) {
+  const keep = (openPanel && openPanel.name) || p.name;
+  if (openPanel) openPanel.msg.textContent = '正在提交…';
+  const r = await hubApi('/hub/api/dsh-model/provider/' + encodeURIComponent(p.name) + '/models',
+                         {method: 'POST', body: JSON.stringify(payload)});
+  const t = (r.body && (r.body.text || r.body.detail || r.body.error)) || ('失败（' + r.status + '）');
+  if (r.body && r.body.error === 'providers_unreadable') providersUnreadable = true;
+  await load();
+  if (openPanel && openPanel.name === keep) openPanel.msg.textContent = t;
+  else persistMsg(t);
+}
+function restorePanel() {
+  const name = openPanel && openPanel.name;
+  closePanel();
+  if (!name) return;
+  const p = provs.find((x) => x.name === name);
+  if (p) togglePanel(p);
+}
+
+// ── 添加 / 编辑表单 ───────────────────────────────────────
+function setApi(v) {
+  formApi = v === 'openai-completions' ? 'openai-completions' : 'anthropic-messages';
+  $('f-api-anthropic').className = 'btn mini' + (formApi === 'anthropic-messages' ? '' : ' ghost');
+  $('f-api-openai').className = 'btn mini' + (formApi === 'openai-completions' ? '' : ' ghost');
+  paintKeyNote();
+}
+function paintKeyNote() {
+  if (formMode !== 'modify') { $('f-key-note').style.display = 'none'; return; }
+  const changed = hostOf($('f-base').value.trim()) !== hostOf(formInit.base) || formApi !== formInit.api;
+  $('f-key-note').style.display = changed ? '' : 'none';
+}
+function openForm(mode, p) {
+  formMode = mode;
+  const nameIn = $('f-name');
+  nameIn.value = p ? p.name : '';
+  nameIn.readOnly = mode === 'modify';
+  nameIn.style.background = mode === 'modify' ? 'var(--soft-bg)' : '';
+  const base = (p && p.base_url) || '';
+  $('f-base').value = base;
+  $('f-key').value = '';
+  $('f-key').placeholder = mode === 'modify' ? '留空 = 不修改' : '';
+  $('f-name-hint').style.display = 'none';
+  $('f-key-note').style.display = 'none';
+  $('form-title').textContent = mode === 'modify'
+    ? ('编辑供应商「' + p.name + '」，名字不能改，要改就删了重建') : '添加供应商';
+  $('f-state').textContent = '';
+  formInit = {name: (p ? p.name : ''), base: base, api: (p && p.api === 'openai-completions') ? 'openai-completions' : 'anthropic-messages'};
+  setApi(formInit.api);
+  $('pform').hidden = false;
+  $('pform').scrollIntoView({block: 'nearest'});
+  nameIn.focus();
+}
+function closeForm() {
+  formMode = null;
+  $('pform').hidden = true;
+  $('f-key').value = '';
+  $('f-name-hint').style.display = 'none';
+  $('f-key-note').style.display = 'none';
+  $('f-state').textContent = '';
+}
+function formDirty() {
+  return $('f-name').value.trim() !== formInit.name
+      || $('f-base').value.trim() !== formInit.base
+      || $('f-key').value !== '';
+}
+async function submitForm(e) {
+  e.preventDefault();
+  const name = $('f-name').value.trim();
+  const baseURL = $('f-base').value.trim();
+  const key = $('f-key').value;
+  if (!name) { $('f-state').textContent = '名字不能为空。'; return; }
+  if (looksLikeSecret(name)) { $('f-name-hint').style.display = ''; $('f-name').focus(); return; }
+  $('f-name-hint').style.display = 'none';
+  const btn = $('f-save');
+  btn.disabled = true;
+  $('f-state').textContent = '正在拉模型列表，最多等 45 秒…';
+  const r = await hubApi('/hub/api/dsh-model/provider/save', {
+    method: 'POST',
+    body: JSON.stringify({name: name, api: formApi, baseURL: baseURL, key: key, mode: formMode}),
+  });
+  btn.disabled = false;
+  $('f-key').value = '';                  // 提交后立刻清掉，页面不留存密钥
+  const t = (r.body && (r.body.text || r.body.detail || r.body.error)) || ('失败（' + r.status + '）');
+  if (r.body && r.body.error === 'providers_unreadable') { providersUnreadable = true; paintBanner(); }
+  if (r.status === 200) {
+    closeForm();
+    persistMsg(t);
+    await load();
+  } else if (r.status === 504) {
+    // 504 贴着网关最坏情况，这次操作可能已经写进去了：重拉列表让用户核对，
+    // 不能把表单留在原地诱导用户再点一次（那就是第二次写）。
+    closeForm();
+    persistMsg(t + '，列表已重新拉取，请核对。');
+    await load();
+  } else {
+    $('f-state').textContent = t;          // 业务失败：表单保持展开，方便改完重试
+  }
+}
+
+function showMsg(t) { msg.textContent = t; }
+function persistMsg(t) { pmsg.textContent = t; }
+
+$('add-open').onclick = () => openForm('create', null);
+$('refresh').onclick = load;
+$('prefresh').onclick = load;
+$('f-api-anthropic').onclick = () => setApi('anthropic-messages');
+$('f-api-openai').onclick = () => setApi('openai-completions');
+$('f-base').addEventListener('input', paintKeyNote);
+$('f-cancel').onclick = () => {
+  if (formDirty() && !confirm('表单里填的内容会丢掉，确定取消吗？')) return;
+  closeForm();
+};
+$('pform').addEventListener('submit', submitForm);
 load();
 </script>
 </body>
