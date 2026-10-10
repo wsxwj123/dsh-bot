@@ -44,13 +44,18 @@ body { font-family:var(--font-body); background:var(--bg); color:var(--ink);
   backdrop-filter:saturate(180%) blur(12px);
   -webkit-backdrop-filter:saturate(180%) blur(12px);
   border-bottom:1px solid var(--hairline); }
-.topnav-inner { max-width:580px; margin:0 auto; padding:12px 18px;
-  display:flex; align-items:center; gap:12px; }
-.bot-switcher { flex:1; display:flex; gap:6px; overflow-x:auto;
-  scrollbar-width:none; }
+/* 容器宽 720 不是随手定的：bot 那排 5 个 chip 实测要 300px，工具项（画风/管理台等）
+   固定吃掉约 296px，580 上限下两者怎么挤都放不全。720 减去两侧 padding 后刚好富余。 */
+.topnav-inner { max-width:720px; margin:0 auto; padding:12px 18px;
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+/* 放不下就让整排换到下一行（换行后独占整行，一定看得全），不靠断点猜。
+   320 是"不换行时的最小可读宽度"，已经在 5 个 chip 需要的 300px 之上；
+   min(320px,100%) 是防极窄屏（<356px）被这个下限撑出横向滚动。 */
+.bot-switcher { flex:1 1 auto; min-width:min(320px, 100%); display:flex; gap:6px;
+  overflow-x:auto; scrollbar-width:none; }
 .bot-switcher::-webkit-scrollbar { display:none; }
-/* 画风/管理台/日期这几个不定宽入口。窄屏下它们要能给 bot 那排让路（见 480 断点） */
-.nav-tools { display:flex; align-items:center; gap:12px; }
+/* 画风/管理台/日期这几个不定宽入口，bot 那排优先占宽，它们不抢（flex-grow:0） */
+.nav-tools { flex:0 1 auto; display:flex; align-items:center; gap:12px; }
 .bot-chip { padding:4px 11px; border-radius:999px; font-size:13px;
   white-space:nowrap; background:transparent; color:var(--ink-soft);
   border:1px solid var(--hairline-strong); cursor:pointer;
