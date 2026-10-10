@@ -231,6 +231,38 @@ def _bot_cfg_by_name(uid: str):
     return None
 
 
+def _cfg_rank(cfg: dict) -> tuple:
+    """撞名时两份配置谁赢。在跑的那份优先，其次新系统（dsh）优先。"""
+    return (1 if is_enabled(cfg) else 0,
+            1 if cfg.get("_source") == config_sources.SOURCE_DSH else 0)
+
+
+def _cfg_tag(cfg: dict) -> str:
+    """日志里指认一份配置，如 bot5(dsh)。"""
+    return "%s(%s)" % (cfg.get("_bot_id") or cfg.get("id"), cfg.get("_source") or "单根")
+
+
+def _moments_bot_meta(bots: list) -> dict:
+    """朋友圈名到 bot meta 的映射，撞名时只留一份。
+
+    朋友圈数据按 life 名存，新系统的 bot5 与旧栈的 yasuna 都记 yasuna，名字相同
+    即同一份数据，只能出一个 chip。挑法是在跑的那份优先，其次新系统优先；
+    撞车往 stderr 记一行，将来两个不同的人撞同一个 life 名时不至于看不出丢了谁。
+    """
+    picked = {}
+    for b in bots:
+        key = _moments_id(b)
+        cur = picked.get(key)
+        if cur is None:
+            picked[key] = b
+            continue
+        win = b if _cfg_rank(b) > _cfg_rank(cur) else cur
+        sys.stderr.write("[moments.web] 朋友圈名 %s 撞车，%s 与 %s，留 %s\n"
+                         % (key, _cfg_tag(cur), _cfg_tag(b), _cfg_tag(win)))
+        picked[key] = win
+    return {k: _bot_meta(v) for k, v in picked.items()}
+
+
 def _bot_meta(b: dict) -> dict:
     bot_id = _moments_id(b)
     profile = db.get_profile(bot_id)
@@ -270,9 +302,10 @@ def feed():
     ids = [m["id"] for m in moments]
     likes_map = db.likers_bulk(ids)
     comments_map = db.comments_bulk(ids)
-    # 新旧两套配置根都读，含停用的 bot（"跑在另一套系统里"不等于页面上没有这个 bot）
+    # 新旧两套配置根都读，含停用的 bot（"跑在另一套系统里"不等于页面上没有这个 bot）。
+    # 与画风页 _style_bots 同一入口、同一过滤口径，两页入口集合不许分叉
     bots = config_sources.panel_bot_configs()
-    bot_meta_by_id = {_moments_id(b): _bot_meta(b) for b in bots}
+    bot_meta_by_id = _moments_bot_meta(bots)
     # 用户自己作为"虚拟 bot"，其朋友圈卡片头像/名字也走这里
     bot_meta_by_id[USER_PROFILE_KEY] = _user_meta()
 
@@ -536,7 +569,7 @@ def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
 # 直接用 bots_client.bot_port 而不再自建派生表：那张表是导入期快照，
 # 既看不见新加的 bot，也漏掉了 DISPATCHER_PORT_<BOT> 覆盖（探活认、这里不认，两处不一致）。
 from moments.bots_client import bot_port as _bot_port
-from bots_registry import disabled_ids_safe  # noqa: E402  需求⑤ 停用判定唯一入口
+from bots_registry import disabled_ids_safe, is_enabled  # noqa: E402  需求⑤ 停用判定唯一入口
 import urllib.request  # noqa: E402
 
 _urlopen = urllib.request.urlopen  # HTTP 注入点（INTERFACE §10.4），测试换成记录器
