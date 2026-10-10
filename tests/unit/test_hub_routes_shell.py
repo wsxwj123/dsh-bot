@@ -59,16 +59,23 @@ def test_activate只收POST(client):
 
 @pytest.mark.parametrize("path", ["/hub", "/hub/provider", "/hub/bots"])
 def test_三个页面都带同一条导航(client, path):
+    """导航按新契约分组（INTERFACE-管理台UI §1）。cliproxy 的 /hub/provider 撤出导航
+    （只在 /hub 门户留一张卡），换上来的是 /hub/dsh-model（供应商与模型）与
+    /provider（旧系统供应商）两个入口。"""
     body = page(client, path)
-    for href in ('href="/hub"', 'href="/hub/provider"', 'href="/hub/bots"',
-                 'href="/"', 'href="/styles"'):
+    for href in ('href="/hub"', 'href="/hub/dsh-model"', 'href="/hub/bots"',
+                 'href="/provider"', 'href="/"', 'href="/styles"'):
         assert href in body, "%s 的导航缺 %s" % (path, href)
 
 
 def test_导航高亮各页不同(client):
-    """nav_active 传错会让三页都高亮同一个 chip —— 这是 include 复用最容易出的错。"""
+    """nav_active 传错会让三页都高亮同一个 chip —— 这是 include 复用最容易出的错。
+
+    /hub/provider 撤出导航后那页不再亮任何一项（INTERFACE-管理台UI §1 说的已知小瑕疵），
+    所以这里改盯 /hub/dsh-model。
+    """
     marks = {p: page(client, p).count('class="chip on"')
-             for p in ("/hub", "/hub/provider", "/hub/bots")}
+             for p in ("/hub", "/hub/dsh-model", "/hub/bots")}
     assert set(marks.values()) == {1}, "每页应恰好高亮一个导航项，实得 %s" % marks
     assert 'href="/hub/provider" class' not in page(client, "/hub")
 
