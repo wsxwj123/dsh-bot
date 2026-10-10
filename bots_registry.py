@@ -240,25 +240,41 @@ def _config_dirs():
     return [d for _source, d in config_sources.roots()]
 
 
+def _safe_warn(msg):
+    """``disabled_ids_safe`` 的告警，进程内只写一次（管理台是常驻服务，每次调用都写会刷屏）。"""
+    global _safe_warned
+    if not _safe_warned:
+        _safe_warned = True
+        sys.stderr.write("disabled_ids failed: %s\n" % msg)
+
+
 def disabled_ids_safe():
     """``disabled_ids()`` 的 fail-open 包装：后台生产者（导演 / 主动消息 / 朋友圈 / 语音）判"停用"的唯一入口。
 
     判定与投递面、启停徽标同一处（``disabled_ids``，新旧两套根、只要有一份启用就算在跑）。
     逐文件容错由 ``_iter_configs`` 负责（别的 bot 的 yml 坏了不影响本 bot 被判停用）；
-    这里只兜目录级异常：整个配置读不了 → 空集（= 都当启用，退回改动前行为），
-    stderr 只报一次类名。
+    这里兜目录级异常，**逐根容错**，某个根读不了只跳过那个根，其余根照常判定。
+    一根坏就整体退回空集（= 全部当启用），会把失败面从一个根扩到全部根。仓库里
+    所有后台生产者会继续给那台机器上停用的 bot 投递、把它拉起来。
+    只有"一个根都判不了"（取根失败，或唯一那个根坏了）才回空集，stderr 只报一次类名。
     """
-    global _safe_warned
     try:
         dirs = _config_dirs()
-        for d in dirs:
+    except Exception as e:
+        _safe_warn(type(e).__name__)
+        return set()
+    good = []
+    for d in dirs:
+        try:
             if Path(d).is_dir():
                 os.listdir(d)   # glob 会静默吞掉 PermissionError：显式探一次，让"目录读不了"可观测
-        return disabled_ids(dirs=dirs)
+            good.append(d)
+        except Exception as e:
+            _safe_warn(type(e).__name__)
+    try:
+        return disabled_ids(dirs=good)
     except Exception as e:
-        if not _safe_warned:
-            _safe_warned = True
-            sys.stderr.write("disabled_ids failed: %s\n" % type(e).__name__)
+        _safe_warn(type(e).__name__)
         return set()
 
 
