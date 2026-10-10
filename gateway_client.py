@@ -110,9 +110,14 @@ def provider_model(channel_dir: str, body: dict) -> tuple[int, dict]:
     return _call(channel_dir, "POST", "/v1/provider/model", body, timeout=PROVIDER_WRITE_TIMEOUT)
 
 
+# 思考强度读的超时：与写端点同值。网关侧要建 dsh 会话才问得出档位与可选档位，
+# 冷启动最坏情况可能等 60 秒，用 _call 的默认 10 秒会在冷启动时把 504 报给页面。
+EFFORT_TIMEOUT = 55.0
+
+
 def effort_get(channel_dir: str) -> tuple[int, dict]:
     """问一个 bot 当前的思考强度档位与可选档位（GET /v1/effort）。"""
-    return _call(channel_dir, "GET", "/v1/effort")
+    return _call(channel_dir, "GET", "/v1/effort", timeout=EFFORT_TIMEOUT)
 
 
 def effort_set(channel_dir: str, effort: str) -> tuple[int, dict]:
