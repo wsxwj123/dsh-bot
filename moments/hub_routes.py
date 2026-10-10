@@ -1448,6 +1448,7 @@ def bots_set_enabled(bot_id):
 # ======================================================================
 
 import http.client                                      # noqa: E402  本段自己的依赖
+import os                                               # noqa: E402
 import re as _dm_re                                     # noqa: E402
 import socket                                           # noqa: E402
 import urllib.error                                     # noqa: E402
@@ -1472,6 +1473,11 @@ _DM_MODEL_ACTIONS = ("add", "remove", "set_context")
 _DM_NO_GATEWAY = {"ok": False, "error": "no_gateway", "text": "没有在运行的新系统 bot"}
 _DM_TIMEOUT = {"ok": False, "error": "gateway_timeout",
                "text": "网关没有及时响应，这次操作可能已经保存成功"}
+# 网关响应收到之后才在管理台这侧出的岔子（响应体不是 JSON、读 state 文件失败之类）。
+# 形状必须跟上面两条一样，页面按 JSON 取 text；冒泡出去会变成框架级的 {"error":"internal"}，
+# 没有 text 可显示。措辞与 _DM_TIMEOUT 同源：请求已经发出去过，结果以页面重拉的列表为准。
+_DM_INTERNAL = {"ok": False, "error": "internal",
+                "text": "管理台这边出错，这次操作可能已经生效，请刷新页面看结果"}
 
 # 请求"发出去之后"才可能出现的异常。这些都可能已经写进去了，一律 504 不重试。
 _DM_GATEWAY_ERRORS = (urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError)
@@ -1511,7 +1517,8 @@ def _dm_forward(call):
                 continue                                  # 换下一个网关
             if kind == "broken":
                 return jsonify(_DM_TIMEOUT), 504
-            raise                                         # 本地错误照旧冒泡（500）
+            # 本地错误不再冒泡（那会变成没有 text 的框架级 500），翻成与写端点同形状的固定 JSON
+            return jsonify(_DM_INTERNAL), 500
         if not isinstance(body, dict):
             body = {}
         return jsonify(body), code
@@ -1680,13 +1687,33 @@ def _dm_provider_or_400(name):
     return None
 
 
+def _dm_check_base_url(raw):
+    """地址的内网判定，复用老路径那把尺子（``provider_model._check_base_url``），不另写一套。
+
+    老路径（``POST /hub/api/provider``）靠它拦内网、回环、链路本地、保留网段，
+    逃生门是 ``HUB_ALLOW_PRIVATE_BASE_URL=1``。新页面这条路径原来把地址原样转发给网关，
+    而网关的 ``checkBaseURL`` 只要求 https（http 只放行本机），两把尺子宽严不一，
+    等于让持密钥的网关去打内网（能打 127.0.0.1 的任意端口、169.254.169.254 之类）。
+    这里调的就是那个私有函数，判定与逃生门都跟老路径同一份；**不要**在这另写判据。
+    返回形状按本段的写端点（``{"ok","error","text"}``），错误码用网关对同一件事的
+    ``bad_url``，正文是 ``_check_base_url`` 给出的固定原因（不含用户输入）。
+    """
+    try:
+        provider_model._check_base_url(
+            raw, allow_private=os.environ.get("HUB_ALLOW_PRIVATE_BASE_URL") == "1")
+    except provider_model.HubError as e:
+        return _dm_bad(400, "bad_url", e.detail)
+    return None
+
+
 @hub_bp.post("/hub/api/dsh-model/provider/save")
 @_api
 def dsh_model_provider_save():
     """契约 2.2：添加 / 编辑一个自建供应商，转发网关 POST /v1/provider/save。
 
-    请求体原样转发（校验顺序全在网关 3.2 那一段）；管理台只拦它自己能判的两件事：
-    mode 的词表与名字的形状。密钥全程只在内存里过一遍，不落盘、不记日志、不回显。
+    请求体原样转发（校验顺序全在网关 3.2 那一段）；管理台只拦它自己能判的三件事：
+    mode 的词表、名字的形状、地址的内网判定（第 3 件与老路径同一把尺子、同一个逃生门）。
+    密钥全程只在内存里过一遍，不落盘、不记日志、不回显。
     """
     body = _require_json_object(request.get_json(silent=True))
     if body.get("mode", "create") not in ("create", "modify"):
@@ -1694,6 +1721,9 @@ def dsh_model_provider_save():
     name = body.get("name")
     if not isinstance(name, str) or not _DM_PROVIDER_RE.match(name):
         return _dm_bad(400, "bad_provider", "供应商名字不合法")
+    bad = _dm_check_base_url(body.get("baseURL"))
+    if bad:
+        return bad
     return _dm_forward(lambda ch: gateway_client.provider_save(ch, body))
 
 
