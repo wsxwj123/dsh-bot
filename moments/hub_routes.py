@@ -1447,7 +1447,10 @@ def bots_set_enabled(bot_id):
 # 旧系统的 bot 不在这个页面上出现。段内辅助一律 `_dm` 前缀。
 # ======================================================================
 
+import http.client                                      # noqa: E402  本段自己的依赖
 import re as _dm_re                                     # noqa: E402
+import socket                                           # noqa: E402
+import urllib.error                                     # noqa: E402
 
 import config_loader                                    # noqa: E402
 import gateway_client                                   # noqa: E402
@@ -1457,6 +1460,81 @@ from moments import config_sources                      # noqa: E402
 _DM_BOT_RE = _dm_re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # §3.9：自建供应商名字规则（同网关 3.1.1）—— 不合规则的请求直接 400 bad_provider
 _DM_PROVIDER_RE = _dm_re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+
+# 契约 2.1：providers 行逐字段透传网关 /v1/model 的项；custom_providers 是它的同值投影，
+# 字段集与旧契约逐字相同（锁定测试按那七个字段逐一比对）。
+_DM_PROVIDER_FIELDS = ("name", "source", "api", "models", "key", "enabled", "note", "last_refresh")
+_DM_CUSTOM_FIELDS = ("name", "api", "models", "key", "enabled", "note", "last_refresh")
+_DM_MODEL_ACTIONS = ("add", "remove", "set_context")
+
+# 契约 2.2 的两种失败正文。写端点只有这两条与 no_gateway 是管理台自己拼的，
+# 其余一律原样透传网关的状态码与正文。
+_DM_NO_GATEWAY = {"ok": False, "error": "no_gateway", "text": "没有在运行的新系统 bot"}
+_DM_TIMEOUT = {"ok": False, "error": "gateway_timeout",
+               "text": "网关没有及时响应，这次操作可能已经保存成功"}
+
+# 请求"发出去之后"才可能出现的异常。这些都可能已经写进去了，一律 504 不重试。
+_DM_GATEWAY_ERRORS = (urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError)
+
+
+def _dm_unreachable(err):
+    """请求根本没发出去（拒连、DNS 解析不了）才算"这个网关不可用"，也才允许换下一个。
+
+    收发途中的任何意外都不算：换网关重试就是第二次写，会再拉一次模型、再抬一次 keyRev
+    （契约 2.2 钉死的行为，写端点的验收测试逐条盯着）。
+    """
+    return isinstance(err, urllib.error.URLError) and isinstance(
+        err.reason, (ConnectionRefusedError, socket.gaierror))
+
+
+def _dm_net_kind(err):
+    """网络异常归类：unreachable（没发出去）/ broken（发出后中断或超时）/ None（本地错误）。"""
+    if _dm_unreachable(err):
+        return "unreachable"
+    if isinstance(err, _DM_GATEWAY_ERRORS):
+        return "broken"
+    return None
+
+
+def _dm_forward(call):
+    """契约 2.2 的多网关语义。call(频道目录) -> (状态码, 正文)，原样透传给页面。
+
+    只认第一个回了响应的网关，不管那是 200 还是业务错误码；请求根本没发出去才换下一个；
+    全都连不上才是 503 no_gateway。
+    """
+    for _bot_id, _name, ch in _dm_bots():
+        try:
+            code, body = call(ch)
+        except Exception as e:                            # noqa: BLE001 下面按类型分流
+            kind = _dm_net_kind(e)
+            if kind == "unreachable":
+                continue                                  # 换下一个网关
+            if kind == "broken":
+                return jsonify(_DM_TIMEOUT), 504
+            raise                                         # 本地错误照旧冒泡（500）
+        if not isinstance(body, dict):
+            body = {}
+        return jsonify(body), code
+    return jsonify(_DM_NO_GATEWAY), 503
+
+
+def _dm_call_one(call):
+    """对一个**指定 bot** 的网关发一次，不换别的 bot（effort 是 per-bot 的）。
+
+    连不上 → 503 no_gateway；发出后中断 / 超时 → 504；其余原样透传。
+    """
+    try:
+        code, body = call()
+    except Exception as e:                                # noqa: BLE001 同上
+        kind = _dm_net_kind(e)
+        if kind == "unreachable":
+            return jsonify(_DM_NO_GATEWAY), 503
+        if kind == "broken":
+            return jsonify(_DM_TIMEOUT), 504
+        raise
+    if not isinstance(body, dict):
+        body = {}
+    return jsonify(body), code
 
 
 def _dm_bots():
@@ -1476,21 +1554,47 @@ def _dm_bots():
     return out
 
 
-def _dm_custom_providers():
-    """§3.9：取**第一个能连上**的新系统网关 `providers` 里 source==custom 的项；都连不上时 []。"""
+def _dm_providers():
+    """契约 2.1：providers 与 custom_providers 取自**同一网关的同一次读**。
+
+    先选第一个能连上的网关（它的 /v1/model），再对同一个网关拉一次 /v1/provider
+    自建详情；custom_providers 是 providers 里 source==custom 的同值投影。
+    旧实现两个来源各选各的网关，而 per-bot 的「同名被遮」「配置有误」是按网关算的，
+    同一页上两个真相迟早漂移。
+
+    读接口恒 200：两个调用任一失败都只是字段降级（providers 为空 / 详情缺省）。
+    详情接口 503 或缺失时 base_url 为 null、model_list 为 []。
+    """
     for _bot_id, _name, ch in _dm_bots():
         try:
             info = gateway_client.model_info(ch)
         except Exception:
             continue                                     # 连不上：换下一个，最后都没有就回 []
-        provs = info.get("providers") if isinstance(info, dict) else None
-        if not isinstance(provs, list):
-            continue
-        return [{"name": p.get("name"), "api": p.get("api"), "models": p.get("models"),
-                 "key": p.get("key"), "enabled": p.get("enabled"), "note": p.get("note"),
-                 "last_refresh": p.get("last_refresh")}
-                for p in provs if isinstance(p, dict) and p.get("source") == "custom"]
-    return []
+        raw = info.get("providers") if isinstance(info, dict) else None
+        items = [p for p in raw if isinstance(p, dict)] if isinstance(raw, list) else []
+        detail = {}
+        try:
+            code, got = gateway_client.provider_detail(ch)
+            if code == 200 and isinstance(got, dict):
+                detail = {p.get("name"): p for p in (got.get("providers") or [])
+                          if isinstance(p, dict) and isinstance(p.get("name"), str)}
+        except Exception:
+            detail = {}                                  # 读不动详情：字段降级，不影响 200
+        rows = []
+        for p in items:
+            row = {k: p.get(k) for k in _DM_PROVIDER_FIELDS}
+            if row.get("source") == "custom":
+                # 模型清单网关侧叫 modelList、这里叫 model_list：两个接口各有一个同名的
+                # models 字段（一边是数字、一边是数组），拼装时最容易把数字覆盖成数组。
+                d = detail.get(row.get("name")) or {}
+                ml = d.get("modelList")
+                row["base_url"] = d.get("baseURL")
+                row["model_list"] = ml if isinstance(ml, list) else []
+            rows.append(row)
+        custom = [{k: r.get(k) for k in _DM_CUSTOM_FIELDS}
+                  for r in rows if r.get("source") == "custom"]
+        return rows, custom
+    return [], []
 
 
 @hub_bp.get("/hub/dsh-model")
@@ -1508,7 +1612,10 @@ def dsh_model_list():
         except Exception as e:                          # 网关没起来：页面照样出，这一行报错
             row["error"] = redact.scrub_text(str(e))[:200] or "网关没响应"
         bots.append(row)
-    return jsonify({"bots": bots, "custom_providers": _dm_custom_providers()})
+    providers, custom = _dm_providers()
+    # custom_providers 只为兼容上一批锁定测试保留（页面只从 providers 渲染），
+    # 两个键同值同源，不再各选各的网关。
+    return jsonify({"bots": bots, "providers": providers, "custom_providers": custom})
 
 
 @hub_bp.post("/hub/api/dsh-model/<bot_id>")
@@ -1556,3 +1663,100 @@ def dsh_model_provider_refresh(name):
     if saw_timeout:
         return jsonify({"ok": False, "error": "gateway_timeout", "text": "网关没有及时响应，稍后刷新页面看结果"}), 504
     return jsonify({"ok": False, "error": "no_gateway", "text": "没有在运行的新系统 bot"}), 503
+
+
+# ── 三个新写端点与思考强度。路径都带 `provider` 这一段，刻意避开
+#    /hub/api/dsh-model/<bot_id>（单段，换模型）：Flask 静态段优先，不避的话
+#    一个名字恰好叫 provider 的 bot 会在 /hub/api/dsh-model/provider 上换不了模型。
+
+def _dm_bad(code, error, text):
+    """写端点的参数错形状（契约 2.2 的 {"ok","error","text"}，不是 _api 的 {"error","detail"}）。"""
+    return jsonify({"ok": False, "error": error, "text": text}), code
+
+
+def _dm_provider_or_400(name):
+    if not _DM_PROVIDER_RE.match(name):
+        return _dm_bad(400, "bad_provider", "供应商名字不合法")
+    return None
+
+
+@hub_bp.post("/hub/api/dsh-model/provider/save")
+@_api
+def dsh_model_provider_save():
+    """契约 2.2：添加 / 编辑一个自建供应商，转发网关 POST /v1/provider/save。
+
+    请求体原样转发（校验顺序全在网关 3.2 那一段）；管理台只拦它自己能判的两件事：
+    mode 的词表与名字的形状。密钥全程只在内存里过一遍，不落盘、不记日志、不回显。
+    """
+    body = _require_json_object(request.get_json(silent=True))
+    if body.get("mode", "create") not in ("create", "modify"):
+        return _dm_bad(400, "bad_body", "mode 只能是 create 或 modify")
+    name = body.get("name")
+    if not isinstance(name, str) or not _DM_PROVIDER_RE.match(name):
+        return _dm_bad(400, "bad_provider", "供应商名字不合法")
+    return _dm_forward(lambda ch: gateway_client.provider_save(ch, body))
+
+
+@hub_bp.post("/hub/api/dsh-model/provider/<name>/remove")
+@_api
+def dsh_model_provider_remove(name):
+    """契约 2.3：删除一个自建供应商。请求体可以是 {}，但必须是 JSON 对象。"""
+    _require_json_object(request.get_json(silent=True))
+    bad = _dm_provider_or_400(name)
+    if bad:
+        return bad
+    return _dm_forward(lambda ch: gateway_client.provider_remove(ch, name))
+
+
+@hub_bp.post("/hub/api/dsh-model/provider/<name>/models")
+@_api
+def dsh_model_provider_models(name):
+    """契约 2.4：模型增删改（add / remove / set_context），转发网关 /v1/provider/model。
+
+    只挑契约认识的三个字段转发，页面里混进来的别的东西不进网关请求。
+    """
+    body = _require_json_object(request.get_json(silent=True))
+    bad = _dm_provider_or_400(name)
+    if bad:
+        return bad
+    action = body.get("action")
+    if action not in _DM_MODEL_ACTIONS:
+        return _dm_bad(400, "bad_action", "action 只能是 add、remove、set_context")
+    mid = body.get("id")
+    if not isinstance(mid, str) or not mid:
+        return _dm_bad(400, "bad_id", "模型名不合法")
+    payload = {"name": name, "action": action, "id": mid}
+    if "contextWindow" in body:
+        payload["contextWindow"] = body["contextWindow"]
+    return _dm_forward(lambda ch: gateway_client.provider_model(ch, payload))
+
+
+def _dm_bot_channel(bot_id):
+    """这个 bot 的频道目录；不在名单里（新系统配置里没有，或网关没在跑）就 404。"""
+    hit = [b for b in _dm_bots() if b[0] == bot_id]
+    if not hit:
+        raise HubError(404, "bot_not_found", "没有这个新系统的 bot（或它的网关没在跑）")
+    return hit[0][2]
+
+
+@hub_bp.get("/hub/api/dsh-model/<bot_id>/effort")
+@_api
+def dsh_model_effort_get(bot_id):
+    """契约 2.6：这个 bot 现在能选哪些思考强度档位（页面点开「思考」才调）。"""
+    ch = _dm_bot_channel(bot_id)
+    return _dm_call_one(lambda: gateway_client.effort_get(ch))
+
+
+@hub_bp.post("/hub/api/dsh-model/<bot_id>/effort")
+@_api
+def dsh_model_effort_set(bot_id):
+    """契约 2.6：改这个 bot 的思考强度（只改不换段，与 Telegram「思考强度」按钮同源）。
+
+    effort 的形状校验放在找 bot 之前：请求体都没成形时不必去碰 bot 名单。
+    """
+    body = _require_json_object(request.get_json(silent=True))
+    effort = body.get("effort")
+    if not isinstance(effort, str):
+        raise HubError(400, "bad_body", "effort 必须是字符串")
+    ch = _dm_bot_channel(bot_id)
+    return _dm_call_one(lambda: gateway_client.effort_set(ch, effort))
