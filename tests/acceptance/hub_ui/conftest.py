@@ -237,6 +237,24 @@ def fake_tg():
 
 
 @pytest.fixture
+def dispatcher():
+    """本机假 dispatcher。本目录造的 bot 配置一律显式写它监听的端口。
+
+    不写 dispatcher_port 时，投递的拉起那一跳会落到 bots_registry 的派生端口
+    （本机 17801 起就是生产 dispatcher 在听），测试的 POST /ensure_worker 会真
+    发到生产身上。写了端口，拉起只打到这个假件，端口选择本身也还能断言。
+    """
+    from .stub_gateway import StubGateway
+    s = StubGateway(key="dispatcher-no-auth")
+    s.on("/ensure_worker", 200, {"ok": True})
+    s.start()
+    try:
+        yield s
+    finally:
+        s.stop()
+
+
+@pytest.fixture
 def real_gateway(sandbox, fake_tg):
     """起一个真网关进程（bun src/main.ts），返回 dict(root=, port=, key_path=, stdout_path=, proc=)。
 

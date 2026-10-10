@@ -16,6 +16,10 @@
 那份写着 enabled:false，bot4 在新系统跑；bot5 的 life 指向旧根的 yasuna，两处撞同一个
 朋友圈名（真实机器上就是这么撞的）。配置里还混着 .bak 与下划线开头的干扰文件，名单
 里出现它们同样是红。
+
+每条配置都显式写一个没人听的 dispatcher_port。本文件只 GET 页面，但配置里不写端口
+时投递路径会落到注册表派生端口（本机 17801 起是生产 dispatcher 在听），以后谁在这里
+加一条发朋友圈的用例就会外溢到生产身上。
 """
 import json
 import re
@@ -23,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import write_bot_cfg
+from .conftest import free_port, write_bot_cfg
 
 # 朋友圈页顶部 bot-switcher 里应该出现的全部入口，(链接, 显示名)。
 # bot4 在朋友圈里记的是 life 名 chenlulu，它的入口就该指向 chenlulu。
@@ -68,25 +72,26 @@ def two_roots(sandbox):
     dsh = Path(sandbox["env"]["HUB_CONFIGS_DSH_DIR"])
     run = sandbox["tmp"] / "run"
     life = sandbox["tmp"] / "life"
+    port = free_port()
     for name, disp in (("bot2", "李彤彤"), ("chenlulu", "陈露露"), ("yasuna", "淑仪")):
         write_bot_cfg(life, name, display_name=disp)
 
     write_bot_cfg(legacy, "bot2", display_name="李彤彤",
-               bot_channel_path=run / "legacy-bot2", chat_id="77")
+               bot_channel_path=run / "legacy-bot2", chat_id="77", dispatcher_port=port)
     write_bot_cfg(legacy, "bot3", display_name="菜菜",
-               bot_channel_path=run / "legacy-bot3", chat_id="77")
+               bot_channel_path=run / "legacy-bot3", chat_id="77", dispatcher_port=port)
     write_bot_cfg(legacy, "yasuna", display_name="淑仪",
-               bot_channel_path=run / "legacy-yasuna", chat_id="77")
+               bot_channel_path=run / "legacy-yasuna", chat_id="77", dispatcher_port=port)
 
     write_bot_cfg(dsh, "bot2", enabled="false", display_name="李彤彤",
                life_config=life / "bot2.yml",
-               bot_channel_path=run / "dsh-bot2", chat_id="77")
+               bot_channel_path=run / "dsh-bot2", chat_id="77", dispatcher_port=port)
     write_bot_cfg(dsh, "bot4", display_name="陈露露",
                life_config=life / "chenlulu.yml",
-               bot_channel_path=run / "dsh-bot4", chat_id="77")
+               bot_channel_path=run / "dsh-bot4", chat_id="77", dispatcher_port=port)
     write_bot_cfg(dsh, "bot5", enabled="false", display_name="bot5",
                life_config=life / "yasuna.yml",
-               bot_channel_path=run / "dsh-bot5", chat_id="77")
+               bot_channel_path=run / "dsh-bot5", chat_id="77", dispatcher_port=port)
 
     # 干扰文件。备份与下划线开头的一律不许进名单
     (legacy / "bot3.yml.bak-20261004").write_text("id: bot3\n", encoding="utf-8")
@@ -184,11 +189,14 @@ def test_撞名两份都在跑时_入口留在新系统那份(sandbox, hub):
     dsh = Path(sandbox["env"]["HUB_CONFIGS_DSH_DIR"])
     life = sandbox["tmp"] / "life"
     write_bot_cfg(life, "yasuna", display_name="淑仪")
+    port = free_port()
     write_bot_cfg(legacy, "yasuna", display_name="旧系统淑仪",
-                  bot_channel_path=sandbox["tmp"] / "run" / "legacy-yasuna", chat_id="77")
+                  bot_channel_path=sandbox["tmp"] / "run" / "legacy-yasuna", chat_id="77",
+                  dispatcher_port=port)
     write_bot_cfg(dsh, "bot5", display_name="新系统五号",
                   life_config=life / "yasuna.yml",
-                  bot_channel_path=sandbox["tmp"] / "run" / "dsh-bot5", chat_id="77")
+                  bot_channel_path=sandbox["tmp"] / "run" / "dsh-bot5", chat_id="77",
+                  dispatcher_port=port)
 
     chips = _chips(hub.get("/").get_data(as_text=True))
     yasuna = [(h, n) for h, n in chips if h == "/?bot=yasuna"]
