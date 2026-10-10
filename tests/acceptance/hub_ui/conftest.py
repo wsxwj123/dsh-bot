@@ -5,6 +5,7 @@
 
 硬隔离：
 1. HOME、DSH_BOT_HOME、CLAUDE_TGBOT_HOME、HUB_* 全部指向 tmp，绝不碰 ~/.dsh-bot 与真实配置；
+   朋友圈库也由 BOTLIFE_STATE_DB 指到 tmp 里自建，不依赖环境里恰好有 state.db；
 2. 管理台看到的"在跑的新系统网关"用假网关（本机 HTTP stub）扮演，绝不连真实 bot；
 3. 管理台用 Flask test_client，不监听端口；
 4. 真网关的用例要用 bun 起子进程（可选），没有 bun 时那批自动 skip。
@@ -86,6 +87,7 @@ def sandbox(tmp_path, monkeypatch):
         "HOME": str(home),
         "DSH_BOT_HOME": str(root),
         "CLAUDE_TGBOT_HOME": str(tmp_path / "tgbot-home"),
+        "BOTLIFE_STATE_DB": str(tmp_path / "state.db"),
         "CLAUDE_SETTINGS_PATH": str(home / ".claude" / "settings.json"),
         "HUB_ENV_FILE": str(tmp_path / "hub.env"),
         "MOMENTS_WEB_HOST": "127.0.0.1",
@@ -119,6 +121,15 @@ def allow_private_base_url(monkeypatch):
 
 
 def _load_app():
+    # 朋友圈页（门户 /）要查朋友圈库。db 的库路径在导入期由 BOTLIFE_STATE_DB 定死，
+    # 不指到临时库时会落到仓库根的 state.db；CI 上那个文件不存在，sqlite 会建出
+    # 一个空库，查 moments 表直接报 no such table。这里重载一次 db 让 DB_PATH
+    # 跟上 sandbox 设好的环境变量，再 init() 把 schema 建出来（幂等）
+    import db
+    importlib.reload(db)
+    assert Path(db.DB_PATH).resolve() != (REPO_ROOT / "state.db").resolve(), \
+        "朋友圈库落到了仓库里的 state.db，BOTLIFE_STATE_DB 没生效"
+    db.init()
     mod = sys.modules.get("moments.web")
     mod = importlib.reload(mod) if mod else importlib.import_module("moments.web")
     for attr in ("app", "application"):
