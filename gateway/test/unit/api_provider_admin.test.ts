@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { Logger } from '../../src/log'
-import { ProviderCommands, type ApiResult } from '../../src/providers/commands'
+import { nameLooksLikeSecret, ProviderCommands, type ApiResult } from '../../src/providers/commands'
 import type { ProviderService } from '../../src/providers/service'
 
 const entry = (name: string, api = 'openai-completions') => ({
@@ -83,9 +83,10 @@ test('apiModelEdit：供应商找不到 / action 与 id 与上下文的校验顺
 
 test('apiSave / apiRemove：名字像密钥硬拦 400 bad_name，正文不回显输入值', async () => {
   await withRoot({ myproxy: entry('myproxy') }, async c => {
-    // 两个都符合名字格式（字母数字打头、32 字符内），因此命中的只能是"像密钥"这道硬拦。
+    // 三个都符合名字格式（字母数字打头、32 字符内）、都只被"密钥前缀"这一条命中：
+    // 全字母不含数字，长密钥那条（字母加数字、≥20）对它们不生效。
     // 第一个是审计实测的形状：密钥被填进了名字框。
-    for (const name of ['sk-SECRETNAME-abcdefgh', 'abcdefgh12345678']) {
+    for (const name of ['sk-SECRETNAME-abcdefgh', 'AKIAIOSFODNNEXAMPLE', 'ghp_abcdefghijklmnop']) {
       const saved = await c.apiSave({ name, api: 'openai-completions', baseURL: 'https://x.example.com/v1', key: 'test-key-7x-000000000001', mode: 'create' }) as ApiResult
       expect(saved.status, `保存 ${name} 应 400`).toBe(400)
       expect(saved.body).toMatchObject({ ok: false, error: 'bad_name' })
@@ -95,5 +96,22 @@ test('apiSave / apiRemove：名字像密钥硬拦 400 bad_name，正文不回显
       expect(removed.body).toMatchObject({ ok: false, error: 'bad_name' })
       expect(String((removed.body as any).text), '正文不该回显输入值').not.toContain(name)
     }
+  })
+})
+
+test('名字像密钥的判据：长密钥与正常名字各走各的', async () => {
+  // 第二条例：20 位以上、字母数字混合，粘贴进来的真密钥（无常见前缀也拦）
+  for (const name of ['abcdefghij1234567890', 'qiyiguo2345678901234']) {
+    expect(nameLooksLikeSecret(name), `${name} 应被当成密钥`).toBe(true)
+  }
+  // 正常名字放行（名字被占了加个数字很常见，不能误伤）
+  for (const name of ['myproxy01', 'qiyiguo2', 'myproxy', 'deepseek-official']) {
+    expect(nameLooksLikeSecret(name), `${name} 是正常名字，不该拦`).toBe(false)
+  }
+  // 端到端：过了名字这道关的请求走到后面那一层校验（bad_format），不是 bad_name 的密钥文案
+  await withRoot({ myproxy: entry('myproxy') }, async c => {
+    const r = await c.apiSave({ name: 'myproxy01', api: 'grpc', baseURL: 'https://x.example.com/v1', key: 'test-key-7x-000000000001', mode: 'create' }) as ApiResult
+    expect(r.status).toBe(400)
+    expect(r.body).toMatchObject({ ok: false, error: 'bad_format' })
   })
 })
