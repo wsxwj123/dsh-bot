@@ -270,11 +270,19 @@ function renderProviders(list) {
     tr.appendChild(td('密钥', el('span', KEY_LABEL[p.key] || p.key || '?', keyCls)));
     tr.appendChild(td('正在用', users[p.name] ? ('正在用 ' + users[p.name].join('、')) : '—', 'muted'));
     const act = td('', '');
-    if (p.enabled === false) act.appendChild(el('div', '未启用：' + (p.note || '原因未知'), 'muted'));
-    if (p.source === 'custom') {
-      act.appendChild(provActs(p));
+    // 配置有误的自建条目（网关校验不通过的）所有操作都会被网关拒（409 disabled），
+    // 整条只读，给一行提示让人去改 providers.json，不给按钮白点。
+    const broken = p.source === 'custom' && p.api == null;
+    if (broken) {
+      act.appendChild(el('div', p.note || '配置有误，未启用', 'muted'));
+      act.appendChild(el('div', '这条改不了，要修就手动改 ~/.dsh-bot/providers.json。', 'muted'));
     } else {
-      act.appendChild(el('span', '改配置文件才能动', 'muted'));
+      if (p.enabled === false) act.appendChild(el('div', '未启用：' + (p.note || '原因未知'), 'muted'));
+      if (p.source === 'custom') {
+        act.appendChild(provActs(p));
+      } else {
+        act.appendChild(el('span', '改配置文件才能动', 'muted'));
+      }
     }
     tr.appendChild(act);
     tbody.appendChild(tr);
