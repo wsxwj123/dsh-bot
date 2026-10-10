@@ -8,7 +8,11 @@
    朋友圈库也由 BOTLIFE_STATE_DB 指到 tmp 里自建，不依赖环境里恰好有 state.db；
 2. 管理台看到的"在跑的新系统网关"用假网关（本机 HTTP stub）扮演，绝不连真实 bot；
 3. 管理台用 Flask test_client，不监听端口；
-4. 真网关的用例要用 bun 起子进程（可选），没有 bun 时那批自动 skip。
+4. 真网关的用例要用 bun 起子进程（可选），没有 bun 时那批自动 skip；
+5. 画风数据文件（styles.json）由 styles_env 夹具钉在 tmp。moments.styles_routes 的
+   路径常量在 import 期求值，落在哪取决于 pytest 收集顺序（实测 tests/unit 与本目录
+   一起跑时它指向真实的 ~/.claude/skills/novelai-skill），碰画风数据的用例必须显式依赖
+   styles_env，不许拿默认值去读。
 """
 import importlib
 import json
@@ -67,6 +71,16 @@ def free_port():
     p = s.getsockname()[1]
     s.close()
     return p
+
+
+def write_bot_cfg(d, bot_id, **fields):
+    """在配置目录里写一份 <bot_id>.yml。值是标量，够本目录的验收用例用。"""
+    d = Path(d)
+    d.mkdir(parents=True, exist_ok=True)
+    text = "id: %s\n" % bot_id
+    for k, v in sorted(fields.items()):
+        text += "%s: %s\n" % (k, v)
+    (d / ("%s.yml" % bot_id)).write_text(text, encoding="utf-8")
 
 
 @pytest.fixture
@@ -155,6 +169,41 @@ def make_client(sandbox, monkeypatch):
         app.config["TESTING"] = True
         return app.test_client()
     return _make
+
+
+@pytest.fixture
+def styles_env(tmp_path, monkeypatch):
+    """把 NovelAI 画风数据文件与示例图目录钉在 tmp，返回读写句柄。
+
+    为什么必须显式钉。moments.styles_routes 的 STYLES_PATH / SAMPLE_DIR 在 import 期
+    求值，sandbox 把 HOME 指到 tmp **之后**才首次 import 的场合它才落在 tmp；跑整个
+    tests/unit 加本目录时模块早被别处 import 过，实测它指向真实的
+    ~/.claude/skills/novelai-skill。不钉住，画风页用例会读真实数据、POST 会写真实
+    文件，后者绝对不允许。
+
+    直接改模块属性而不是重载模块。产品里 _load_styles / _save_styles / _style_bots
+    在运行时读模块级名字，setattr 立刻生效，也不必赌 moments.web 的重载顺序。
+    """
+    from moments import styles_routes as sr
+
+    root = tmp_path / "novelai-skill"
+    (root / "assets").mkdir(parents=True)
+    monkeypatch.setattr(sr, "STYLES_PATH", root / "assets" / "styles.json")
+    monkeypatch.setattr(sr, "DEFAULT_CONFIG_PATH", root / "assets" / "default_config.json")
+    monkeypatch.setattr(sr, "SAMPLE_DIR", tmp_path / "samples")
+    # 安全闸。钉不到 tmp 就立刻红，别等写完盘才发现
+    assert str(sr.STYLES_PATH).startswith(str(tmp_path)), "画风数据文件没钉在 tmp"
+
+    def write(data):
+        sr.STYLES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        sr.STYLES_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                                  encoding="utf-8")
+
+    def read():
+        return json.loads(sr.STYLES_PATH.read_text(encoding="utf-8"))
+
+    import types
+    return types.SimpleNamespace(root=root, path=sr.STYLES_PATH, write=write, read=read)
 
 
 @pytest.fixture
