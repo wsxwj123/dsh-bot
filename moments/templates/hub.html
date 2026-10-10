@@ -9,23 +9,45 @@
 {% include "_nav.html" %}
 <div class="wrap">
   <h1>管理台</h1>
-  <div class="sub">这台机器上的模型来源、朋友圈与 bot 状态</div>
+  <div class="sub">这台机器上的新系统与旧系统，一处进。每个页面只管一套东西，页内做完全部动作。</div>
 
-  <a class="card cardlink" href="/hub/provider">
-    <h2>模型来源</h2>
-    <div class="muted">配第三方 key、登录官方订阅账户、一键切换 bot 走哪家模型</div>
+  <div class="grouptitle">新系统</div>
+  <a class="card cardlink" href="/hub/dsh-model">
+    <h2>供应商与模型</h2>
+    <div class="muted">加供应商、管模型清单，以及每个 bot 现在用哪个模型</div>
   </a>
-
   <a class="card cardlink" href="/hub/bots">
     <h2>bot 状态</h2>
     <div class="muted">看 dispatcher 是否在线、worker 就绪到哪一步，必要时重启全部 bot</div>
   </a>
+  <a class="card cardlink" href="/hub/addbot">
+    <h2>添加 bot</h2>
+    <div class="muted">填一个 Telegram token，把新 bot 建起来</div>
+  </a>
+  <a class="card cardlink" href="/hub/setup">
+    <h2>密钥</h2>
+    <div class="muted">首次装完先来这填三把密钥，不填 bot 不会动</div>
+  </a>
+  <a class="card cardlink" href="/hub/params">
+    <h2>系统参数</h2>
+    <div class="muted">configs/_global.yml 的图形界面，高级模式可以直接改原文</div>
+  </a>
 
+  <div class="grouptitle">旧系统</div>
+  <a class="card cardlink" href="/provider">
+    <h2>旧系统供应商</h2>
+    <div class="muted">旧系统（provider-proxy）的供应商管理，原来的 /provider 页面</div>
+  </a>
+  <a class="card cardlink" href="/hub/provider">
+    <h2>模型来源</h2>
+    <div class="muted">cliproxy，本机没装，平时用不到</div>
+  </a>
+
+  <div class="grouptitle">其他</div>
   <a class="card cardlink" href="/">
     <h2>朋友圈</h2>
     <div class="muted">bot 发的动态、点赞与评论</div>
   </a>
-
   <a class="card cardlink" href="/styles">
     <h2>画风预设</h2>
     <div class="muted">NovelAI 画风预设与 key</div>
@@ -34,6 +56,7 @@
 <style>
 .cardlink{display:block;color:inherit;}
 .cardlink:hover{border-color:var(--hairline-strong);}
+.grouptitle{font-size:12px;color:var(--ink-faint);margin:14px 2px 8px;}
 </style>
 </body>
 </html>

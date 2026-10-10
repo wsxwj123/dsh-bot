@@ -48,16 +48,25 @@ th{color:var(--ink-faint);font-weight:500;font-size:12.5px;}
 .pill.on{background:rgba(7,193,96,.15);color:var(--wxgreen);}
 .pill.off{background:rgba(250,81,81,.14);color:var(--danger);}
 .empty{color:var(--ink-faint);font-size:13px;padding:12px 0;}
+.navgroup{font-size:12px;color:var(--ink-faint);padding:0 2px;}
 </style>
+{# 导航按系统分三组（方案 3.1）。两处刻意的取舍：
+   - cliproxy 的「模型来源」（/hub/provider）撤出导航，只在门户留一张卡（决定三）；
+     它那颗 chip 撤掉后 /hub/provider 页不再亮任何一项，这是已知的小瑕疵。
+   - 「旧系统供应商」指向 /provider（旧仓的 provider 管理页），那页自带顶栏、
+     不共用这条导航，所以这颗 chip 永远不会亮 —— 加它是为了把入口放回手边。 #}
 <nav class="hubnav">
   <div class="hubnav-inner">
+    <span class="navgroup">新系统</span>
     <a class="chip{% if nav_active == 'hub' %} on{% endif %}" href="/hub">管理台</a>
-    <a class="chip{% if nav_active == 'provider' %} on{% endif %}" href="/hub/provider">模型来源</a>
+    <a class="chip{% if nav_active == 'dsh-model' %} on{% endif %}" href="/hub/dsh-model">供应商与模型</a>
     <a class="chip{% if nav_active == 'bots' %} on{% endif %}" href="/hub/bots">bot 状态</a>
-    <a class="chip{% if nav_active == 'dsh-model' %} on{% endif %}" href="/hub/dsh-model">新系统模型</a>
-    <a class="chip{% if nav_active == 'params' %} on{% endif %}" href="/hub/params">系统参数</a>
     <a class="chip{% if nav_active == 'addbot' %} on{% endif %}" href="/hub/addbot">添加 bot</a>
     <a class="chip{% if nav_active == 'setup' %} on{% endif %}" id="nav-setup" href="/hub/setup">密钥</a>
+    <a class="chip{% if nav_active == 'params' %} on{% endif %}" href="/hub/params">系统参数</a>
+    <span class="navgroup">旧系统</span>
+    <a class="chip" href="/provider">旧系统供应商</a>
+    <span class="navgroup">其他</span>
     <a class="chip" href="/">朋友圈</a>
     <a class="chip" href="/styles">画风</a>
   </div>
