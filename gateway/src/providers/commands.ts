@@ -10,7 +10,7 @@ import { deleteMessageWithRetry, type TelegramApi, type TgMessage } from '../tel
 import { registerSecret, safeError, type Logger } from '../log'
 import { fetchFailText, TRUNCATED_NOTE } from './models'
 import type { ProviderService, RefreshResult, SaveResult } from './service'
-import { effortLabel, looksLikeSecret } from '../wizard/text'
+import { effortLabel } from '../wizard/text'
 
 /** 本机接口 `POST /v1/provider/refresh` 的返回（方案 3.8）：HTTP 状态码 + 机读错误码 + 文案 */
 export type ApiRefreshResult = { status: number; body: { ok: boolean; error?: string; reason?: string; count?: number; added?: number; removed?: number; kept_manual?: number; text: string } }
@@ -34,15 +34,31 @@ export function isProviderAdd(text: string | undefined | null): boolean {
  *  任何东西）。**不回显输入值**。 */
 const NAME_IS_SECRET_TEXT = '这条像是密钥，没有当作供应商名字（密钥要填在密钥那一栏），换个名字'
 
-/** sk- / sk_ 打头的密钥前缀（OpenAI、Anthropic、DeepSeek 几家都是这个形状） */
-const SECRET_NAME_PREFIX = /^sk[-_]/i
+/** 常见服务商的密钥前缀，不分大小写。OpenAI / Anthropic / DeepSeek 的 sk- 与 sk_、
+ *  GitHub 的 ghp_ 与 gho_、Slack 的 xox…、AWS 的 AKIA、Google 的 AIza */
+const SECRET_NAME_PREFIX = /^(?:sk[-_]|gh[po]_|xox|akia|aiza)/i
 
-/** 名字栏像不像密钥。主判据是与 Telegram 同源的 looksLikeSecret；再加一条密钥前缀：
- *  审计复现用的 sk-SECRETNAME-abcdefgh 全是字母、不含数字，looksLikeSecret 判不出来
- *  （它要求字母加数字是为了不误删聊天字，名字场景没有这个约束），只搬那一条等于放走
- *  审计给出的复现 payload。 */
-const nameLooksLikeSecret = (name: string): boolean =>
-  looksLikeSecret(name) || SECRET_NAME_PREFIX.test(name.trim())
+/** 名字栏里的长密钥下限：20 个字符。短于它的名字（myproxy01 之类）不该被误伤 */
+const SECRET_NAME_MIN_LENGTH = 20
+
+/**
+ * 名字栏像不像密钥（硬拦的判据，保存与删除两个端点共用）。满足其一即拦：
+ *
+ * 1. 以常见密钥前缀开头（见 SECRET_NAME_PREFIX）。审计复现的 sk-SECRETNAME-abcdefgh
+ *    走这条：它全是字母、不含数字，凡是"字母加数字"的判据都漏。
+ * 2. 同时含字母和数字、且去首尾空白后长度 ≥ 20。粘贴进来的真密钥走这条。
+ *
+ * **刻意不用 wizard/text 的 looksLikeSecret**：那是给 Telegram 自由文本设计的，只要
+ * "长度 ≥ 8 且含字母和数字"就算，在名字栏会把 myproxy01、qiyiguo2 这类完全正常的名字
+ * （名字被占了加个数字很常见）一并拦下。名字只有 [A-Za-z0-9_-]、最长 32 字符，没有
+ * 长随机串的容身之处，宽口径在这里的误伤代价比 Telegram 那边高得多。
+ */
+export const nameLooksLikeSecret = (name: string): boolean => {
+  const s = name.trim()
+  if (SECRET_NAME_PREFIX.test(s)) return true
+  return s.length >= SECRET_NAME_MIN_LENGTH && /[A-Za-z]/.test(s) && /[0-9]/.test(s)
+}
+
 const DELETED_NOTE = '（你发的密钥消息已删除。）'
 const NOT_DELETED_NOTE = '（你发的密钥消息没能删除，请手动删掉它。）'
 const ADD_USAGE = '【系统】用法：/provider add <名字> <地址> <密钥> [openai|anthropic]（不写格式按 Anthropic）。'
