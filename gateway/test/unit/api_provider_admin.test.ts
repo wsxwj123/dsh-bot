@@ -80,3 +80,20 @@ test('apiModelEdit：供应商找不到 / action 与 id 与上下文的校验顺
     expect(noCtx).toMatchObject({ status: 400, body: { error: 'bad_context' } })
   })
 })
+
+test('apiSave / apiRemove：名字像密钥硬拦 400 bad_name，正文不回显输入值', async () => {
+  await withRoot({ myproxy: entry('myproxy') }, async c => {
+    // 两个都符合名字格式（字母数字打头、32 字符内），因此命中的只能是"像密钥"这道硬拦。
+    // 第一个是审计实测的形状：密钥被填进了名字框。
+    for (const name of ['sk-SECRETNAME-abcdefgh', 'abcdefgh12345678']) {
+      const saved = await c.apiSave({ name, api: 'openai-completions', baseURL: 'https://x.example.com/v1', key: 'test-key-7x-000000000001', mode: 'create' }) as ApiResult
+      expect(saved.status, `保存 ${name} 应 400`).toBe(400)
+      expect(saved.body).toMatchObject({ ok: false, error: 'bad_name' })
+      expect(String((saved.body as any).text), '正文不该回显输入值').not.toContain(name)
+      const removed = await c.apiRemove(name) as ApiResult
+      expect(removed.status, `删除 ${name} 应 400`).toBe(400)
+      expect(removed.body).toMatchObject({ ok: false, error: 'bad_name' })
+      expect(String((removed.body as any).text), '正文不该回显输入值').not.toContain(name)
+    }
+  })
+})
