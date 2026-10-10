@@ -188,12 +188,17 @@ def client(monkeypatch):
     return app.test_client()
 
 
-def test_接口的来源标注与覆盖点名(roots, client):
+def test_接口只回新系统的bot并标出来源与覆盖(roots, client):
+    """这一页只管新系统的 bot：只在旧根里的 bot2 四个出口都不出现。
+
+    同名两份时 same 走新系统那份，标 shadowed，覆盖关系在 overrides 点名。
+    """
     _write(roots[0], "bot2", dispatcher_port="18002")
     _write(roots[0], "same", dispatcher_port="18003")
     _write(roots[1], "same", dispatcher_port="18004")
     body = client.get("/hub/api/bots").get_json()
-    assert body["sources"]["bot2"] == {"source": "legacy", "shadowed": False}
+    assert [b["id"] for b in body["bots"]] == ["same"]
+    assert "bot2" not in body["sources"] and "bot2" not in body["disabled"]
     assert body["sources"]["same"] == {"source": "dsh", "shadowed": True}
     assert body["overrides"] == ["same"]
     # §6.1 的行字段集不许因为这个功能变形（来源走顶层 sources）

@@ -9,9 +9,10 @@
 {% include "_nav.html" %}
 <div class="wrap">
   <h1>bot 状态</h1>
-  <div class="sub">「开关」是配置里停没停用，dispatcher 那盏灯是进程此刻在不在，
-    phase 是它托管的 worker —— 三层分开看。新旧两套配置都读，每行标了来源，
-    两边同名时以新系统那份为准。</div>
+  <div class="sub">这一页只管新系统的 bot。跑在旧系统的那些不在这里出现，
+    开关与重启都在旧管理台和桌面脚本里做。「开关」是配置里停没停用，
+    dispatcher 那盏灯是进程此刻在不在，phase 是它托管的 worker，三层分开看。
+    新系统里停用的 bot 仍留在表里（灰一档），点「启用」就能把它点回来。</div>
 
   <div class="card">
     <div class="row" style="justify-content:space-between">
@@ -56,8 +57,9 @@ function pill(cls, text) {
   return td;
 }
 
-// 来源列：混跑期同一个面板管新旧两边的 bot，来源必须看得出来。
-// 数据在响应顶层的 sources（{id: {source, shadowed}}）——行本身（§6.1 字段集）不动。
+// 来源列：这一页只管新系统的 bot，来源恒是「新系统」；同名时旧那份被压住，
+// 行上标出来（shadowed）别静默。数据在响应顶层的 sources（{id: {source, shadowed}}），
+// 行本身（§6.1 字段集）不动。
 const SOURCE_TEXT = {legacy: '旧系统', dsh: '新系统'};
 function sourceCell(info) {
   const td = document.createElement('td');
@@ -126,7 +128,7 @@ async function loadBots() {
 // 用户会看见"点了停止它还在回消息"，那跟没做一样。二次确认里把代价说清楚。
 async function setEnabled(botId, enabled, btn) {
   const what = enabled ? '启用' : '停止';
-  if (!confirm(what + ' ' + botId + '？改完会立即重启全部 bot 让它生效，'
+  if (!confirm(what + ' ' + botId + '？改完会立即重启新系统的全部 bot 让它生效，'
                + '正在处理的对话会被打断。')) { return; }
   btn.disabled = true;
   const r = await hubApi('/hub/api/bots/' + encodeURIComponent(botId) + '/enabled',
@@ -159,8 +161,10 @@ async function pollJob(jobId) {
   loadBots();
 }
 
-// 重启入口只有这一个（「重启全部 bot」按钮和停用/启用之后都走它）——
+// 重启入口只有这一个（「重启全部 bot」按钮和停用/启用之后都走它）。
 // 停用真正生效靠的就是这一下：重启脚本按注册表拉起，停用的 bot 不在名单里，起不来。
+// 范围只覆盖新系统的 bot：命令的配置根由管理台限定（见 bots_client._restart_env），
+// 旧系统的那些不归这一下管。
 async function startRestart() {
   $('restart-all').disabled = true;
   const r = await hubApi('/hub/api/bots/restart', {method: 'POST', body: '{}'});
@@ -171,7 +175,7 @@ async function startRestart() {
 }
 
 $('restart-all').addEventListener('click', () => {
-  if (!confirm('重启全部 bot？正在处理的对话会被打断。')) return;
+  if (!confirm('重启新系统的全部 bot？正在处理的对话会被打断。')) return;
   startRestart();
 });
 

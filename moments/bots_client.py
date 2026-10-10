@@ -60,6 +60,19 @@ def _root_dirs():
     return [str(d) for _source, d in _source_roots()]
 
 
+def _dsh_root():
+    """新系统那套配置根，目录不存在（或那一边被 env 关掉）时回 None。
+
+    判"这一页有没有新旧之分"用它。``roots()`` 只回答"读哪几套根"，不存在的那套
+    也在里面、由读取端跳过；这里要的是"那一边到底在不在场"，所以多探一次目录。
+    """
+    from moments import config_sources
+    for source, d in config_sources.roots():
+        if source == config_sources.SOURCE_DSH:
+            return Path(d) if Path(d).is_dir() else None
+    return None
+
+
 def bot_ports():
     """``{bot_id: port}``，**现读注册表**（唯一事实源 = ``configs/*.yml``），加 bot 零代码改动。
 
@@ -158,6 +171,36 @@ def bot_sources():
         return out
     except Exception:
         return {}
+
+
+def hub_visible(entries, sources=None):
+    """``/hub/bots`` 这一页该显示的 bot：只留由**新系统**跑着的那些。
+
+    判定不在这里发明。``bot_sources()`` 的 ``source`` 就是"这个 bot 生效的那份
+    配置来自哪一套"（在跑的那份优先），本函数只按那个标记筛。旧系统在跑的那只
+    不进这一页，它的开关与重启由旧面板和桌面脚本管，摆一行点不动的开关就是
+    静默说谎；在新系统里停用的那只照旧留着（它生效的是新系统那份配置），
+    这一页是唯一能把它点回来的地方。
+
+    ``sources`` 传 ``bot_sources()`` 的结果（不传就现取一次，口径相同）。
+
+    两种场合原样放行，不筛：
+
+    - 新系统那套根不在场。单套根的机器没有新旧之分，那套根就是它自己的根，
+      照旧显示全部（``HUB_CONFIGS_DSH_DIR=off`` 与目录不存在走同一条路）；
+    - 来源读不出来（``bot_sources()`` 的既有 fail-open）。来源标注缺失不该把
+      名单清空，宁可多显示。
+
+    ``HUB_BOTS_FILE`` 注入名单时来源为空，同样原样放行：那份名单是测试接缝，
+    与配置目录无关，不猜。
+    """
+    from moments import config_sources
+    src = bot_sources() if sources is None else sources
+    if not src or _dsh_root() is None:
+        return list(entries)
+    keep = {bot for bot, info in src.items()
+            if (info or {}).get("source") == config_sources.SOURCE_DSH}
+    return [e for e in entries if e["id"] in keep]
 
 
 def bot_port(bot_id, cfg=None):
@@ -320,6 +363,22 @@ def _kill_tree(proc):
         proc.kill()
 
 
+def _restart_env():
+    """重启命令的配置根：只喂新系统那套，「重启全部 bot」也只覆盖新系统的。
+
+    ``restart-bots.sh`` 按 ``HUB_CONFIGS_DIR`` 读注册表决定拉起谁，而管理台自己
+    那份在混跑期指着旧系统的配置根，子进程原样继承会去重启旧系统的 bot（旧面板
+    与桌面脚本管的那几只，不该被这一下打断）。新系统那套根不在场时回 None，
+    子进程照常继承环境：单套根的机器只有它自己那一套，没什么可隔离的。
+    """
+    root = _dsh_root()
+    if root is None:
+        return None
+    env = dict(os.environ)
+    env["HUB_CONFIGS_DIR"] = str(root)
+    return env
+
+
 def _run_command(argv, timeout):
     """跑一次重启命令，返回 ``(state, exit_code, 合并输出)``。这里不脱敏，交调用方统一处理。
 
@@ -332,6 +391,7 @@ def _run_command(argv, timeout):
     try:
         proc = subprocess.Popen(argv, cwd=str(REPO_ROOT), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                env=_restart_env(),
                                 start_new_session=(os.name != "nt"))
     except OSError as e:
         # 不回显命令串：它含路径与参数，属配置值（§7 末行同理）

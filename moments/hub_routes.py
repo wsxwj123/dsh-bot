@@ -987,15 +987,22 @@ def bots_list():
     except Exception as e:      # 名单读不出来就是 config_unreadable，detail 只给类名（§6.0/§7）
         return jsonify({"error": "config_unreadable", "detail": type(e).__name__}), 500
     # 探活自己吞异常，不会把故障冒成 config_unreadable；空名单是正常态，不是错误。
+    # 这一页只管**新系统**的 bot（`hub_visible`）：旧系统那几只由旧面板与桌面脚本管，
+    # 它们的开关在本页点不动（旧系统运行时读的是自己那份标记 + 旧配置根），
+    # 摆上来就是一行点不动的开关。新系统里被停用的照旧留着，灰一档，点得回来。
     # `disabled` 是**顶层**的一列 id，不塞进 bot 行里：行的字段集是 §6.1 的契约。
-    # 来源标注同理走顶层：`sources` = {id: {source, shadowed}}（混跑期页面标"新系统/旧系统"），
-    # 两边同名的以新系统为准，被压住的旧那份在 `overrides` 里点名（页面提示覆盖关系，别静默）。
+    # 来源标注同理走顶层：`sources` = {id: {source, shadowed}}，两边同名的以新系统为准，
+    # 被压住的旧那份在 `overrides` 里点名（页面提示覆盖关系，别静默）。
+    # 四个出口一律按页面上这几只过滤：接口回的东西不许超出这一页的范围。
     src = bots_client.bot_sources()
+    entries = bots_client.hub_visible(entries, src)
+    on_page = {e["id"] for e in entries}
     return jsonify({"bots": bots_client.probe_bots(entries),
-                    "disabled": bots_client.disabled_ids(),
+                    "disabled": [b for b in bots_client.disabled_ids() if b in on_page],
                     "restart_available": bots_client.restart_plan()[1],
-                    "sources": src,
-                    "overrides": sorted(k for k, v in src.items() if v["shadowed"])})
+                    "sources": {k: v for k, v in src.items() if k in on_page},
+                    "overrides": sorted(k for k, v in src.items()
+                                        if v["shadowed"] and k in on_page)})
 
 
 @hub_bp.post("/hub/api/bots/restart")

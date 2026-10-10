@@ -7,7 +7,9 @@
 页面上"来源 legacy、启用中、状态离线"三个标注互相打脸。
 
 这里在 A 上起真服务、真的发 /status，用服务端收到的请求量出探活打到哪个端口，
-不看实现内部。同理 /hub/api/bots 一整行（来源、停用徽标、在线状态）必须一致。
+不看实现内部。/hub/api/bots 那一页只管新系统的 bot：旧栈在跑的那只不进名单、
+不探活（它由旧面板与桌面脚本管）；进名单的行，来源、停用徽标、在线状态三个
+标注必须一致。
 """
 import json
 import os
@@ -109,19 +111,42 @@ def test_旧栈在跑新栈停用_探活打到旧栈端口(roots, live_status):
     assert live_status.hits == ["/status"], "真服务收到的请求 %s" % live_status.hits
 
 
-def test_端点整行的来源停用在线三个标注指向同一份(roots, live_status):
-    """sources 说 legacy、bot2 不在 disabled、状态 online，三者不许互相打脸。"""
+def _hub_client():
     from flask import Flask
 
     from moments.hub_routes import hub_bp
-    dsh_port = free_port()
-    _mixed_bot2(roots, live_status, dsh_port)
     app = Flask(__name__)
     app.register_blueprint(hub_bp)
     app.config["TESTING"] = True
-    body = app.test_client().get("/hub/api/bots").get_json()
+    return app.test_client()
+
+
+def test_旧栈在跑的bot不进这一页(roots, live_status):
+    """bot2 旧根在跑、新根停用：它由旧系统管，四个出口都不出现，也不为它探活。
+
+    这一页的开关写的是新系统那份配置，旧系统的运行时看的却是它自己那份标记，
+    摆一行点不动的开关就是用户报的那个静默说谎。探活打过去也只是白打旧系统
+    的 dispatcher。
+    """
+    dsh_port = free_port()
+    _mixed_bot2(roots, live_status, dsh_port)
+    body = _hub_client().get("/hub/api/bots").get_json()
+    assert body["bots"] == []
+    assert body["sources"] == {} and body["disabled"] == []
+    assert live_status.hits == [], "为旧系统跑着的 bot 发了探活请求：%s" % live_status.hits
+
+
+def test_新系统在跑的bot_来源停用在线三个标注指向同一份(roots, live_status):
+    """新根那份在跑（live_status 端口）、旧根那份停用：来源说 dsh、不在 disabled、
+    状态 online，三者不许互相打脸。"""
+    legacy, dsh = roots
+    _write_bot(dsh, "bot2", display_name="李彤彤",
+               dispatcher_port=live_status.server_address[1])
+    _write_bot(legacy, "bot2", enabled=False, display_name="李彤彤",
+               dispatcher_port=free_port())
+    body = _hub_client().get("/hub/api/bots").get_json()
     row = [b for b in body["bots"] if b["id"] == "bot2"][0]
-    assert body["sources"]["bot2"]["source"] == "legacy"
+    assert body["sources"]["bot2"]["source"] == "dsh"
     assert "bot2" not in body["disabled"]
     assert (row["port"], row["state"]) == (live_status.server_address[1], "online")
 
