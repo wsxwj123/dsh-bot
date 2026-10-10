@@ -187,6 +187,24 @@ def bot_port(bot_id, cfg=None):
 
 # ---------------------------------------------------------------- 探活（§6.1）
 
+def _effective_configs():
+    """``{bot 名: 生效的那份配置}``（口径见 ``config_sources.effective_configs``）。
+
+    给探活按"在跑的那份"取端口用。一个名字在两套根里各有一份时，注册表按
+    "新系统优先"合并，旧栈还在跑的 bot 会查到新栈那个没人听的端口（真机实测
+    bot2 旧栈 17802 在听、新栈 17952 拒连），页面上"来源 legacy、启用中、
+    状态离线"三个标注互相打脸。端口与来源徽标、停用徽标必须按同一份配置算。
+    接缝态（``HUB_BOTS_FILE``）与配置读不出来都回 ``{}``，这时探活退回注册表口径，不猜。
+    """
+    if os.environ.get("HUB_BOTS_FILE"):
+        return {}
+    try:
+        from moments import config_sources
+        return config_sources.effective_configs()
+    except Exception:
+        return {}
+
+
 def _scalar(v, maxlen=80):
     """只让标量出站：dispatcher 将来往 /status 里塞对象也不会整包漏出去（S8）。"""
     if v is None or isinstance(v, (bool, int, float)):
@@ -237,11 +255,16 @@ def _row(entry, port, status):
 def probe_bots(entries):
     """并发探活，整体封顶 ``PROBE_BUDGET`` 秒（[R4D] I7：串行时 N 个离线 bot 要等 N×1.5 秒）。
 
+    **端口取每个 bot 生效那份配置的 ``dispatcher_port``**（``_effective_configs``，
+    与来源徽标、停用徽标同一份）。混跑期注册表按"新系统优先"合并，照它去探会把
+    旧栈正在跑的 bot 探成离线，一行里三个标注各指一份文件。
+
     自己吞掉全部探活异常 —— 抛出去会被路由层误判成 config_unreadable。
     """
+    eff = _effective_configs()
     rows, targets = {}, []
     for e in entries:
-        port = bot_port(e["id"])
+        port = bot_port(e["id"], eff.get(e["id"]))
         if port is None:
             rows[e["id"]] = _row(e, None, None)   # unknown：没端口可打，不发探活、不占预算
         else:
