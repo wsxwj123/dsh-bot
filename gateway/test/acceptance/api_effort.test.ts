@@ -13,7 +13,8 @@ const EFFORT = '/v1/effort'
 const NOEFF = { provider: 'deepseek-official', model: 'deepseek-flash' }
 const ds = (b: BotEnv) => seedCreds(b.root, DS_KEY)
 
-const mineEfforts = (efforts: Record<string, unknown> | false) => (b: BotEnv, fm: FakeModels) => {
+// efforts 不传表示模型条目里不写 reasoningEfforts 字段（契约 3.13.2 说的「没声明」）
+const mineEfforts = (efforts?: Record<string, unknown>) => (b: BotEnv, fm: FakeModels) => {
   seedProviders(b.root, [{ name: 'myproxy', baseURL: `${fm.url}/v1`, models: [{ id: 'm1', contextWindow: 131_072, reasoningEfforts: efforts }] }])
   seedCreds(b.root, { PROVIDER_MYPROXY_KEY: 'test-key-7effort-0000000001' })
 }
@@ -47,7 +48,7 @@ describe('GET /v1/effort', () => {
   })
 
   test('自建供应商的模型没声明档位：choices 为空数组，仍 200', async () => {
-    await withModels({ brain: { provider: 'myproxy', model: 'm1' }, handler: openaiOk(IDS), before: mineEfforts(false) }, async ({ gw }) => {
+    await withModels({ brain: { provider: 'myproxy', model: 'm1' }, handler: openaiOk(IDS), before: mineEfforts() }, async ({ gw }) => {
       const r = await gw.call(EFFORT)
       expect(r.status, `应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
       expect(r.json.choices, `不声明档位应给空数组，实得 ${JSON.stringify(r.json.choices)}`).toEqual([])
@@ -59,6 +60,22 @@ describe('GET /v1/effort', () => {
       const r = await gw.call(EFFORT)
       expect(r.status, `应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
       expect([...(r.json.choices ?? [])].sort(), `choices 应只列声明的档位，实得 ${JSON.stringify(r.json.choices)}`).toEqual(['high', 'low'])
+    })
+  })
+
+  test('手写的空对象值也算声明（{"low":{},"high":{}}）：选项里出现 low 和 high，设上 high 后交给 dsh 也被接受', async () => {
+    await withModels({ brain: { provider: 'myproxy', model: 'm1' }, handler: openaiOk(IDS), before: mineEfforts({ low: {}, high: {} }) }, async ({ tg, gw, b }) => {
+      const r = await gw.call(EFFORT)
+      expect(r.status, `应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
+      const choices: string[] = r.json.choices ?? []
+      expect(choices, `值写成空对象不该把整条声明丢掉，选项里应有 low，实得 ${JSON.stringify(r.json.choices)}`).toContain('low')
+      expect(choices, `值写成空对象不该把整条声明丢掉，选项里应有 high，实得 ${JSON.stringify(r.json.choices)}`).toContain('high')
+      const set = await gw.call(EFFORT, { effort: 'high' })
+      expect(set.status, `声明里出现的档位应能设上，实得 ${set.status}，正文 ${set.text.slice(0, 300)}`).toBe(200)
+      const k0 = tg.sentTo(OWNER).length
+      tg.pushText(OWNER, '验证档位')
+      await waitSentText(tg, OWNER, '收到：验证档位', k0, 30_000)
+      expect(configCalls(b).some(c => c.configId === 'reasoning_effort' && c.value === 'high' && c.ok !== false), `下一轮应把 high 交给 dsh 且被接受，实得 ${JSON.stringify(configCalls(b))}`).toBe(true)
     })
   })
 

@@ -10,7 +10,6 @@ import { type FakeModels, openaiOk } from './fake-models'
 
 const IDS = ['m1', 'm2']
 const MODEL = '/v1/provider/model'
-const ROUTES = { myroute: { api: 'openai-completions', baseURL: 'https://r.example.com/v1', apiKeyEnv: 'MYROUTE_KEY', models: [{ id: 'r1', contextWindow: 32768 }] } }
 
 const seedCustom = (o: { models?: string[]; manual?: string[] } = {}) => (b: BotEnv, fm: FakeModels) => {
   seedProviders(b.root, [{ name: 'myproxy', baseURL: `${fm.url}/v1`, models: o.models ?? IDS, manualModels: o.manual ?? [] }])

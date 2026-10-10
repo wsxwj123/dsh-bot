@@ -22,7 +22,8 @@ const REQS = [
 describe('POST /v1/provider/save 的密钥卫生', () => {
   test('新建成功后：密钥只在 credentials.yaml，响应与账本日志文件里都没有', async () => {
     const key = fakeKey('secret')
-    await withModels({ handler: openaiOk(IDS) }, async ({ gw, b, fm }) => {
+    // 让假模型服务的期望密钥与请求体里用的一致，否则假服务认不出网关带来的密钥
+    await withModels({ handler: openaiOk(IDS), key }, async ({ gw, b, fm }) => {
       const r = await gw.call(SAVE, { name: 'myproxy', api: 'openai-completions', baseURL: `${fm.url}/v1`, key, mode: 'create' })
       expect(r.status, `应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
       await sleep(600)

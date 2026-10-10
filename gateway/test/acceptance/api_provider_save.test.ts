@@ -30,7 +30,8 @@ const body = (fm: FakeModels, over: Record<string, unknown> = {}) => ({
 describe('POST /v1/provider/save 的正常路径', () => {
   test('新建：200，kind=created，text 说已添加并带模型数，落盘与凭据文件都对', async () => {
     const key = fakeKey('save')
-    await withModels({ handler: openaiOk(IDS) }, async ({ gw, b, fm }) => {
+    // 让假模型服务的期望密钥与请求体里用的一致，否则假服务认不出网关带来的密钥
+    await withModels({ handler: openaiOk(IDS), key }, async ({ gw, b, fm }) => {
       const r = await gw.call(SAVE, body(fm, { key }))
       expect(r.status, `应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
       expect(r.json, '正文应与契约 3.2 成功样例一致（text 只判包含）').toMatchObject({
