@@ -1620,6 +1620,12 @@ export class Engine {
     ].join('\n')
   }
 
+  /**
+   * 当前覆盖里的思考档位（本机接口 GET /v1/effort 的 current，INTERFACE 3.5：没有覆盖时为 null）。
+   * 与 Telegram 的「现在就是「X」」判定用同一份覆盖（brain_override），不掺配置文件里的默认档位
+   */
+  overrideEffort(): string | null { return this.currentOverride()?.effort ?? null }
+
   /** 只改思考强度：目标档位在当前模型支持的档位里才设（方案 3.5.2、S9） */
   private async setEffortForWizard(v: string): Promise<{ ok: boolean }> {
     let opts: string[] = []
@@ -1647,6 +1653,7 @@ export class Engine {
       views: () => this.providerViews(),
       choices: () => this.modelChoicesNow(),
       efforts: () => this.effortChoicesNow(),
+      overrideEffort: () => this.overrideEffort(),
       switchTo: (c: ModelChoice) => this.switchTo(c),
       setEffort: (v: string) => this.setEffortForWizard(v),
       revert: () => this.revertToConfigForWizard(),
@@ -1702,7 +1709,7 @@ export class Engine {
     if (cm !== this.configMtime || pm !== this.personaMtime) {
       this.configMtime = cm
       this.personaMtime = pm
-      const nb = reloadBrain(this.cfg.configPath)
+      const nb = reloadBrain(this.cfg.configPath, Object.keys(this.sharedProviders?.valid ?? {}))
       if (!nb) { this.log.warn('config.reload_failed', { path: 'configs/<bot>.yml' }); return }
       this.fileRoutes = nb.routes
       this.providerMerge = mergeRoutes(this.fileRoutes, this.sharedProviders)

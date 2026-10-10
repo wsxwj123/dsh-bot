@@ -23,12 +23,24 @@ export type ApiDeps = {
   /** 管理台看模型、换模型（和 /model 命令同一套逻辑） */
   model?: { info: () => Promise<unknown>; set: (spec: string) => Promise<{ ok: boolean }> }
   /**
-   * 自建供应商（方案 3.8）：`views` 每次请求现读 providers.json；`refresh` 走 ProviderService 的刷新。
-   * 由 main.ts 装配注入。views 的返回与 engine 的 ProviderView 结构兼容（多带的字段在这里丢掉）。
+   * 自建供应商（方案 3.8、管理台 UI 批的 3.1 到 3.5）：`views` 每次请求现读 providers.json；`refresh` 走 ProviderService 的刷新；
+   * detail / save / remove / model / effortGet / effortSet 是管理台要的新接口，判定、校验与错误码映射都在 ProviderCommands 里一处写，
+   * 这里只做 HTTP 转发（与 refresh 同族）。由 main.ts 装配注入。views 的返回与 engine 的 ProviderView 结构兼容（多带的字段在这里丢掉）。
    */
   provider?: {
     views: () => Promise<ProviderViewLike[]>
     refresh: (name: string) => Promise<{ status: number; body: unknown }>
+    /** GET /v1/provider：自建供应商详情（含地址与模型清单，绝不含密钥） */
+    detail: () => Promise<{ status: number; body: unknown }>
+    /** POST /v1/provider/save：新建 / 更新（含密钥），mode=modify 时 key 可省 */
+    save: (body: Record<string, unknown>) => Promise<{ status: number; body: unknown }>
+    /** POST /v1/provider/remove：删除（密钥进 pendingKeyRemovals） */
+    remove: (body: Record<string, unknown>) => Promise<{ status: number; body: unknown }>
+    /** POST /v1/provider/model：模型的增删改（add / remove / set_context） */
+    model: (body: Record<string, unknown>) => Promise<{ status: number; body: unknown }>
+    /** GET/POST /v1/effort：思考强度（只改不换段） */
+    effortGet: () => Promise<{ status: number; body: unknown }>
+    effortSet: (body: Record<string, unknown>) => Promise<{ status: number; body: unknown }>
   }
   onInbound: (chatId: string) => void
 }
@@ -75,6 +87,12 @@ export class ApiServer {
         return json({ error: 'internal error' }, 500)
       }
     }
+    if (req.method === 'GET' && url.pathname === '/v1/provider' && this.d.provider) {
+      try { return this.reply(await this.d.provider.detail()) } catch (e) { return this.failed(url.pathname, e) }
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/effort' && this.d.provider) {
+      try { return this.reply(await this.d.provider.effortGet()) } catch (e) { return this.failed(url.pathname, e) }
+    }
     if (req.method !== 'POST') return json({ error: 'not found' }, 404)
     const ct = (req.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
     if (ct !== 'application/json') return json({ error: 'content-type must be application/json' }, 415)
@@ -101,6 +119,11 @@ export class ApiServer {
           return json(r, r.ok ? 200 : 400)
         }
         case '/v1/provider/refresh': return await this.providerRefresh(body)
+        // 写操作（3.2 到 3.5）：判定、校验、错误码映射都在 ProviderCommands 里一处写，这里只转发
+        case '/v1/provider/save': return await this.providerWrite('save', body)
+        case '/v1/provider/remove': return await this.providerWrite('remove', body)
+        case '/v1/provider/model': return await this.providerWrite('model', body)
+        case '/v1/effort': return await this.providerWrite('effortSet', body)
         default: return json({ error: 'not found' }, 404)
       }
     } catch (e) {
@@ -125,6 +148,22 @@ export class ApiServer {
     if (!this.d.provider) return json({ ok: false, error: 'internal error' }, 500)
     const r = await this.d.provider.refresh(name)
     return json(r.body, r.status)
+  }
+
+  /** 命令层给的 {status, body} 直接成响应 */
+  private reply(r: { status: number; body: unknown }): Response { return json(r.body, r.status) }
+
+  /** 命令层抛出的意外异常：回 500，日志只记类名与脱敏消息（不外抛） */
+  private failed(path: string, e: unknown): Response {
+    this.d.log.error('api.failed', { path, err: safeError(e) })
+    return json({ error: 'internal error' }, 500)
+  }
+
+  /** 写操作（3.2 到 3.5）的统一转发；依赖没装配时 404，与既有接口一致 */
+  private async providerWrite(op: 'save' | 'remove' | 'model' | 'effortSet', body: Record<string, unknown>): Promise<Response> {
+    const fn = this.d.provider?.[op]
+    if (!fn) return json({ error: 'not found' }, 404)
+    return this.reply(await fn(body))
   }
 
   private chatAllowed(chatId: string): boolean {

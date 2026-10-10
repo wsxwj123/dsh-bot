@@ -51,7 +51,8 @@ export class ProvidersUnreadable extends Error {
 export const DEFAULT_CONTEXT = 131072
 export const CONTEXT_MIN = 1024
 export const CONTEXT_MAX = 100_000_000
-const RESERVED = ['add', 'refresh', 'list', 'status', 'default', 'help', 'deepseek-official']
+/** 内置名与保留字（规整名命中其一就不许做自建名）。本机接口与引导共用（INTERFACE 3.2 第 2 步） */
+export const RESERVED = ['add', 'refresh', 'list', 'status', 'default', 'help', 'deepseek-official']
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/
 const KEY_ENV_RE = /^PROVIDER_[A-Z0-9_]+_KEY(_[0-9]+)?$/
@@ -144,11 +145,24 @@ function cleanEfforts(v: unknown): ReasoningEfforts | undefined {
   const e = v as Record<string, unknown>
   const keys = Object.keys(e)
   if (!keys.length || keys.some(k => !LEVELS.includes(k)) || !keys.some(k => k !== 'off')) return undefined
+  const out: Record<string, string | null> = {}
   for (const k of keys) {
     const w = e[k]
-    if (w === null ? k !== 'off' : typeof w !== 'string' || !w) return undefined
+    if (typeof w === 'string' && w) { out[k] = w; continue }
+    if (w === null) {
+      if (k !== 'off') return undefined
+      out[k] = null
+      continue
+    }
+    // 空对象当占位：dsh 出不出档位选项只看键名（INTERFACE 3.13.2「声明了 reasoningEfforts（对象）→ [''] + 它的键」），
+    // 取值按同名档位补上（off 补 null），免得这种写法把整条声明废掉
+    if (w !== null && typeof w === 'object' && !Array.isArray(w) && Object.keys(w as Record<string, unknown>).length === 0) {
+      out[k] = k === 'off' ? null : k
+      continue
+    }
+    return undefined
   }
-  return { ...e } as Record<string, string | null>
+  return out
 }
 
 /** 模型条目：id 不合格或上下文长度写了但不合格的整条丢弃；没写上下文长度按未知（131072）；思考档位声明不合格只丢这个字段 */

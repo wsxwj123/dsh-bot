@@ -2,14 +2,27 @@
 // 从不进账本/chat.log/群聊记录/模型）、`/provider refresh <名字>` 与 `/provider remove <名字>`。纯执行层：
 // - 识别、删除消息、校验、调 ProviderService、拼回复文字；回复经注入的 reply 走普通发送（kind=system）。
 // - `/provider add` 的识别排在引导拦截与群聊"只记录"之前（poller.interceptBeforeGate）：任何聊天、任何人发来都先接走。
-import { checkProviderName, checkBaseURL, cleanSecret, normName, providersPath, readProviders, ProvidersUnreadable, type ProviderApi } from './store'
+import {
+  checkBaseURL, checkProviderName, cleanModelId, cleanSecret, DEFAULT_CONTEXT, hostOf, isContextWindow, isProviderName,
+  NAME_FORMAT_WHY, normName, providersPath, readProviders, ProvidersUnreadable, RESERVED, type ProviderApi, type ProvidersSnapshot,
+} from './store'
 import { deleteMessageWithRetry, type TelegramApi, type TgMessage } from '../telegram/api'
 import { registerSecret, safeError, type Logger } from '../log'
 import { fetchFailText, TRUNCATED_NOTE } from './models'
 import type { ProviderService, RefreshResult, SaveResult } from './service'
+import { effortLabel } from '../wizard/text'
 
 /** 本机接口 `POST /v1/provider/refresh` 的返回（方案 3.8）：HTTP 状态码 + 机读错误码 + 文案 */
 export type ApiRefreshResult = { status: number; body: { ok: boolean; error?: string; reason?: string; count?: number; added?: number; removed?: number; kept_manual?: number; text: string } }
+
+/** 本机接口（INTERFACE-管理台UI 第 3 节）的统一返回：HTTP 状态码 + 契约里的正文 */
+export type ApiResult = { status: number; body: unknown }
+
+/** 机读错误码 + 固定文案（文案是给人看的中文，绝不回显输入值） */
+export const apiErr = (status: number, error: string, text: string): ApiResult => ({ status, body: { ok: false, error, text } })
+
+/** providers.json 读不了时的统一文案（三个写端点与详情接口共用，含文件位置） */
+export const providersUnreadableText = (root: string): string => `共用供应商文件读不了（格式坏了），先修好 ${providersPath(root)}`
 
 /** `/provider add …` 的识别（文字或图片/文件附言，去首尾空白后）：`^/provider(@\S+)?\s+add(\s|$)`，不分大小写 */
 export function isProviderAdd(text: string | undefined | null): boolean {
@@ -36,8 +49,18 @@ export type CommandsDeps = {
   recordUpdate: (updateId: number) => void
   /** 有进行中的引导：先结束它（旧菜单去掉按钮、回"已退出引导。"）。返回 true = 该引导正处理中（本条只删不处理） */
   endWizardForAdd?: (chatId: string) => boolean
-  /** 删除正在用的那家时要用：读当前覆盖、清覆盖换回配置文件里的模型（与引导「删除」一致，方案 3.4.4） */
-  engine?: { current: () => { provider: string; model: string }; clearOverride: () => { provider: string; model: string } }
+  /**
+   * 引擎门面（Engine.wizardFacade）。删除正在用的那家时读当前覆盖、清覆盖换回配置文件里的模型（与引导「删除」一致，方案 3.4.4）；
+   * efforts / setEffort 供本机接口 /v1/effort（3.5）。单元测试只装配用得到的方法，所以后两个可选
+   */
+  engine?: {
+    current: () => { provider: string; model: string; effort?: string | null }
+    clearOverride: () => { provider: string; model: string }
+    efforts?: () => Promise<string[]>
+    setEffort?: (v: string) => Promise<{ ok: boolean }>
+    /** 当前覆盖里的档位（/v1/effort 的 current，没有覆盖为 null） */
+    overrideEffort?: () => string | null
+  }
 }
 
 export class ProviderCommands {
@@ -181,32 +204,250 @@ export class ProviderCommands {
   async runRemove(args: string, chatId = ''): Promise<string> {
     const parts = args.trim().split(/\s+/).filter(Boolean)
     if (parts.length !== 1) return '【系统】用法：/provider remove <名字>'
-    const name = parts[0]!
+    return removeOutcomeText(await this.removeCore(parts[0]!, chatId), this.root())
+  }
+
+  /**
+   * 删除的判定与执行（Telegram 的 runRemove 与本机接口 POST /v1/provider/remove 共用同一套）。
+   * 只判定与调 service.remove，不拼文案；清覆盖也在这一层，两条入口行为一致
+   */
+  private async removeCore(name: string, chatId: string): Promise<RemoveOutcome> {
+    const deny = (reason: string) => { this.d.log.info('command.provider_remove', { chat: chatId, ok: false, reason }) }
     let snap
     try {
       snap = readProviders(`${this.root()}/providers.json`)
     } catch (e) {
-      if (e instanceof ProvidersUnreadable) return `【系统】共用供应商文件读不了（格式坏了），先修好 ${providersPath(this.root())}`
+      if (e instanceof ProvidersUnreadable) return { kind: 'unreadable', where: 'read' }
       throw e
     }
     const found = this.findValid(snap, name)
     if (!found) {
-      const deny = (reason: string, text: string) => { this.d.log.info('command.provider_remove', { chat: chatId, ok: false, reason }); return text }
-      if (snap.invalid.some(i => normName(i.name) === normName(name))) return deny('disabled', `【系统】「${name}」配置有误，未启用，不能删除。`)
-      if (normName(name) === 'deepseek-official') return deny('builtin', `【系统】只有自建供应商能删除；${name} 是内置的。`)
-      if (this.d.configRouteNames().map(normName).includes(normName(name))) return deny('config', `【系统】只有自建供应商能删除；${name} 是配置文件里的。`)
-      return deny('not_found', `【系统】没有 ${name} 这个供应商。用 /provider 看有哪些。`)
+      if (snap.invalid.some(i => normName(i.name) === normName(name))) { deny('disabled'); return { kind: 'disabled', name } }
+      if (normName(name) === 'deepseek-official') { deny('builtin'); return { kind: 'builtin', name } }
+      if (this.d.configRouteNames().map(normName).includes(normName(name))) { deny('config'); return { kind: 'config', name } }
+      deny('not_found')
+      return { kind: 'not_found', name }
     }
     const wasInUse = this.d.engine ? normName(this.d.engine.current().provider) === normName(found.name) : false
     const r = await this.d.service.remove(found.name)
-    if (r.status === 'not_found') return `【系统】「${found.name}」已经不在了。`
-    if (r.status === 'lock_timeout') return '【系统】没删成：别的 bot 正在改供应商，请稍后再试。'
-    if (r.status === 'unreadable') return '【系统】没删成：共用供应商文件读不了（格式坏了）。'
-    if (r.status === 'save_failed') return `【系统】没删成：${r.why}。`
-    let text = `【系统】已删除供应商「${r.name}」。它的密钥会在 ${Math.round(r.graceMs / 60_000)} 分钟后从凭据文件删除（让正在用它的 bot 先切走）。注意：这只是从本机删掉，不会在供应商那边作废这把密钥；如果担心泄露，请到供应商后台作废它。`
-    if (wasInUse && this.d.engine) { const c = this.d.engine.clearOverride(); text += `这个 bot 已换回配置文件里的模型：${c.provider} / ${c.model}。` }
+    if (r.status === 'not_found') return { kind: 'gone', name: found.name }
+    if (r.status === 'lock_timeout') return { kind: 'busy' }
+    if (r.status === 'unreadable') return { kind: 'unreadable', where: 'save' }
+    if (r.status === 'save_failed') return { kind: 'save_failed', why: r.why }
+    const cleared = wasInUse && this.d.engine ? this.d.engine.clearOverride() : null
     this.d.log.info('command.provider_remove', { chat: chatId, ok: true, name: r.name })
-    return text
+    return { kind: 'ok', name: r.name, graceMs: r.graceMs, cleared }
+  }
+
+  // ─── 本机接口（INTERFACE-管理台UI 第 3 节）：管理台与 Telegram 走同一套存储与校验 ───
+
+  /**
+   * `GET /v1/provider`（3.1）：只列自建。校验通过的在前（按名字升序，输出规整名），不合格的在后（字段降级）。
+   * 含地址与模型清单，绝不含密钥（key 只是 ok / missing / unknown 状态词）
+   */
+  async apiDetail(): Promise<ApiResult> {
+    const root = this.root()
+    let snap: ProvidersSnapshot
+    try {
+      snap = readProviders(providersPath(root))
+    } catch (e) {
+      if (e instanceof ProvidersUnreadable) return apiErr(503, 'providers_unreadable', providersUnreadableText(root))
+      throw e
+    }
+    const configNames = new Set(this.d.configRouteNames().map(normName))
+    const good: Record<string, unknown>[] = []
+    for (const [name, e] of Object.entries(snap.valid)) {
+      const shadowed = configNames.has(normName(name))
+      good.push({
+        name: normName(name),
+        api: e.route.api,
+        baseURL: e.route.baseURL,
+        modelList: e.route.models.map(m => ({ id: m.id, contextWindow: m.contextWindow, guessed: e.meta.guessedContext.includes(m.id) })),
+        manualModels: [...e.meta.manualModels],
+        key: this.d.service.credential(e.route.apiKeyEnv) ? 'ok' : 'missing',
+        enabled: !shadowed,
+        note: shadowed ? '和本 bot 配置文件里的路由同名，未启用' : null,
+        lastRefresh: e.meta.lastRefresh,
+      })
+    }
+    good.sort((a, b) => (String(a.name) < String(b.name) ? -1 : String(a.name) > String(b.name) ? 1 : 0))
+    const bad = snap.invalid.map(i => ({
+      name: normName(i.name), api: null, baseURL: null, modelList: [], manualModels: [],
+      key: 'unknown', enabled: false, note: `配置有误，未启用（${i.why}）`, lastRefresh: null,
+    }))
+    return { status: 200, body: { ok: true, providers: [...good, ...bad] } }
+  }
+
+  /**
+   * `POST /v1/provider/save`（3.2）：新建 / 更新自建供应商。校验顺序与错误码写死（测试照此断言）：
+   * name → 保留与重名 → api → 地址 → 密钥 → 空密钥的 modify 分支 → 空密钥的 create 分支。
+   * mode=modify 且密钥留空时用凭据文件里的现有密钥（照抄向导 doSave），绝不把空串传给 service.save
+   */
+  async apiSave(body: Record<string, unknown>): Promise<ApiResult> {
+    // 收到非空密钥第一件事就登记为机密（方案 3.11）：之后任何日志、异常信息里的它都会被替换掉
+    const rawKey = typeof body.key === 'string' ? body.key : ''
+    if (rawKey) { registerSecret(rawKey); registerSecret(rawKey.trim()) }
+    const name = body.name
+    if (typeof name !== 'string' || !isProviderName(name)) return apiErr(400, 'bad_name', NAME_FORMAT_WHY)
+    if (RESERVED.includes(normName(name)) || this.d.configRouteNames().map(normName).includes(normName(name))) {
+      return apiErr(400, 'name_taken', `${name} 是内置、配置文件里的供应商或保留字，不能用，换个名字`)
+    }
+    const apiRaw = body.api
+    if (apiRaw !== 'anthropic-messages' && apiRaw !== 'openai-completions') return apiErr(400, 'bad_format', '接口格式只能选 Anthropic 格式或 OpenAI 格式')
+    const api: ProviderApi = apiRaw
+    const rawURL = body.baseURL
+    if (typeof rawURL !== 'string') return apiErr(400, 'bad_url', '地址格式不对，要以 https:// 开头')
+    const url = checkBaseURL(rawURL, api)
+    if (!url.ok) return apiErr(400, 'bad_url', url.why)
+    const clean = rawKey ? cleanSecret(rawKey) : null
+    if (rawKey && !clean) return apiErr(400, 'bad_key', '密钥要是 8–512 个可见英文字符、中间不能有空格')
+    const mode: 'create' | 'modify' = body.mode === 'modify' ? 'modify' : 'create'
+    let key = clean
+    if (!key) {
+      if (mode === 'create') return apiErr(400, 'needs_key', '新建供应商需要密钥')
+      let snap: ProvidersSnapshot
+      try {
+        snap = readProviders(providersPath(this.root()))
+      } catch (e) {
+        if (e instanceof ProvidersUnreadable) return apiErr(503, 'providers_unreadable', providersUnreadableText(this.root()))
+        throw e
+      }
+      const found = this.findValid(snap, name)
+      if (!found) return { status: 404, body: { ok: false, error: 'not_found', text: `「${name}」已经不在了` } }
+      // 换了主机（含端口）或接口格式：旧密钥绝不发往新地址，必须重新输入（硬拦截在网关侧）
+      if (found.entry.route.api !== api || hostOf(found.entry.route.baseURL) !== hostOf(url.url)) {
+        return apiErr(400, 'needs_key', '换了主机或格式，需要重新输入密钥（旧密钥不会发给新地址）')
+      }
+      const existing = this.d.service.credential(found.entry.route.apiKeyEnv)
+      if (!existing) return apiErr(409, 'key_missing', `「${found.name}」缺密钥，请重新输入密钥`)
+      key = existing
+    }
+    return this.saveApiResult(await this.d.service.save({ name, api, baseURL: url.url, key, mode }), name)
+  }
+
+  /** service.save 的结果翻成本机接口的状态码与正文（文案与 Telegram 同源，去掉【系统】前缀） */
+  private saveApiResult(r: SaveResult, name: string): ApiResult {
+    const noPrefix = (t: string) => t.replace(/^【系统】/, '')
+    switch (r.status) {
+      case 'saved':
+        return { status: 200, body: { ok: true, kind: r.kind, name: r.name, count: r.count, reason: r.reason, text: noPrefix(saveResultText(r, name)), epoch_changed: r.epochChanged } }
+      case 'save_failed':
+        return { status: 500, body: { ok: false, error: 'save_failed', text: noPrefix(saveResultText(r, name)) } }
+      case 'cred_failed':
+        return { status: 409, body: { ok: false, error: 'cred_failed', text: noPrefix(saveResultText(r, name)) } }
+      case 'lock_timeout':
+        return { status: 409, body: { ok: false, error: 'busy', text: noPrefix(saveResultText(r, name)) } }
+      case 'unreadable':
+        return apiErr(503, 'providers_unreadable', providersUnreadableText(this.root()))
+      case 'gone':
+        return { status: 404, body: { ok: false, error: 'not_found', text: `「${r.name}」已经不在了，这次没保存` } }
+      case 'unsupported':
+        return apiErr(400, 'unsupported', `不支持：${r.why}`)
+    }
+  }
+
+  /** `POST /v1/provider/remove`（3.3）：与 /provider remove 同一套判定与文案（去掉【系统】前缀） */
+  async apiRemove(name: unknown): Promise<ApiResult> {
+    if (typeof name !== 'string' || !isProviderName(name)) return apiErr(400, 'bad_name', NAME_FORMAT_WHY)
+    const o = await this.removeCore(name, '')
+    switch (o.kind) {
+      case 'ok': {
+        let text = `已删除供应商「${o.name}」。它的密钥会在 ${Math.round(o.graceMs / 60_000)} 分钟后从凭据文件删除（让正在用它的 bot 先切走）。注意：这只是从本机删掉，不会在供应商那边作废这把密钥；如果担心泄露，请到供应商后台作废它。`
+        if (o.cleared) text += `这个 bot 已换回配置文件里的模型：${o.cleared.provider} / ${o.cleared.model}。`
+        return { status: 200, body: { ok: true, name: o.name, key_grace_ms: o.graceMs, text } }
+      }
+      case 'unreadable': return apiErr(503, 'providers_unreadable', providersUnreadableText(this.root()))
+      case 'disabled': return apiErr(409, 'disabled', `「${o.name}」配置有误，未启用，不能删除`)
+      case 'busy': return apiErr(409, 'busy', '没删成：别的 bot 正在改供应商，请稍后再试')
+      case 'save_failed': return apiErr(500, 'save_failed', `没删成：${o.why}`)
+      case 'gone': return apiErr(404, 'not_found', `「${o.name}」已经不在了`)
+      case 'builtin':
+      case 'config':
+      case 'not_found':
+        return apiErr(404, 'not_found', `没有 ${o.name} 这个供应商`)
+    }
+  }
+
+  /**
+   * `POST /v1/provider/model`（3.4）：模型的加、删、改上下文。text 与 Telegram「管理模型」同源三条；
+   * add 不给上下文按 131072 算（记入 guessed），set_context 必须给
+   */
+  async apiModelEdit(body: Record<string, unknown>): Promise<ApiResult> {
+    const name = body.name
+    if (typeof name !== 'string' || !isProviderName(name)) return apiErr(400, 'bad_name', NAME_FORMAT_WHY)
+    let snap: ProvidersSnapshot
+    try {
+      snap = readProviders(providersPath(this.root()))
+    } catch (e) {
+      if (e instanceof ProvidersUnreadable) return apiErr(503, 'providers_unreadable', providersUnreadableText(this.root()))
+      throw e
+    }
+    const found = this.findValid(snap, name)
+    if (!found) {
+      if (snap.invalid.some(i => normName(i.name) === normName(name))) return apiErr(409, 'disabled', `「${name}」配置有误，未启用，不能编辑`)
+      return apiErr(404, 'not_found', `没有 ${name} 这个供应商`)
+    }
+    const action = body.action
+    if (action !== 'add' && action !== 'remove' && action !== 'set_context') return apiErr(400, 'bad_action', 'action 只能是 add、remove、set_context')
+    const id = cleanModelId(body.id)
+    if (!id) return apiErr(400, 'bad_id', '模型名要 1–200 个字符，不能有空白、控制字符，也不能有 ⟦ ⟧')
+    const hasCtx = body.contextWindow !== undefined
+    if (hasCtx && !isContextWindow(body.contextWindow)) return apiErr(400, 'bad_context', '上下文长度要是 1024 到 100000000 之间的整数')
+    if (action === 'set_context' && !hasCtx) return apiErr(400, 'bad_context', '上下文长度要是 1024 到 100000000 之间的整数')
+    const ctx = hasCtx ? (body.contextWindow as number) : null
+    if (action === 'add') {
+      const r = await this.d.service.addModel(found.name, id, ctx)
+      if (!r.ok) return this.modelEditFail(r.why, found.name, id)
+      return { status: 200, body: { ok: true, text: `已给「${found.name}」加上模型 ${id}（上下文 ${r.ctx ?? DEFAULT_CONTEXT}）。几秒后就能切过去。` } }
+    }
+    if (action === 'set_context') {
+      const r = await this.d.service.setContext(found.name, id, ctx!)
+      if (!r.ok) return this.modelEditFail(r.why, found.name, id)
+      return { status: 200, body: { ok: true, text: `已把 ${id} 的上下文长度改成 ${ctx}。几秒后生效。` } }
+    }
+    const manual = found.entry.meta.manualModels.includes(id)
+    const before = this.d.engine?.current()
+    const r = await this.d.service.removeModel(found.name, id)
+    if (!r.ok) return this.modelEditFail(r.why, found.name, id)
+    let text = `已从「${found.name}」删掉模型 ${id}。`
+    if (!manual) text += '下次「刷新模型」时，对方列表里还有的话它会重新出现。'
+    if (found.entry.route.models.filter(m => m.id !== id).length === 0) text += `「${found.name}」没有模型了，暂时不会出现在可选模型里。`
+    if (before && this.d.engine && normName(before.provider) === normName(found.name) && before.model === id) {
+      const c = this.d.engine.clearOverride()
+      text += `这个 bot 正在用它，已换回配置文件里的模型：${c.provider} / ${c.model}。`
+    }
+    return { status: 200, body: { ok: true, text } }
+  }
+
+  /** 模型编辑失败（service 的 ModelEditResult）翻成状态码与文案 */
+  private modelEditFail(why: 'not_found' | 'exists' | 'gone' | 'lock_timeout' | 'unreadable' | 'save_failed', name: string, id: string): ApiResult {
+    if (why === 'exists') return apiErr(409, 'exists', '这个模型已经有了')
+    if (why === 'lock_timeout') return apiErr(409, 'busy', '别的 bot 正在改供应商，请稍后再试')
+    if (why === 'unreadable') return apiErr(503, 'providers_unreadable', providersUnreadableText(this.root()))
+    if (why === 'save_failed') return apiErr(500, 'save_failed', '没保存成功：写文件失败')
+    return apiErr(404, 'not_found', why === 'gone' ? `「${name}」已经不在了` : `「${id}」已经不在了`)
+  }
+
+  /**
+   * `GET /v1/effort`（3.5）：当前档位与可选档位。问不到 dsh 或模型不支持时 choices 为空数组，仍 200；
+   * current 取当前覆盖里的档位，没有覆盖就是 null（与契约一致，配置文件里的默认档位不算数）
+   */
+  async apiEffortGet(): Promise<ApiResult> {
+    let choices: string[] = []
+    try {
+      if (this.d.engine?.efforts) choices = await this.d.engine.efforts()
+    } catch { choices = [] }
+    const current = this.d.engine?.overrideEffort ? this.d.engine.overrideEffort() : null
+    return { status: 200, body: { ok: true, current, choices } }
+  }
+
+  /** `POST /v1/effort`（3.5）：只改思考强度，不换新会话（与 Telegram 的「思考强度」同一套） */
+  async apiEffortSet(body: Record<string, unknown>): Promise<ApiResult> {
+    const effort = body.effort
+    if (typeof effort !== 'string') return apiErr(400, 'bad_body', 'effort 必须是字符串')
+    const r = this.d.engine?.setEffort ? await this.d.engine.setEffort(effort) : { ok: false }
+    if (!r.ok) return apiErr(409, 'unsupported', '这个模型现在不支持这个档位')
+    return { status: 200, body: { ok: true, text: `已把思考强度改成「${effortLabel(effort)}」，下一条消息起生效（不换新会话）。` } }
   }
 
   /**
@@ -282,6 +523,41 @@ export class ProviderCommands {
 }
 
 function escapeRe(s: string): string { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
+
+/** 删除自建供应商的结果（runRemove 与本机接口共用同一套判定，文案各自渲染） */
+type RemoveOutcome =
+  | { kind: 'ok'; name: string; graceMs: number; cleared: { provider: string; model: string } | null }
+  /** where=read：读 providers.json 就失败；where=save：删除过程中服务返回读不了 */
+  | { kind: 'unreadable'; where: 'read' | 'save' }
+  | { kind: 'disabled'; name: string }
+  | { kind: 'builtin'; name: string }
+  | { kind: 'config'; name: string }
+  | { kind: 'not_found'; name: string }
+  | { kind: 'gone'; name: string }
+  | { kind: 'busy' }
+  | { kind: 'save_failed'; why: string }
+
+/** 删除结果的 Telegram 文案（与既有 /provider remove 回复逐字一致） */
+function removeOutcomeText(o: RemoveOutcome, root: string): string {
+  switch (o.kind) {
+    case 'ok': {
+      let text = `【系统】已删除供应商「${o.name}」。它的密钥会在 ${Math.round(o.graceMs / 60_000)} 分钟后从凭据文件删除（让正在用它的 bot 先切走）。注意：这只是从本机删掉，不会在供应商那边作废这把密钥；如果担心泄露，请到供应商后台作废它。`
+      if (o.cleared) text += `这个 bot 已换回配置文件里的模型：${o.cleared.provider} / ${o.cleared.model}。`
+      return text
+    }
+    case 'unreadable':
+      return o.where === 'read'
+        ? `【系统】共用供应商文件读不了（格式坏了），先修好 ${providersPath(root)}`
+        : '【系统】没删成：共用供应商文件读不了（格式坏了）。'
+    case 'disabled': return `【系统】「${o.name}」配置有误，未启用，不能删除。`
+    case 'builtin': return `【系统】只有自建供应商能删除；${o.name} 是内置的。`
+    case 'config': return `【系统】只有自建供应商能删除；${o.name} 是配置文件里的。`
+    case 'not_found': return `【系统】没有 ${o.name} 这个供应商。用 /provider 看有哪些。`
+    case 'gone': return `【系统】「${o.name}」已经不在了。`
+    case 'busy': return '【系统】没删成：别的 bot 正在改供应商，请稍后再试。'
+    case 'save_failed': return `【系统】没删成：${o.why}。`
+  }
+}
 
 /** 新建/更新（或 /provider add）的结果文案（方案 3.4.2；不含删除说明与按钮）。引导与快捷命令共用 */
 export function saveResultText(r: SaveResult, name: string): string {

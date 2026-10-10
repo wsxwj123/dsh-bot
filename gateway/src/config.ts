@@ -7,6 +7,7 @@
 import { existsSync, readFileSync, statSync } from 'fs'
 import { homedir } from 'os'
 import { basename, isAbsolute, join, resolve } from 'path'
+import { normName, providersPath, readProviders } from './providers/store'
 
 export type Effort = 'off' | 'low' | 'high' | 'max'
 
@@ -161,7 +162,11 @@ function str(v: unknown, def: string): string {
 
 const EFFORTS: Effort[] = ['off', 'low', 'high', 'max']
 
-export function parseBrain(raw: unknown): Brain {
+/**
+ * selfProviders：<根>/providers.json 里合格的自建供应商名字。配置文件里直接写自建名当 brain.provider 也放行
+ * （运行时会把它并进 dsh 路由），其它不在 routes 里的名字照旧当作配置错误
+ */
+export function parseBrain(raw: unknown, selfProviders: Iterable<string> = []): Brain {
   const b = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const routesRaw = (b.routes && typeof b.routes === 'object' ? b.routes : {}) as Record<string, unknown>
   const routes: Record<string, Route> = {}
@@ -177,7 +182,8 @@ export function parseBrain(raw: unknown): Brain {
     routes[name] = { ...(o as Route), models: models as RouteModel[] }
   }
   const provider = str(b.provider, 'deepseek-official')
-  if (provider !== 'deepseek-official' && !routes[provider]) {
+  const selfNames = new Set([...selfProviders].map(normName))
+  if (provider !== 'deepseek-official' && !routes[provider] && !selfNames.has(normName(provider))) {
     throw new ConfigError(`brain.provider 是 ${provider}，但 brain.routes 里没有这条路由`)
   }
   const effortRaw = b.reasoning_effort
@@ -301,16 +307,21 @@ export function loadBotConfig(configPath: string, env: Record<string, string | u
     harnessDir: resolve(expandHome(harnessRaw)),
     credentialsPath: join(root, 'credentials.yaml'),
     apiPort: num(y.dispatcher_port, 17801, 'dispatcher_port'),
-    brain: parseBrain(y.brain),
+    brain: parseBrain(y.brain, selfProviderNames(root)),
     gw: parseGateway(y.gateway, access),
   }
   if (!isAbsolute(cfg.channelDir)) throw new ConfigError('bot_channel_path 必须是绝对路径或以 ~ 开头')
   return cfg
 }
 
+/** <根>/providers.json 里合格的自建供应商名字；读不了或文件坏就当没有（自建没写好不该拦住网关启动） */
+export function selfProviderNames(root: string): string[] {
+  try { return Object.keys(readProviders(providersPath(root)).valid) } catch { return [] }
+}
+
 /** 只重读 brain 段（换模型用）。读失败返回 null，由调用方保留旧值并记警告。 */
-export function reloadBrain(configPath: string): Brain | null {
-  try { return parseBrain(readYaml(configPath).brain) } catch { return null }
+export function reloadBrain(configPath: string, selfProviders: Iterable<string> = []): Brain | null {
+  try { return parseBrain(readYaml(configPath).brain, selfProviders) } catch { return null }
 }
 
 // ─── access.json（格式与旧系统完全相同） ───

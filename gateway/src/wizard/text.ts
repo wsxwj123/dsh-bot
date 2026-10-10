@@ -120,9 +120,10 @@ export const DELETED_NOTE = '（你发的密钥消息已删除。）'
 export const NOT_DELETED_NOTE = '（你发的密钥消息没能删除，请手动删掉它。）'
 
 /** 模型编辑（加/删/改上下文）失败文案（方案 3.5.3） */
-export function modelEditError(why: 'not_found' | 'exists' | 'gone' | 'lock_timeout' | 'unreadable', name: string): string {
+export function modelEditError(why: 'not_found' | 'exists' | 'gone' | 'lock_timeout' | 'unreadable' | 'save_failed', name: string): string {
   if (why === 'lock_timeout') return '【系统】没保存成功：别的 bot 正在改供应商，请稍后再试。'
   if (why === 'unreadable') return '【系统】没保存成功：共用供应商文件读不了（格式坏了）。'
+  if (why === 'save_failed') return '【系统】没保存成功：写文件失败。'
   if (why === 'exists') return '【系统】这个模型已经有了。'
   return `【系统】「${name}」已经不在了。`
 }

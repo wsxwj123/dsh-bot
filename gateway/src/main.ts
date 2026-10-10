@@ -161,8 +161,18 @@ async function main(): Promise<void> {
     onInbound: chatId => engine!.onInbound(chatId),
     callPromises: (chatId, lines) => engine!.commitments.fromCall(chatId, lines),
     model: { info: () => engine!.modelInfo(), set: spec => engine!.modelSet(spec) },
-    // 自建供应商（方案 3.8）：GET /v1/model 的 providers 现读 providers.json；刷新走 ProviderService
-    provider: { views: () => engine!.providerViews(), refresh: name => commands.apiRefresh(name) },
+    // 自建供应商（方案 3.8 与管理台 UI 批的 3.1 到 3.5）：views 现读 providers.json；写操作与刷新都走 ProviderCommands
+    // （与 Telegram 同一套存储、同一把锁、同一套校验），ApiServer 只做 HTTP 转发
+    provider: {
+      views: () => engine!.providerViews(),
+      refresh: name => commands.apiRefresh(name),
+      detail: () => commands.apiDetail(),
+      save: body => commands.apiSave(body),
+      remove: body => commands.apiRemove(body?.name),
+      model: body => commands.apiModelEdit(body),
+      effortGet: () => commands.apiEffortGet(),
+      effortSet: body => commands.apiEffortSet(body),
+    },
   })
   apiServer.start()
   engine.start()

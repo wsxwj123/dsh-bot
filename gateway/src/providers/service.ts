@@ -48,7 +48,8 @@ export type RefreshResult =
 
 export type ModelEditResult =
   | { ok: true; ctx?: number }
-  | { ok: false; why: 'not_found' | 'exists' | 'gone' | 'lock_timeout' | 'unreadable' }
+  /** save_failed：写盘那一步出错（provider.write_failed），与"条目不存在"分开，本机接口按 500 回 */
+  | { ok: false; why: 'not_found' | 'exists' | 'gone' | 'lock_timeout' | 'unreadable' | 'save_failed' }
 
 const crebByEnv = (refs: Record<string, unknown> | null, env: string): string | null => {
   const v = refs?.[env]
@@ -376,7 +377,7 @@ export class ProviderService {
       if (e instanceof ProvidersLockTimeout) return { ok: false, why: 'lock_timeout' }
       if (e instanceof ProvidersUnreadable) return { ok: false, why: 'unreadable' }
       this.d.log.error('provider.write_failed', { file: 'providers', err: safeError(e) })
-      return { ok: false, why: 'gone' }
+      return { ok: false, why: 'save_failed' }
     }
   }
 
