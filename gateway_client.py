@@ -16,6 +16,13 @@ import urllib.error
 import urllib.request
 
 
+# 管理台到网关一律走本机回环（127.0.0.1）。这台机器常驻 http_proxy（Clash TUN），
+# urllib 默认会把本机请求也交给代理，代理接走回 502 空正文，页面一路显示「网关没响应」。
+# 自己造一个不带代理的 opener：传了 ProxyHandler({}) 覆盖掉默认那个读环境变量的
+# （管理台侧一条 U43 验收钉的就是这件事）。
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _state_dir(channel_dir: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(os.path.expanduser(channel_dir))), "state")
 
@@ -36,7 +43,7 @@ def _call(channel_dir: str, method: str, path: str, body: dict | None = None, ti
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method,
                                  headers={"content-type": "application/json", "authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _OPENER.open(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as e:
         try:
@@ -74,6 +81,46 @@ def provider_refresh(channel_dir: str, name: str) -> tuple[int, dict]:
                  timeout=PROVIDER_REFRESH_TIMEOUT)
 
 
+# 写端点的超时：INTERFACE-管理台UI 2.2 = 55 秒（贴着网关最坏情况，45 秒拉模型列表加 10 秒等锁）。
+# 超时与「发出后中断」在管理台侧一律判 504，不自动换网关重试（重试会变成第二次写）。
+PROVIDER_WRITE_TIMEOUT = 55.0
+
+
+def provider_detail(channel_dir: str) -> tuple[int, dict]:
+    """自建供应商详情（GET /v1/provider，含地址与模型清单、不含密钥，INTERFACE 3.1）。
+
+    读接口，超时用默认 10 秒；降级（详情缺省）由调用方决定。
+    """
+    return _call(channel_dir, "GET", "/v1/provider")
+
+
+def provider_save(channel_dir: str, body: dict) -> tuple[int, dict]:
+    """新建 / 更新一个自建供应商（POST /v1/provider/save）。body 原样转发，不改字段。"""
+    return _call(channel_dir, "POST", "/v1/provider/save", body, timeout=PROVIDER_WRITE_TIMEOUT)
+
+
+def provider_remove(channel_dir: str, name: str) -> tuple[int, dict]:
+    """删除一个自建供应商（POST /v1/provider/remove）。"""
+    return _call(channel_dir, "POST", "/v1/provider/remove", {"name": name},
+                 timeout=PROVIDER_WRITE_TIMEOUT)
+
+
+def provider_model(channel_dir: str, body: dict) -> tuple[int, dict]:
+    """模型增删改（POST /v1/provider/model，body 含 name/action/id/contextWindow）。"""
+    return _call(channel_dir, "POST", "/v1/provider/model", body, timeout=PROVIDER_WRITE_TIMEOUT)
+
+
+def effort_get(channel_dir: str) -> tuple[int, dict]:
+    """问一个 bot 当前的思考强度档位与可选档位（GET /v1/effort）。"""
+    return _call(channel_dir, "GET", "/v1/effort")
+
+
+def effort_set(channel_dir: str, effort: str) -> tuple[int, dict]:
+    """改一个 bot 的思考强度档位（POST /v1/effort）。"""
+    return _call(channel_dir, "POST", "/v1/effort", {"effort": effort},
+                 timeout=PROVIDER_WRITE_TIMEOUT)
+
+
 def inject(channel_dir: str, chat_id: str, text: str, source: str, key: str,
            port: int | None = None, bot_lines: list[str] | None = None, timeout: float = 10) -> bool:
     """写一条系统消息进网关的账本，模型在下一轮处理。key 相同的只算一次。
@@ -87,7 +134,7 @@ def inject(channel_dir: str, chat_id: str, text: str, source: str, key: str,
         body["bot_lines"] = [str(x) for x in bot_lines][:200]
     req = urllib.request.Request(f"http://127.0.0.1:{int(port)}/v1/inject", data=json.dumps(body).encode("utf-8"), method="POST",
                                  headers={"content-type": "application/json", "authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _OPENER.open(req, timeout=timeout) as r:      # 同上：本机回环不走代理
         return bool(json.loads(r.read().decode("utf-8")).get("ok"))
 
 
