@@ -153,3 +153,48 @@ def test_启停开关写正在跑的那份(roots):
     _write(roots[1], "dead", enabled=False)
     assert cs.find_path("dead") == roots[1] / "dead.yml"
     assert cs.effective_config("dead")["_bot_id"] == "dead"
+
+
+# ------------------------------------------------------------ 撞名留痕不刷屏
+
+def _cfg(bot_id, life=None, source="dsh", enabled=None):
+    cfg = {"_bot_id": bot_id, "id": bot_id, "_source": source, "display_name": bot_id}
+    if life is not None:
+        cfg["_life_id"] = life
+    if enabled is not None:
+        cfg["enabled"] = enabled
+    return cfg
+
+
+def test_撞名留痕一个进程只写一行(capsys):
+    import moments.web as web
+    web.app.extensions.pop("moments_collision_warned", None)
+    a = _cfg("bot5", life="yasuna", enabled=False)
+    b = _cfg("yasuna", source="legacy")
+    with web.app.app_context():
+        for _ in range(5):
+            web._warn_collision("yasuna", a, b)
+    err = capsys.readouterr().err
+    assert err.count("撞车") == 1, "同一个撞名组合只该提示一次，实得 %r" % err
+    assert "yasuna" in err and "bot5" in err
+
+
+def test_撞名组合变了要重新提示(capsys):
+    import moments.web as web
+    web.app.extensions.pop("moments_collision_warned", None)
+    with web.app.app_context():
+        web._warn_collision("yasuna", _cfg("bot5", life="yasuna", enabled=False),
+                            _cfg("yasuna", source="legacy"))
+        web._warn_collision("chenlulu", _cfg("bot4", life="chenlulu", enabled=False),
+                            _cfg("chenlulu", source="legacy"))
+    err = capsys.readouterr().err
+    assert err.count("撞车") == 2, err
+
+
+def test_没有app上下文时不去重(capsys):
+    """直接调函数的场合（白盒单测）每次都写，别把信号藏起来。"""
+    import moments.web as web
+    for _ in range(2):
+        web._warn_collision("yasuna", _cfg("bot5", life="yasuna", enabled=False),
+                            _cfg("yasuna", source="legacy"))
+    assert capsys.readouterr().err.count("撞车") == 2

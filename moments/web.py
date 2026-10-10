@@ -11,7 +11,7 @@ import time
 import secrets
 import subprocess
 from datetime import datetime, timezone
-from flask import Flask, render_template, send_from_directory, request, jsonify
+from flask import Flask, render_template, send_from_directory, request, jsonify, current_app
 from werkzeug.exceptions import HTTPException
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -230,10 +230,25 @@ def _bot_cfg_by_name(uid: str):
 
 
 def _warn_collision(key: str, dropped: dict, kept: dict):
-    """撞名留痕：撞了哪两份配置写一行 stderr，将来两个不同的人撞同一个 life 名时不至于看不出丢了谁。"""
-    sys.stderr.write("[moments.web] 朋友圈名 %s 撞车，%s 与 %s，留 %s\n"
-                     % (key, config_sources.config_tag(dropped),
-                        config_sources.config_tag(kept), config_sources.config_tag(kept)))
+    """撞名留痕：同一个撞名组合在一个进程里只写一行。
+
+    管理台是 launchd 常驻服务，页面每次渲染都写会让 stderr 一直长。去重表挂在
+    app.extensions 上（生产里一个进程一个 app，等于"进程内一次"；与
+    ``bots_client.RestartJobs`` 同一理由，测试反复重建 app 时互不串味）。
+    没有 app 上下文（直接调函数的单测）就不去重，照旧每次都写。
+    """
+    line = ("[moments.web] 朋友圈名 %s 撞车，%s 与 %s，留 %s\n"
+            % (key, config_sources.config_tag(dropped), config_sources.config_tag(kept),
+               config_sources.config_tag(kept)))
+    try:
+        store = current_app.extensions.setdefault("moments_collision_warned", set())
+    except RuntimeError:
+        store = None
+    if store is not None:
+        if line in store:
+            return
+        store.add(line)
+    sys.stderr.write(line)
 
 
 def _moments_bot_meta(bots: list) -> dict:
@@ -643,8 +658,11 @@ def api_post_user_moment():
 
     # 触发每个 bot 异步读 + 决策评论。名单就是投递名单（"谁在跑、每个投给谁"的唯一来源）：
     # 拿新系统那份去投旧系统还在跑的 bot，通知会落进没人读的目录；同一个人两份配置
-    # 都启用时也只投一份，不重复打扰。
-    for b in config_sources.delivery_configs():
+    # 都启用时也只投一份，不重复打扰（压掉哪份照样留痕）。
+    targets, collisions = config_sources.delivery_plan()
+    for c in collisions:
+        _warn_collision(c["key"], c["dropped"], c["kept"])
+    for b in targets:
         try:
             _trigger_bot_see_user_moment(b, moment_id, text, image_path, visibility)
         except Exception as e:
