@@ -7,8 +7,8 @@
 """
 import pytest
 
-from conftest import free_port
-from stub_gateway import StubGateway
+from .conftest import free_port
+from .stub_gateway import StubGateway
 
 SAVE = "/hub/api/dsh-model/provider/save"
 REMOVE = "/hub/api/dsh-model/provider/{}/remove"

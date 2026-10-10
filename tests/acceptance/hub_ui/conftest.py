@@ -25,8 +25,9 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))
+# 不再把 HERE 插进 sys.path。本目录是包,目录内的模块一律相对导入。
+# 把 hub_ui 目录挂在 sys.path 上,会让这里的 conftest.py 有机会被别家
+# 的 `from conftest import ...` 捡走,正是这次要根除的坑。
 
 REAL_DSH_HOME = Path(os.path.expanduser("~")) / ".dsh-bot"   # 在 monkeypatch 之前定住
 GATEWAY_DIR = REPO_ROOT / "gateway"
@@ -155,7 +156,7 @@ def login():
 @pytest.fixture
 def fake_tg():
     """最小假 Telegram（真网关进程启动用）。"""
-    from fake_telegram import FakeTelegram
+    from .fake_telegram import FakeTelegram
     tg = FakeTelegram().start()
     try:
         yield tg

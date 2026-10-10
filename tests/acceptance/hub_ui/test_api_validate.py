@@ -8,6 +8,8 @@ from urllib.parse import quote
 
 import pytest
 
+from .conftest import free_port
+
 SAVE = "/hub/api/dsh-model/provider/save"
 REMOVE = "/hub/api/dsh-model/provider/{}/remove"
 MODELS = "/hub/api/dsh-model/provider/{}/models"
@@ -138,7 +140,6 @@ def test_思考POST_没有网关_503_no_gateway(hub, dsh_bot):
     只带 hub 时 bot 名单为空，请求会先落成 404 bot_not_found（见下面的 GET 用例），
     所以这里要造一个带端口的 bot，端口选个没人监听的。
     """
-    from conftest import free_port
     dsh_bot(name="testbot", port=free_port())
     r = hub.post(EFFORT.format("testbot"), json={"effort": "low"})
     assert r.status_code == 503, "期望 503，实得 %s" % r.status_code
@@ -163,7 +164,6 @@ def test_思考POST_effort不是字符串_400_bad_body(hub, dsh_bot):
 
     这里用"bot 在列表里但网关连不上"的形态，好让请求能走到 effort 校验那一步。
     """
-    from conftest import free_port
     dsh_bot(name="testbot", port=free_port())
     for bad in (123, None, True):
         r = hub.post(EFFORT.format("testbot"), json={"effort": bad})
@@ -184,7 +184,6 @@ def test_列表_没有网关时两个键都是空数组(hub):
 
 def test_列表_恒200不抛网络错误(hub, dsh_bot):
     """有人在列表里但端口没人听：读接口仍 200（网络故障不外抛）。"""
-    from conftest import free_port
     dsh_bot(name="testbot", port=free_port())
     r = hub.get("/hub/api/dsh-model")
     assert r.status_code == 200, "网关连不上也必须 200，实得 %s" % r.status_code

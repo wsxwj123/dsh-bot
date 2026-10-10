@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from conftest import BUN
-from stub_gateway import StubGateway
+from .conftest import BUN
+from .stub_gateway import StubGateway
 
 pytestmark = pytest.mark.skipif(not BUN, reason="需要 bun 才能起真网关")
 
