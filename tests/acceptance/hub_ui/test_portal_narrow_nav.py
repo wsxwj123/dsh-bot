@@ -19,7 +19,13 @@
 还是看不到"在理论上仍可能（比如未来换了别的布局机制），真正的判定要人工在窄屏
 （约 390 宽）与桌面（约 900 宽）各看一眼，五个 chip（主页 / 李彤彤 / 菜菜 / 陈露露 /
 淑仪）要全部在顶栏里看得见。
+
+顶栏那四个入口本身还有一条存在性断言（画风、画风切换钮、管理台、条数四个都在）。
+用户报的"被 novelai/comfyui 画风与管理台挤掉"也包括这几个入口整条消失，宽度属性
+那批抓不到元素被删掉的情况。
 """
+import re
+
 import pytest
 
 from . import css_probe
@@ -84,3 +90,37 @@ def test_桌面900_bot排可见的保证属性_不许比改动前差(feed_html, 
     """改动前 900 宽下 bot chip 都看得见，现在也得看得见。同样只能守属性，
     渲染结果要人工在桌面宽度看一眼。"""
     _check_bot_row_guarantees(feed_html, 900, scheme)
+
+
+def _topnav(html):
+    """朋友圈页顶栏那一段（nav.topnav 到它自己的 </nav>）。"""
+    m = re.search(r'<nav\b[^>]*class="[^"]*\btopnav\b[^"]*"[^>]*>(.*?)</nav>', html, re.S)
+    assert m, "朋友圈页里找不到顶栏（nav.topnav）"
+    return m.group(1)
+
+
+def test_朋友圈页顶栏四个入口一个不少(feed_html):
+    """顶栏里必须同时有画风、画风切换钮、管理台、条数这四个入口，少一个就红。
+
+    用户报的问题原话是被 novelai/comfyui 画风与管理台挤掉。这几个入口整条消失
+    也算没解决。上一轮重写窄屏用例时把这几条结构断言删了，于是把 /styles 那条
+    链接整条删掉也全绿，缺口就补在这里。只判入口在不在顶栏里，位置与样式由上面
+    那批宽度用例守。
+    """
+    nav = _topnav(feed_html)
+    links = re.findall(r"<a\b([^>]*)>(.*?)</a>", nav, re.S)
+
+    def _texts(href):
+        return [label for attrs, label in links
+                if re.search(r'href="%s"' % re.escape(href), attrs)]
+
+    missing = []
+    if not any("画风" in t for t in _texts("/styles")):
+        missing.append("指向 /styles 的「画风」链接")
+    if not any("管理台" in t for t in _texts("/hub")):
+        missing.append("指向 /hub 的「管理台」链接")
+    if not re.search(r'id="img-provider-chip"', nav):
+        missing.append("id 为 img-provider-chip 的画风切换钮")
+    if not re.search(r'class="[^"]*\bdate-link\b[^"]*"', nav):
+        missing.append("class 带 date-link 的条数")
+    assert not missing, "朋友圈页顶栏少了这些入口 %s" % "、".join(missing)
