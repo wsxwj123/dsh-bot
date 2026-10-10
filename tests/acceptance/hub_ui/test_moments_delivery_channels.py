@@ -1,0 +1,150 @@
+# -*- coding: utf-8 -*-
+"""用户在主页发朋友圈后，通知投给各 bot 的通道选择。守用户感觉得到的结果。
+
+混跑期一个 bot 可能在新旧两套配置里各有一条记录，投递口径是"每个 bot 取在跑的那
+一份"。
+
+1. 跑在旧系统的 bot，通知写进旧系统那份配置的通道目录（chats/<id>/inbox），
+   里面带着用户发的正文；
+2. 跑在新系统的 bot，通知走它自己的网关通道（state 里有 api.key 与 api.port），
+   不写 inbox，写进去没人读；
+3. 停用的 bot 一边都不收；
+4. 不许把通知投到没在跑的那套上。新系统那份 enabled:false 时，它自己的通道目录里
+   一个通知文件都不许出现；
+5. 同一个朋友圈名（life 名）撞车时只投一份，不许因为两条配置变成两条通知。
+
+网关用本机假件（stub_gateway）扮演，只在这一层用替身。管理台到网关是 HTTP，
+假件按 /v1/inject 的形状回应，管理台的投递决策都是真的。所有目录都在 tmp。
+"""
+import json
+from pathlib import Path
+
+from .conftest import write_bot_cfg
+from .stub_gateway import StubGateway
+
+CHAT_ID = "77"
+
+
+def _inbox_files(channel, chat_id=CHAT_ID):
+    """该通道目录里用户朋友圈通知的文件列表。"""
+    inbox = Path(channel) / "chats" / chat_id / "inbox"
+    if not inbox.is_dir():
+        return []
+    return sorted(inbox.glob("user-moment-*.json"))
+
+
+def _make_dsh_bot(sandbox, name, *, life=None, enabled=True, gateway=None):
+    """造一个新系统 bot，返回它的通道目录。
+
+    gateway 传 StubGateway 时写 state/api.key 与 api.port，网关这才算"在跑"。
+    """
+    botdir = sandbox["tmp"] / "run" / ("dsh-%s" % name)
+    channel = botdir / "channel"
+    fields = dict(display_name=name, bot_channel_path=channel, chat_id=CHAT_ID)
+    if life is not None:
+        fields["life_config"] = life
+    if not enabled:
+        fields["enabled"] = "false"
+    write_bot_cfg(sandbox["env"]["HUB_CONFIGS_DSH_DIR"], name, **fields)
+    (channel / "chats" / CHAT_ID).mkdir(parents=True, exist_ok=True)
+    if gateway is not None:
+        state = botdir / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "api.key").write_text(gateway.key + "\n", encoding="utf-8")
+        (state / "api.port").write_text(str(gateway.port) + "\n", encoding="utf-8")
+    return channel
+
+
+def _make_legacy_bot(sandbox, name, *, enabled=True, display_name=None):
+    """造一个旧系统 bot，返回它的通道目录。"""
+    channel = sandbox["tmp"] / "run" / ("legacy-%s" % name)
+    fields = dict(display_name=display_name or name, bot_channel_path=channel, chat_id=CHAT_ID)
+    if not enabled:
+        fields["enabled"] = "false"
+    write_bot_cfg(sandbox["env"]["HUB_CONFIGS_DIR"], name, **fields)
+    return channel
+
+
+def _post_moment(hub, text="今天下雨"):
+    r = hub.post("/api/moment", json={"text": text})
+    assert r.status_code == 200, "发朋友圈期望 200，实得 %s，%s" % (r.status_code, r.get_data(as_text=True))
+    return r
+
+
+def test_旧系统的bot通知写进它自己的通道目录(sandbox, hub):
+    legacy_channel = _make_legacy_bot(sandbox, "bot2", display_name="李彤彤")
+    # 新系统里也有一条 bot2，写着 enabled:false（意思是跑在旧系统）
+    dsh_channel = _make_dsh_bot(sandbox, "bot2", enabled=False)
+
+    _post_moment(hub, "今天下雨")
+
+    files = _inbox_files(legacy_channel)
+    assert len(files) == 1, "旧系统在跑的 bot2 应恰好收到一份通知，实得 %s" % files
+    body = json.loads(files[0].read_text(encoding="utf-8"))
+    assert "今天下雨" in body["text"], "通知里应带上用户发的正文，实得 %r" % body["text"][:200]
+    assert _inbox_files(dsh_channel) == [], (
+        "bot2 跑在旧系统，通知不许写进新系统那份的通道目录")
+
+
+def test_新系统的bot通知走网关不写inbox(sandbox, hub):
+    life = sandbox["tmp"] / "life"
+    write_bot_cfg(life, "chenlulu", display_name="陈露露")
+
+    gw = StubGateway(key="test-api-key-0123456789")
+    gw.on("/v1/inject", 200, {"ok": True})
+    gw.start()
+    try:
+        channel = _make_dsh_bot(sandbox, "bot4", life=life / "chenlulu.yml", gateway=gw)
+
+        _post_moment(hub, "在吗")
+
+        hits = gw.hits("/v1/inject")
+        assert len(hits) == 1, "网关应恰好收到一条投递，实得 %s 条" % len(hits)
+        assert hits[0]["auth_ok"], "投递没带对网关口令"
+        assert hits[0]["body"]["chat_id"] == CHAT_ID
+        assert hits[0]["body"]["key"].startswith("user-moment:"), (
+            "投递的幂等键不对，实得 %r" % hits[0]["body"]["key"])
+        assert _inbox_files(channel) == [], "新系统的 bot 投给网关后不该再写 inbox"
+    finally:
+        gw.stop()
+
+
+def test_两边都停用的bot一边也不收(sandbox, hub):
+    legacy_channel = _make_legacy_bot(sandbox, "bot9", enabled=False)
+    dsh_channel = _make_dsh_bot(sandbox, "bot9", enabled=False)
+
+    _post_moment(hub, "有人在吗")
+
+    assert _inbox_files(legacy_channel) == [], "停用的 bot 不许收到通知"
+    assert _inbox_files(dsh_channel) == [], "停用的 bot 不许收到通知（新系统这边）"
+
+
+def test_新系统bot网关不在时也写自己目录_不写旧系统的(sandbox, hub):
+    """新系统那份在跑、网关暂时没起来时，投递落回新系统自己的通道目录。
+    旧系统那份是停用的，通知无论如何不许落过去。"""
+    legacy_channel = _make_legacy_bot(sandbox, "bot4", enabled=False)
+    dsh_channel = _make_dsh_bot(sandbox, "bot4", gateway=None)
+
+    _post_moment(hub, "早")
+
+    assert len(_inbox_files(dsh_channel)) == 1, (
+        "网关不在时通知应落回新系统自己的通道目录，实得 %s" % _inbox_files(dsh_channel))
+    assert _inbox_files(legacy_channel) == [], (
+        "bot4 的新系统那份在跑，通知不许投到没在跑的旧系统那份")
+
+
+def test_同一个朋友圈名只投一份通知(sandbox, hub):
+    """新栈 bot5（停用，life 指向旧栈 yasuna）与旧栈 yasuna 撞同一个朋友圈名。
+    两个人格跑同一份生活数据，通知只该投一份，投到在跑的那份去。"""
+    life = sandbox["tmp"] / "life"
+    write_bot_cfg(life, "yasuna", display_name="淑仪")
+
+    legacy_channel = _make_legacy_bot(sandbox, "yasuna", display_name="淑仪")
+    dsh_channel = _make_dsh_bot(sandbox, "bot5", life=life / "yasuna.yml", enabled=False)
+
+    _post_moment(hub, "晚安")
+
+    files = _inbox_files(legacy_channel)
+    assert len(files) == 1, "撞名时应只投一份到在跑的那份，实得 %s" % files
+    assert _inbox_files(dsh_channel) == [], (
+        "bot5 跑在旧系统，通知不许写进新系统那份的通道目录，也不许重投一份")
