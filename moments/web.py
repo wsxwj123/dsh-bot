@@ -707,7 +707,10 @@ def _trigger_bot_see_user_moment(bot_cfg: dict, moment_id: int, text: str,
     }
     with open(fname, "w", encoding="utf-8") as f:
         _json.dump(payload, f, ensure_ascii=False)
-    _ensure_worker_alive(bot_id, chat_id, bot_dir)
+    # 拉起用配置文件名而不是上面的 bot_id。端口注册表按 configs/<名>.yml 建键，
+    # 新系统的 bot 在朋友圈里记的是 life 名（bot4 记 chenlulu），拿它查不到端口，
+    # 通知会写进 inbox 却没人被拉起，静默积压。
+    _ensure_worker_alive(bot_cfg.get("_bot_id") or bot_id, chat_id, bot_dir)
 
 
 @app.route("/api/comment/<int:comment_id>", methods=["DELETE"])
