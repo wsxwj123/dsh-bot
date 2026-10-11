@@ -1,5 +1,5 @@
 // 验收：网关本机接口 POST /v1/provider/model（INTERFACE-管理台UI 3.4）。
-// 契约要点action 只认 add/remove/set_context；id 走 cleanModelId（1 到 200 字符、不含空白与控制字符、不含 ⟦⟧）；
+// 契约要点action 只认 add/remove/set_context；id 走 cleanModelId（去首尾空白后 1 到 200 字符、中间的半角空格可用，换行/制表符等其余空白与控制字符、⟦⟧ 非法）；
 // contextWindow 给了必须是 1024 到 100000000 的整数，set_context 时必须给，add 可不给（按 1048576 记入 guessed）；
 // 成功三条 text 与 Telegram「管理模型」同源；错误码 bad_action / bad_id / bad_context / not_found / exists / disabled / busy / save_failed / providers_unreadable。
 // 实现未落地时本文件红（多半 404），那是红基线，不是测试坏了。
@@ -151,8 +151,9 @@ describe('POST /v1/provider/model 的校验', () => {
 
   const BAD_IDS: [string, string][] = [
     ['', '空串'],
-    ['a b', '含空格'],
+    ['a\nb', '含换行'],
     ['a\tb', '含制表符'],
+    ['a\u00a0b', '含不换行空格 U+00A0'],
     ['⟦x⟧', '含 ⟦⟧'],
     ['a'.repeat(201), '超 200 字符'],
   ]
@@ -165,6 +166,14 @@ describe('POST /v1/provider/model 的校验', () => {
       })
     })
   }
+
+  test('id 中间带半角空格（聚合商把渠道与价格写进 id）：可以用', async () => {
+    await withModels({ handler: openaiOk(IDS), before: seedCustom() }, async ({ gw, b }) => {
+      const r = await gw.call(MODEL, body({ id: '[备用按次1] gemini-3-flash' }))
+      expect(r.status, `带空格应可用，实得 ${r.status}，正文 ${r.text.slice(0, 200)}`).toBe(200)
+      expect(entry(b).route.models.map((m: any) => m.id)).toContain('[备用按次1] gemini-3-flash')
+    })
+  })
 
   test('id 非字符串：400 bad_id', async () => {
     await withModels({ handler: openaiOk(IDS), before: seedCustom() }, async ({ gw }) => {

@@ -40,11 +40,11 @@ describe('读文件时也校验：不合格的供应商不启用、不交给 dsh
     })
   })
 
-  test('单个模型条目不合格（id 含空格）：只丢这个模型，供应商照常启用', async () => {
-    await withBot({ before: b => seedProviders(b.root, [{ name: 'mixed', baseURL: 'https://m.example.com/v1', models: ['ok-1', 'has space', 'ok-2'] }]) }, async ({ tg, b }) => {
+  test('单个模型条目不合格（id 含制表符）：只丢这个模型，带半角空格的照常保留，供应商照常启用', async () => {
+    await withBot({ before: b => seedProviders(b.root, [{ name: 'mixed', baseURL: 'https://m.example.com/v1', models: ['ok-1', 'has space', 'bad\tid', 'ok-2'] }]) }, async ({ tg, b }) => {
       await warmUp(tg)
       const r = await until(() => patchRoutes(b).mixed, '交给 dsh', 20_000)
-      expect(r.models.map((m: any) => m.id)).toEqual(['ok-1', 'ok-2'])
+      expect(r.models.map((m: any) => m.id)).toEqual(['ok-1', 'has space', 'ok-2'])
     })
   })
 

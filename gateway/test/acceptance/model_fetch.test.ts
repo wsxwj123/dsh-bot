@@ -34,12 +34,12 @@ describe('拉列表：解析', () => {
     })
   })
 
-  test('id 去首尾空白、去重保序；含空格/换行/控制字符/超过 200 字的跳过；非 ASCII（聚合商的中文渠道前缀）与 <b> 这类字符照收', async () => {
-    const ids = ['good-1', ' padded ', 'bad id', 'bad\nid', 'bad\u0001id', '模型一', 'x'.repeat(201), 'y'.repeat(200), '<b>', 'good-1']
+  test('id 去首尾空白、去重保序；中间半角空格照收；换行/制表符/不换行空格/控制字符/超过 200 字的跳过；非 ASCII（聚合商的中文渠道前缀）与 <b> 这类字符照收', async () => {
+    const ids = ['good-1', ' padded ', 'bad id', 'bad\tid', 'bad\nid', 'bad\u00a0id', 'bad\u0001id', '模型一', 'x'.repeat(201), 'y'.repeat(200), '<b>', 'good-1']
     await withModels({ handler: openaiOk(ids) }, async ({ tg, b, fm, key }) => {
       const { reply } = await add(tg, fm, key)
-      expect(models(b).map((m: any) => m.id)).toEqual(['good-1', 'padded', '模型一', 'y'.repeat(200), '<b>'])
-      expect(reply.text!).toContain('拉到 5 个模型')
+      expect(models(b).map((m: any) => m.id)).toEqual(['good-1', 'padded', 'bad id', '模型一', 'y'.repeat(200), '<b>'])
+      expect(reply.text!).toContain('拉到 6 个模型')
     })
   })
 
@@ -147,8 +147,8 @@ describe('拉列表：失败分类（供应商照样建好，模型列表为空�
     })
   })
 
-  test('所有 id 都不合格：bad_response', async () => {
-    await withModels({ handler: openaiOk(['has space', 'x'.repeat(300), '']) }, async ({ tg, fm, key }) => {
+  test('所有 id 都不合格（制表符、超长、空串）：bad_response', async () => {
+    await withModels({ handler: openaiOk(['has\tspace', 'x'.repeat(300), '']) }, async ({ tg, fm, key }) => {
       const { reply } = await add(tg, fm, key)
       expect(reply.text!).toContain(failText('对方返回的不是模型列表（格式不认识）'))
     })

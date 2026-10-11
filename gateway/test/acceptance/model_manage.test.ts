@@ -60,6 +60,13 @@ describe('手动加一个模型', () => {
     })
   })
 
+  test('模型名中间带半角空格（聚合商把渠道与价格写进 id）：照收', async () => {
+    await withBot({ before: seed() }, async ({ tg, b }) => {
+      expect(await addModel(tg, '[0.01/次][备用按次1] gemini-3-flash', '128k')).toBe('【系统】已给「myproxy」加上模型 [0.01/次][备用按次1] gemini-3-flash（上下文 128000）。几秒后就能切过去。')
+      expect(entry(b).route.models.map((m: any) => m.id)).toContain('[0.01/次][备用按次1] gemini-3-flash')
+    })
+  })
+
   test('加上后：providers.json 有这个模型，记入 manualModels 与 ownerContext', async () => {
     await withBot({ before: seed() }, async ({ tg, b }) => {
       await addModel(tg, 'new-model', '128k')
@@ -101,7 +108,7 @@ describe('手动加一个模型', () => {
     })
   }
 
-  for (const bad of ['has space', 'x'.repeat(201), 'bad⟦id']) {   // 非 ASCII 现在合法（聚合商的 id 带中文前缀），改用含程序标记的样例
+  for (const bad of ['bad\tid', 'x'.repeat(201), 'bad⟦id']) {   // 非 ASCII 与中间半角空格现在合法（聚合商把渠道写进 id），改用制表符、超长、程序标记当样例
     test(`模型名「${bad.length > 20 ? bad.slice(0, 6) + '…(' + bad.length + ' 字)' : bad}」不合规：回原因并重问`, async () => {
       await withBot({ before: seed() }, async ({ tg }) => {
         const mid = await toManage(tg)
@@ -109,7 +116,7 @@ describe('手动加一个模型', () => {
         await waitText(tg, OWNER, mid, t => t.includes('请输入模型名'), '输入模型名')
         const k = texts(tg).length
         tg.pushText(OWNER, bad)
-        await until(() => texts(tg).slice(k).includes('【系统】模型名要 1–200 个字符，不能有空白、控制字符，也不能有 ⟦ ⟧。请重新输入：'), '不合规原因')
+        await until(() => texts(tg).slice(k).includes('【系统】模型名要 1–200 个字符，中间的空格可以用，但不能有换行、制表符这类空白或控制字符，也不能有 ⟦ ⟧。请重新输入：'), '不合规原因')
       })
     })
   }
