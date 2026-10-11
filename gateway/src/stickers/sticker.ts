@@ -8,7 +8,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import type { Ledger } from '../ledger'
 import { safeError, type Logger } from '../log'
-import { classifySendError, type TelegramApi } from '../telegram/api'
+import { classifySendError, TgApiError, type TelegramApi } from '../telegram/api'
 import { allowedFile, fileKind } from '../telegram/sender'
 
 export type StickerTier = 'sfw' | 'nsfw'
@@ -207,9 +207,11 @@ export class StickerService {
         return { text: '网络异常，这条表情包可能已经发出去了，不要再发一遍。' }
       }
       this.d.ledger.outboundResult(outId, 'failed', { error: info.reason })
+      // 429 的等待秒数按 Telegram 实际给的报：它没给就不能拿分类函数兜底的 5 秒冒充，回 ?（契约）
+      const waitSec = err instanceof TgApiError ? err.retryAfter : undefined
       return {
         text: info.cls === 'retryable'
-          ? `没发出去（被 Telegram 限流，${info.retryAfterSec ?? '?'} 秒后可以再试）。`
+          ? `没发出去（被 Telegram 限流，${waitSec ?? '?'} 秒后可以再试）。`
           : `没发出去（Telegram 拒收：${info.reason}）。`,
         isError: true,
       }

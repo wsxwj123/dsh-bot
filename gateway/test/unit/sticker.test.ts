@@ -193,3 +193,21 @@ test('list：每次调用都记 tool.sticker_list 一条（零命中 hits=0 也�
   expect(logs[1]).toMatchObject({ query: false, tier: null, hits: 2 })
   t.done()
 })
+
+test('send：429 的等待秒数按 Telegram 实际给的报；它没给就回 ?（不拿兜底值冒充）', async () => {
+  const withRa = rig({ api: { sendFile: async () => { throw new TgApiError('sendAnimation', 429, 'Too Many Requests: retry after 30', 30) } } })
+  withRa.mk('sfw/a.gif')
+  withRa.writeLib({ sfw: [{ label: 'Happy 1', path: join(withRa.root, 'sfw/a.gif') }] })
+  const r1 = await withRa.svc.send('1', null, { action: 'send', query: 'Happy 1' })
+  expect(r1.isError).toBe(true)
+  expect(r1.text).toBe('没发出去（被 Telegram 限流，30 秒后可以再试）。')
+  withRa.done()
+
+  const noRa = rig({ api: { sendFile: async () => { throw new TgApiError('sendAnimation', 429, 'Too Many Requests') } } })
+  noRa.mk('sfw/a.gif')
+  noRa.writeLib({ sfw: [{ label: 'Happy 1', path: join(noRa.root, 'sfw/a.gif') }] })
+  const r2 = await noRa.svc.send('1', null, { action: 'send', query: 'Happy 1' })
+  expect(r2.isError).toBe(true)
+  expect(r2.text).toBe('没发出去（被 Telegram 限流，? 秒后可以再试）。')
+  noRa.done()
+})
