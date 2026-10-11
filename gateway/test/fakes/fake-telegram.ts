@@ -241,6 +241,20 @@ export class FakeTelegram {
         return ok(true)
       }
       case 'getFile': return ok({ file_id: params.file_id, file_path: String(params.file_id).startsWith('voice') ? 'voice/file_1.oga' : 'photos/file_2.jpg' })
+      case 'sendAnimation':
+      case 'sendSticker': {
+        // 表情包：gif 走 sendAnimation（multipart 字段名 animation）、webp/tgs 走 sendSticker（字段名 sticker），
+        // 与 sendPhoto 同形：push 进 sent、返回 message_id/date/chat。multipart 解析同通用逻辑（占位 <file 名 字节>B>）。
+        const rp = params.reply_parameters
+        const replyTo = rp?.message_id ? Number(rp.message_id) : undefined
+        const field = params.animation ?? params.sticker
+        const s: Sent = { method, chatId: String(params.chat_id), messageId: this.nextMsg++, at: Date.now(), ...(params.text !== undefined ? { text: String(params.text) } : {}), ...(replyTo ? { replyTo } : {}), ...(field ? { file: String(field) } : {}) }
+        this.sent.push(s)
+        const date = Math.floor(Date.now() / 1000)
+        this.remember(params.chat_id, s.messageId, true, String(params.text ?? ''), null, date)
+        if (fault?.mode === 'garbled') return new Response('<html>bad gateway', { status: 200 })
+        return ok({ message_id: s.messageId, date, chat: { id: Number(params.chat_id), type: 'private' } })
+      }
       case 'sendMessage':
       case 'sendPhoto':
       case 'sendVoice':

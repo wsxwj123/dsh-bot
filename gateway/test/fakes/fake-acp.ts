@@ -22,9 +22,10 @@
 //   !say:文字          回复这句话（下划线换成空格），代替"收到：…"
 //   !voice             用语音回复两段（as_voice）
 //   !voicetext         回复两段中文，带两段朗读稿（voice_text）
-//   !tool:名字|JSON     先调用这个工具（JSON 里不能有空白）
+//   !tool:名字|JSON     先调用这个工具；一行一个指令（同一条消息里写多行 = 连续调多次），JSON 里不能有换行
 // 程序发来的"⟦系统·承诺到期⟧"：回复一句；state 目录里 due-mode=mute 时改为 stay_silent（模拟没兑现），=cancel 时取消这件承诺
-// 程序发来的"⟦系统·整理记忆⟧"：先试着调一次 react（应被锁），再输出一份假摘要（state 目录里 summary-mode=empty 时输出空）
+// 程序发来的"⟦系统·整理记忆⟧"：先试着调一次 react（应被锁）；state 目录里有 sticker-probe 文件时再试调一次
+// sticker（也别指望成功），然后输出一份假摘要（state 目录里 summary-mode=empty 时输出空）
 // 没有指令时回复"收到：<对方最后一句>"；补救提示（⟦系统…）回复"接着刚才的说"。
 // 补丁层（行为依据：对真 dsh 0.2.0-rc.2 的实测，见供应商引导 INTERFACE 3.13.2）：
 //   新会话默认模型取 acp 行；供应商既不是 deepseek-official、也不在 llm-pi-ai 路由里 → session/new、session/resume 报 -32603
@@ -179,6 +180,7 @@ async function prompt(id: number, sessionId: string, all0: { type: string; text?
       return send({ id, error: { code: -32603, message: 'turn failed: summary-fail' } })
     }
     if (s.mcp) await callTool(s, sessionId, 'react', { message_id: 1, emoji: '❤️' })
+    if (s.mcp && existsSync(P('sticker-probe'))) await callTool(s, sessionId, 'sticker', { action: 'send', id: 'sfw:1' })
     const mode = existsSync(P('summary-mode')) ? readFileSync(P('summary-mode'), 'utf8').trim() : ''
     const n = bump('summary')
     const lines = all.split('\n').filter(l => l.includes('对方：') || (!l.startsWith('⟦') && l.trim())).length
@@ -223,8 +225,7 @@ async function prompt(id: number, sessionId: string, all0: { type: string; text?
   }
   const cm = last.match(/!commit:([^|\s]+)\|(\S+)/)
   if (cm) await callTool(s, sessionId, 'commitment_create', { content: cm[1]!.replace(/_/g, ' '), when: cm[2]!.replace(/_/g, ' ') })
-  const tl = last.match(/!tool:(\w+)\|(\S+)/)
-  if (tl) await callTool(s, sessionId, tl[1]!, JSON.parse(tl[2]!))
+  for (const m of last.matchAll(/!tool:(\w+)\|(.+)/g)) await callTool(s, sessionId, m[1]!, JSON.parse(m[2]!.trim()))
   const rem = last.match(/!remember:(\S+)/)
   if (rem) await callTool(s, sessionId, 'remember', { text: rem[1]!.replace(/_/g, ' ') })
   const react = directive(last, 'react')
