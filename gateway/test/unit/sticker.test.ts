@@ -1,7 +1,7 @@
 // 表情包工具：库解析（两档都认）、按标签找（命中/近似/找不到）、路径越界被拒、
 // gif 与静态图的分流判定、发送失败如实回报（不假装成功、可能已送达的不重发）
 import { expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { basename, dirname, join } from 'path'
 import { Ledger } from '../../src/ledger'
@@ -18,7 +18,7 @@ function rig(o: { api?: unknown } = {}) {
   const calls: string[] = []
   const api = o.api ?? { sendFile: async (kind: string, _c: string, p: string) => { calls.push(`${kind}:${basename(p)}`); return { message_id: 7 } } }
   const ledger = new Ledger(':memory:')
-  const svc = new StickerService({ api: api as TelegramApi, ledger, log: new Logger(), file: () => lib, root: () => root })
+  const svc = new StickerService({ api: api as TelegramApi, ledger, log: new Logger({ dir }), file: () => lib, root: () => root })
   const mk = (rel: string, content = 'GIF89a'): string => {
     const p = join(root, rel)
     mkdirSync(dirname(p), { recursive: true })
@@ -178,5 +178,18 @@ test('send：标签找不到时列候选、不硬发；要给 id 或 label', asy
   const empty = await t.svc.send('1', null, { action: 'send' })
   expect(empty.isError).toBe(true)
   expect(t.calls).toEqual([])
+  t.done()
+})
+
+test('list：每次调用都记 tool.sticker_list 一条（零命中 hits=0 也记，字段 query/tier/hits）', () => {
+  const t = rig()
+  t.writeLib({ sfw: [{ label: 'Happy 1', path: '/x/a.gif' }], nsfw: [{ label: '露奶勾引', path: '/x/b.gif' }] })
+  t.svc.list({ action: 'list', query: 'Happy', tier: 'nsfw' }) // 有 query 但零命中
+  t.svc.list({ action: 'list' })
+  const logs = readFileSync(join(t.dir, 'gateway.log'), 'utf8').trim().split('\n')
+    .map(l => JSON.parse(l) as Record<string, unknown>).filter(l => l.event === 'tool.sticker_list')
+  expect(logs.length).toBe(2)
+  expect(logs[0]).toMatchObject({ level: 'info', query: true, tier: 'nsfw', hits: 0 })
+  expect(logs[1]).toMatchObject({ query: false, tier: null, hits: 2 })
   t.done()
 })

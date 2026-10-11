@@ -141,7 +141,10 @@ export class StickerService {
     if (r.error) return { text: r.error, isError: true }
     const all = r.list
     const query = s(args.query)
-    const hits = filterStickers(all, { query, tier: s(args.tier) })
+    const tier = s(args.tier)
+    const hits = filterStickers(all, { query, tier })
+    // 每次 list 都记一条（含 query 零命中、空档，hits=0）：真机验收主判据按日志归因，不能漏
+    this.d.log.info('tool.sticker_list', { query: query !== '', tier: tier || null, hits: hits.length })
     if (hits.length === 0) {
       return {
         text: query
@@ -159,7 +162,6 @@ export class StickerService {
       for (const e of part) lines.push(`#${e.id} ${e.label}`)
     }
     if (hits.length > shown.length) lines.push(`（只列了前 ${shown.length} 条，还有 ${hits.length - shown.length} 条；加个更具体的关键词再找）`)
-    this.d.log.info('tool.sticker_list', { query: query !== '', tier: s(args.tier) || null, hits: hits.length })
     return { text: lines.join('\n') }
   }
 
