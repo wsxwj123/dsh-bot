@@ -282,7 +282,7 @@ export type SeedProvider = {
 export function seedProviders(root: string, list: SeedProvider[], pending: { key: string; after: number }[] = []): void {
   const providers: Record<string, any> = {}
   for (const p of list) {
-    const models = (p.models ?? []).map(m => typeof m === 'string' ? { id: m, contextWindow: 131072 } : { contextWindow: 131072, ...m })
+    const models = (p.models ?? []).map(m => typeof m === 'string' ? { id: m, contextWindow: 1048576 } : { contextWindow: 1048576, ...m })
     providers[p.name] = {
       route: { api: p.api ?? 'openai-completions', baseURL: p.baseURL, apiKeyEnv: p.apiKeyEnv ?? defaultKeyEnv(p.name), models },
       meta: {

@@ -67,7 +67,7 @@ describe('引导「刷新模型」', () => {
       const { mid } = await refreshViaMenu(tg)
       await waitText(tg, OWNER, mid, x => x.includes('拉到 3 个模型'), '刷新结果', 20_000)
       const e = readProviders(b.root).providers.myproxy
-      expect(e.route.models).toEqual([{ id: 'm1', contextWindow: 50000 }, { id: 'm3', contextWindow: 131072 }, { id: 'm4', contextWindow: 131072 }, { id: 'man1', contextWindow: 131072 }])
+      expect(e.route.models).toEqual([{ id: 'm1', contextWindow: 50000 }, { id: 'm3', contextWindow: 1048576 }, { id: 'm4', contextWindow: 1048576 }, { id: 'man1', contextWindow: 1048576 }])
       expect(e.meta.manualModels).toEqual(['man1'])
     })
   })

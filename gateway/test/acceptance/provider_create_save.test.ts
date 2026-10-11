@@ -71,7 +71,7 @@ describe('新建：收到合格密钥', () => {
     })
   })
 
-  test('providers.json：route 写入格式、地址、默认键名、拉到的模型（上下文未知按 131072 并记入 guessedContext）', async () => {
+  test('providers.json：route 写入格式、地址、默认键名、拉到的模型（上下文未知按 1048576 并记入 guessedContext）', async () => {
     await withModels({ handler: openaiOk(IDS) }, async ({ tg, b, fm, key }) => {
       await wizardCreate(tg, { name: 'myproxy', fmt: 'openai', url: `${fm.url}/v1`, key })
       const p = readProviders(b.root)
@@ -79,7 +79,7 @@ describe('新建：收到合格密钥', () => {
       const e = p.providers.myproxy
       expect(e.route.api).toBe('openai-completions')
       expect(e.route.apiKeyEnv).toBe('PROVIDER_MYPROXY_KEY')
-      expect(e.route.models).toEqual(IDS.map(id => ({ id, contextWindow: 131072 })))
+      expect(e.route.models).toEqual(IDS.map(id => ({ id, contextWindow: 1048576 })))
       expect([...e.meta.guessedContext].sort()).toEqual([...IDS].sort())
       expect(e.meta.keyRev).toBe(1)
       expect(typeof e.meta.epoch).toBe('number')

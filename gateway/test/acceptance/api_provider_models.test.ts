@@ -1,6 +1,6 @@
 // 验收：网关本机接口 POST /v1/provider/model（INTERFACE-管理台UI 3.4）。
 // 契约要点action 只认 add/remove/set_context；id 走 cleanModelId（1 到 200 字符、不含空白与控制字符、不含 ⟦⟧）；
-// contextWindow 给了必须是 1024 到 100000000 的整数，set_context 时必须给，add 可不给（按 131072 记入 guessed）；
+// contextWindow 给了必须是 1024 到 100000000 的整数，set_context 时必须给，add 可不给（按 1048576 记入 guessed）；
 // 成功三条 text 与 Telegram「管理模型」同源；错误码 bad_action / bad_id / bad_context / not_found / exists / disabled / busy / save_failed / providers_unreadable。
 // 实现未落地时本文件红（多半 404），那是红基线，不是测试坏了。
 import { describe, expect, test } from 'bun:test'
@@ -32,12 +32,12 @@ describe('POST /v1/provider/model 的 add', () => {
     })
   })
 
-  test('add 不给 contextWindow：按 131072 算，记入 guessed', async () => {
+  test('add 不给 contextWindow：按 1048576 算，记入 guessed', async () => {
     await withModels({ handler: openaiOk(IDS), before: seedCustom() }, async ({ gw, b }) => {
       const r = await gw.call(MODEL, body({ contextWindow: undefined }))
       expect(r.status, `应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
       const m = entry(b).route.models.find((x: any) => x.id === 'new-model')
-      expect(m.contextWindow, '不给上下文按 131072 算').toBe(131_072)
+      expect(m.contextWindow, '不给上下文按 1048576 算').toBe(1_048_576)
       expect(entry(b).meta.guessedContext, '未声明上下文的应记入 guessed').toContain('new-model')
     })
   })

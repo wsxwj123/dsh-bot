@@ -17,7 +17,7 @@ function find(j: any, name: string): any {
   return p
 }
 
-/** 一个合法自建：m1 没声明上下文（131072 且 guessed），m2 声明了 64000，man1 是手动加的 */
+/** 一个合法自建：m1 没声明上下文（1048576 且 guessed），m2 声明了 64000，man1 是手动加的 */
 const seedOne = (key: string) => (b: BotEnv, fm: FakeModels) => {
   seedProviders(b.root, [{ name: 'myproxy', baseURL: `${fm.url}/v1`, models: ['m1', { id: 'm2', contextWindow: 64_000 }], manualModels: ['man1'] }])
   seedCreds(b.root, { [defaultKeyEnv('myproxy')]: key })
@@ -37,7 +37,7 @@ describe('GET /v1/provider 的正常路径', () => {
         api: 'openai-completions',
         baseURL: `${fm.url}/v1`,
         modelList: [
-          { id: 'm1', contextWindow: 131_072, guessed: true },
+          { id: 'm1', contextWindow: 1_048_576, guessed: true },
           { id: 'm2', contextWindow: 64_000, guessed: false },
         ],
         manualModels: ['man1'],

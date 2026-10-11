@@ -8,7 +8,7 @@ const models = (b: any) => readProviders(b.root)?.providers?.fp?.route?.models ?
 const failText = (why: string) => `【系统】已添加供应商「fp」，但没拉到模型：${why}。`
 
 describe('拉列表：解析', () => {
-  test('上下文长度按字段优先级取第一个 1024–100000000 的整数，取不到按 131072 并记入 guessedContext', async () => {
+  test('上下文长度按字段优先级取第一个 1024–100000000 的整数，取不到按 1048576 并记入 guessedContext', async () => {
     const ids = [
       { id: 'a', max_input_tokens: 500, context_length: 32000 },
       { id: 'b', input_token_limit: 2048 },
@@ -20,8 +20,8 @@ describe('拉列表：解析', () => {
     await withModels({ handler: openaiOk(ids) }, async ({ tg, b, fm, key }) => {
       await add(tg, fm, key)
       expect(models(b)).toEqual([
-        { id: 'a', contextWindow: 32000 }, { id: 'b', contextWindow: 2048 }, { id: 'c', contextWindow: 131072 },
-        { id: 'd', contextWindow: 131072 }, { id: 'e', contextWindow: 100000000 }, { id: 'f', contextWindow: 1024 },
+        { id: 'a', contextWindow: 32000 }, { id: 'b', contextWindow: 2048 }, { id: 'c', contextWindow: 1048576 },
+        { id: 'd', contextWindow: 1048576 }, { id: 'e', contextWindow: 100000000 }, { id: 'f', contextWindow: 1024 },
       ])
       expect([...readProviders(b.root).providers.fp.meta.guessedContext].sort()).toEqual(['c', 'd'])
     })

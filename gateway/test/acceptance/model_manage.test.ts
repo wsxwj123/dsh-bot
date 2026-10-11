@@ -28,7 +28,7 @@ async function addModel(tg: any, id: string, ctx: string): Promise<string> {
   tg.clickButton(OWNER, OWNER, mid, '手动加一个模型')
   await waitText(tg, OWNER, mid, t => t === '【系统】请输入模型名（对方接口里的模型 id，最多 200 个字符）：', '输入模型名')
   tg.pushText(OWNER, id)
-  const m2 = await waitMenu(tg, OWNER, m => m.text === '【系统】上下文长度（token 数，比如 128000、128k、1.5m）；不知道就点「跳过」（按 131072 算）：', '输入上下文')
+  const m2 = await waitMenu(tg, OWNER, m => m.text === '【系统】上下文长度（token 数，比如 128000、128k、1.5m）；不知道就点「跳过」（按 1048576 算）：', '输入上下文')
   if (ctx === 'skip') tg.clickButton(OWNER, OWNER, m2.messageId, '跳过')
   else tg.pushText(OWNER, ctx)
   return said(tg, t => t.startsWith(`【系统】已给「myproxy」加上模型 ${id}`) || t.startsWith('【系统】没保存成功'), '加模型结果')
@@ -44,10 +44,10 @@ describe('管理页', () => {
     })
   })
 
-  test('管理页逐行列出模型与上下文（猜的写「未知，按 131072 算」），按钮齐全', async () => {
+  test('管理页逐行列出模型与上下文（猜的写「未知，按 1048576 算」），按钮齐全', async () => {
     await withBot({ before: seed() }, async ({ tg }) => {
       const mid = await toManage(tg)
-      expect(tg.textOf(OWNER, mid)).toBe('【系统】「myproxy」的模型（2 个）：\nm1（上下文 131072，未知，按 131072 算）\nm2（上下文 64000）')
+      expect(tg.textOf(OWNER, mid)).toBe('【系统】「myproxy」的模型（2 个）：\nm1（上下文 1048576，未知，按 1048576 算）\nm2（上下文 64000）')
       expect(labels(tg, mid)).toEqual(['手动加一个模型', '删一个模型', '改上下文长度', '返回', '取消'])
     })
   })
@@ -70,9 +70,9 @@ describe('手动加一个模型', () => {
     })
   })
 
-  test('点「跳过」：按 131072 算，记入 guessedContext', async () => {
+  test('点「跳过」：按 1048576 算，记入 guessedContext', async () => {
     await withBot({ before: seed() }, async ({ tg, b }) => {
-      expect(await addModel(tg, 'skip-model', 'skip')).toContain('（上下文 131072）')
+      expect(await addModel(tg, 'skip-model', 'skip')).toContain('（上下文 1048576）')
       expect(entry(b).meta.guessedContext).toContain('skip-model')
     })
   })
@@ -227,10 +227,10 @@ describe('删一个模型', () => {
 })
 
 describe('改上下文长度', () => {
-  test('选上下文未知的模型：「m1 现在的上下文长度是 131072（未知，按 131072 算）。请输入新的…」', async () => {
+  test('选上下文未知的模型：「m1 现在的上下文长度是 1048576（未知，按 1048576 算）。请输入新的…」', async () => {
     await withBot({ before: seed() }, async ({ tg }) => {
       const mid = await pickModel(tg, '改上下文长度', 'm1')
-      await waitText(tg, OWNER, mid, t => t === '【系统】m1 现在的上下文长度是 131072（未知，按 131072 算）。请输入新的（比如 128000、128k、1.5m）：', '问新长度')
+      await waitText(tg, OWNER, mid, t => t === '【系统】m1 现在的上下文长度是 1048576（未知，按 1048576 算）。请输入新的（比如 128000、128k、1.5m）：', '问新长度')
     })
   })
 
