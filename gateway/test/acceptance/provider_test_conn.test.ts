@@ -118,7 +118,7 @@ describe('POST /v1/provider/test 的失败分型', () => {
     ['302 跳转（manual 不跟随）', 302, 'redirect', () => new Response('', { status: 302, headers: { location: '/elsewhere' } })],
     ['200 但正文不是 JSON', 200, 'bad_response', () => new Response('hello', { status: 200, headers: { 'content-type': 'text/plain' } })],
   ]
-  for (const [what, code, reason, handler] of CASES) {
+  for (const [what, , reason, handler] of CASES) {
     test(`${what}：502 connect_failed，reason=${reason}，text 带「用 m1 测的」`, async () => {
       await withModels({ handler, before: seed({ api: 'openai-completions' }) }, async ({ gw }) => {
         const r = await gw.call(TEST, { name: 'myproxy' })

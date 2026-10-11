@@ -74,7 +74,7 @@ test('apiModelEdit：供应商找不到 / action 与 id 与上下文的校验顺
     expect(String((notFound.body as any).text)).toContain('nosuch')
     const bad = await c.apiModelEdit({ name: 'myproxy', action: 'add2', id: 'x' }) as ApiResult
     expect(bad).toMatchObject({ status: 400, body: { error: 'bad_action' } })
-    const badId = await c.apiModelEdit({ name: 'myproxy', action: 'add', id: 'a b' }) as ApiResult
+    const badId = await c.apiModelEdit({ name: 'myproxy', action: 'add', id: 'a\tb' }) as ApiResult
     expect(badId).toMatchObject({ status: 400, body: { error: 'bad_id' } })
     const noCtx = await c.apiModelEdit({ name: 'myproxy', action: 'set_context', id: 'm1' }) as ApiResult
     expect(noCtx).toMatchObject({ status: 400, body: { error: 'bad_context' } })
