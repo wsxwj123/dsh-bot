@@ -3,6 +3,7 @@ import type { Btn } from './keyboard'
 import { truncLabel, pageSlice, PAGE_SIZE, truncateMenu } from './keyboard'
 import { effortLabel, modelLine } from './text'
 import { CANCEL, BACK, CLOSE, withPaging } from './provider_flow'
+import { DEFAULT_CONTEXT } from '../providers/store'
 
 export type StepRender = { text: string; buttons: Btn[] }
 
@@ -46,7 +47,7 @@ export function manageStep(name: string, models: { id: string; ctx: number; gues
 }
 
 export const addIdStep = (): StepRender => ({ text: '【系统】请输入模型名（对方接口里的模型 id，最多 200 个字符）：', buttons: [CANCEL] })
-export const addCtxStep = (): StepRender => ({ text: '【系统】上下文长度（token 数，比如 128000、128k、1.5m）；不知道就点「跳过」（按 131072 算）：', buttons: [{ label: '跳过', action: 'skip' }, CANCEL] })
+export const addCtxStep = (): StepRender => ({ text: `【系统】上下文长度（token 数，比如 128000、128k、1.5m）；不知道就点「跳过」（按 ${DEFAULT_CONTEXT} 算）：`, buttons: [{ label: '跳过', action: 'skip' }, CANCEL] })
 
 /** 选模型（删 / 改上下文用；编辑当前菜单） */
 export function modelPickStep(kind: 'del' | 'ctx', models: string[], page: number): StepRender {
@@ -58,7 +59,7 @@ export function modelPickStep(kind: 'del' | 'ctx', models: string[], page: numbe
 
 /** 问新的上下文长度（编辑当前菜单） */
 export const ctxInputStep = (id: string, ctx: number, guessed: boolean): StepRender => ({
-  text: `【系统】${id} 现在的上下文长度是 ${ctx}${guessed ? '（未知，按 131072 算）' : ''}。请输入新的（比如 128000、128k、1.5m）：`,
+  text: `【系统】${id} 现在的上下文长度是 ${ctx}${guessed ? `（未知，按 ${DEFAULT_CONTEXT} 算）` : ''}。请输入新的（比如 128000、128k、1.5m）：`,
   buttons: [CANCEL],
 })
 

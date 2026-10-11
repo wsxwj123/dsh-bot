@@ -1,5 +1,5 @@
 // 引导的文案与输入校验（纯函数，方案 3.3、3.4、3.5）：「像密钥」判定、上下文长度写法、思考档位显示名、各步提示文字。
-import { CONTEXT_MAX, CONTEXT_MIN } from '../providers/store'
+import { CONTEXT_MAX, CONTEXT_MIN, DEFAULT_CONTEXT } from '../providers/store'
 import { apiLabel } from '../engine/commands'
 
 /** 可见 ASCII、不含空白（! 到 ~），与 store 里的密钥判定一致（模型名不适用，它允许非 ASCII，见 store.ts 的 cleanModelId） */
@@ -100,13 +100,13 @@ export const ITEM_GONE = '该项已不存在，请重新选择'
 export const nameStepHint = '请输入名字：只能用英文字母、数字、-、_，以字母或数字开头，最多 32 个字符。'
 export const urlStepHint = CREATE_STEP3
 export const modelNameHint = '请输入模型名（对方接口里的模型 id，最多 200 个字符）：'
-export const ctxStepHint = '上下文长度（token 数，比如 128000、128k、1.5m）；不知道就点「跳过」（按 131072 算）：'
+export const ctxStepHint = `上下文长度（token 数，比如 128000、128k、1.5m）；不知道就点「跳过」（按 ${DEFAULT_CONTEXT} 算）：`
 export const CONTEXT_BAD = '上下文长度要是 1024 到 100000000 之间的整数，可以写 128k 或 1.5m'
 export const MODEL_NAME_BAD = '模型名要 1–200 个字符，不能有空白、控制字符，也不能有 ⟦ ⟧'
 
-/** 管理页逐行：<id>（上下文 <ctx>，[未知，按 131072 算]） */
+/** 管理页逐行：<id>（上下文 <ctx>，[未知，按 DEFAULT_CONTEXT 算]） */
 export function modelLine(id: string, ctx: number, guessed: boolean): string {
-  return `${id}（上下文 ${ctx}${guessed ? '，未知，按 131072 算' : ''}）`
+  return `${id}（上下文 ${ctx}${guessed ? `，未知，按 ${DEFAULT_CONTEXT} 算` : ''}）`
 }
 
 /** 供应商格式标签（与 /provider 列表同源） */

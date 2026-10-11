@@ -6,7 +6,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { Logger } from '../../src/log'
 import { ProviderService } from '../../src/providers/service'
-import { parseProviders, setCredentialRef } from '../../src/providers/store'
+import { DEFAULT_CONTEXT, parseProviders, setCredentialRef } from '../../src/providers/store'
 import type { FetchedModel, FetchModelsRequest, FetchModelsResult } from '../../src/providers/models'
 
 const dirs: string[] = []
@@ -38,7 +38,7 @@ const okModels = (list: FetchedModel[], baseURL: string): FetchModelsResult => (
 const read = (root: string) => parseProviders(readFileSync(providersPathOf(root), 'utf8'))
 const creds = (root: string) => existsSync(credPathOf(root)) ? readFileSync(credPathOf(root), 'utf8') : ''
 
-test('新建：拉到的模型落盘、上下文未知记 131072 与 guessedContext、密钥写进凭据、通知 onChanged', async () => {
+test('新建：拉到的模型落盘、上下文未知记默认值 与 guessedContext、密钥写进凭据、通知 onChanged', async () => {
   const root = tmp()
   let changed = 0
   const { s, calls } = svc(root, () => okModels([{ id: 'm1', contextWindow: 8000 }, { id: 'm2', contextWindow: null }], 'https://p.example.com/v1'), { onChanged: () => changed++ })
@@ -50,7 +50,7 @@ test('新建：拉到的模型落盘、上下文未知记 131072 与 guessedCont
   expect(calls[0]).toEqual({ api: 'openai-completions', baseURL: 'https://p.example.com/v1', key: 'test-key-7abcdefghij' })
   const snap = read(root)
   const e = snap.valid['My_Proxy']!
-  expect(e.route.models).toEqual([{ id: 'm1', contextWindow: 8000 }, { id: 'm2', contextWindow: 131072 }])
+  expect(e.route.models).toEqual([{ id: 'm1', contextWindow: 8000 }, { id: 'm2', contextWindow: DEFAULT_CONTEXT }])
   expect(e.meta.guessedContext).toEqual(['m2'])
   expect(e.route.apiKeyEnv).toBe('PROVIDER_MY_PROXY_KEY')
   expect(creds(root)).toContain('PROVIDER_MY_PROXY_KEY: "test-key-7abcdefghij"')
@@ -104,7 +104,7 @@ test('刷新：新增/去掉/保留统计、<N> 是拉到的个数、主人手�
   expect(r.removed).toEqual(['m2'])
   expect(r.keptManual).toBe(1)
   const e = read(root).valid.p1!
-  expect(e.route.models).toEqual([{ id: 'm1', contextWindow: 50000 }, { id: 'm3', contextWindow: 131072 }, { id: 'man1', contextWindow: 131072 }])
+  expect(e.route.models).toEqual([{ id: 'm1', contextWindow: 50000 }, { id: 'm3', contextWindow: DEFAULT_CONTEXT }, { id: 'man1', contextWindow: DEFAULT_CONTEXT }])
   expect(e.meta.lastRefresh).toMatchObject({ ok: true, count: 3, reason: null })
 })
 
@@ -162,7 +162,7 @@ test('模型管理：加手动模型（记入 manualModels）、改上下文（�
   expect((await s.addModel('p1', 'man', null)).ok).toBe(false) // 已有
   expect((await s.setContext('p1', 'm1', 200000)).ok).toBe(true)
   const e = read(root).valid.p1!
-  expect(e.route.models.find(m => m.id === 'man')!.contextWindow).toBe(131072)
+  expect(e.route.models.find(m => m.id === 'man')!.contextWindow).toBe(DEFAULT_CONTEXT)
   expect(e.meta.manualModels).toEqual(['man'])
   expect(e.route.models.find(m => m.id === 'm1')!.contextWindow).toBe(200000)
   expect(e.meta.ownerContext).toEqual(['m1'])

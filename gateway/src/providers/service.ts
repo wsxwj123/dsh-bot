@@ -316,7 +316,7 @@ export class ProviderService {
     }
   }
 
-  /** 加一个手动模型（id 已校验过；ctx 为 null = 未知按 131072 算并计入 manualModels + guessedContext，否则计入 ownerContext） */
+  /** 加一个手动模型（id 已校验过；ctx 为 null = 未知按 DEFAULT_CONTEXT 算并计入 manualModels + guessedContext，否则计入 ownerContext） */
   async addModel(name: string, id: string, ctx: number | null): Promise<ModelEditResult> {
     return this.edit(name, (e) => {
       if (e.route.models.some(m => m.id === id)) return { why: 'exists' as const }

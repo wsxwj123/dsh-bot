@@ -48,7 +48,7 @@ export class ProvidersUnreadable extends Error {
   override name = 'ProvidersUnreadable'
 }
 
-export const DEFAULT_CONTEXT = 131072
+export const DEFAULT_CONTEXT = 1_048_576
 export const CONTEXT_MIN = 1024
 export const CONTEXT_MAX = 100_000_000
 /** 内置名与保留字（规整名命中其一就不许做自建名）。本机接口与引导共用（INTERFACE 3.2 第 2 步） */
@@ -165,7 +165,7 @@ function cleanEfforts(v: unknown): ReasoningEfforts | undefined {
   return out
 }
 
-/** 模型条目：id 不合格或上下文长度写了但不合格的整条丢弃；没写上下文长度按未知（131072）；思考档位声明不合格只丢这个字段 */
+/** 模型条目：id 不合格或上下文长度写了但不合格的整条丢弃；没写上下文长度按未知（DEFAULT_CONTEXT）；思考档位声明不合格只丢这个字段 */
 function cleanModels(v: unknown): ProviderModel[] {
   if (!Array.isArray(v)) return []
   const out: ProviderModel[] = []

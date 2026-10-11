@@ -406,7 +406,7 @@ export class ProviderCommands {
 
   /**
    * `POST /v1/provider/model`（3.4）：模型的加、删、改上下文。text 与 Telegram「管理模型」同源三条；
-   * add 不给上下文按 131072 算（记入 guessed），set_context 必须给
+   * add 不给上下文按 DEFAULT_CONTEXT 算（记入 guessed），set_context 必须给
    */
   async apiModelEdit(body: Record<string, unknown>): Promise<ApiResult> {
     const name = body.name

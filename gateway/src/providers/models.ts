@@ -6,7 +6,7 @@
 import { cleanModelId, isContextWindow, type ProviderApi } from './store'
 
 export type FetchFailReason = 'network' | 'timeout' | 'unauthorized' | 'not_found' | 'redirect' | 'rate_limited' | 'server_error' | 'http_error' | 'bad_response' | 'empty'
-/** contextWindow 为 null = 对方没给（按 131072 算，记入 guessedContext，由调用方处理） */
+/** contextWindow 为 null = 对方没给（按 DEFAULT_CONTEXT 算，记入 guessedContext，由调用方处理） */
 export type FetchedModel = { id: string; contextWindow: number | null }
 export type FetchModelsRequest = { api: ProviderApi; baseURL: string; key: string }
 export type FetchModelsResult =

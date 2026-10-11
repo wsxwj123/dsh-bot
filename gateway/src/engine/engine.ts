@@ -32,7 +32,7 @@ import {
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, summaryPrompt,
 } from './format'
 import { formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, type KeyStatus, type ModelChoice, type ProviderView } from './commands'
-import { mergeRoutes, normName, readProviders, ProvidersUnreadable, type ProvidersSnapshot, type MergedProviders, type ProviderEntry, type ProviderApi } from '../providers/store'
+import { mergeRoutes, normName, readProviders, ProvidersUnreadable, DEFAULT_CONTEXT, type ProvidersSnapshot, type MergedProviders, type ProviderEntry, type ProviderApi } from '../providers/store'
 
 /**
  * 被晾追问等多久的倍数：按关系数值（好感 + 信任）调，越亲近追得越快（用户在 M3 真机验收后定的）。
@@ -1402,7 +1402,7 @@ export class Engine {
     const lines = [`【系统】已换成 ${c.provider} / ${c.model}，下一条消息起生效。这个 bot 的所有聊天都换，重启后保持；/model default 换回配置文件里的。`]
     if (crossProvider) lines.push('换到了另一家供应商：下一条消息会先让现在的模型写一份交接摘要，再在新供应商上开新会话。')
     const entry = this.selfByName(c.provider)?.entry
-    if (entry && entry.meta.guessedContext.includes(c.model)) lines.push('这个模型的上下文长度未知，按 131072 算；如果它实际更小，请在 /model →「管理模型」里改。')
+    if (entry && entry.meta.guessedContext.includes(c.model)) lines.push(`这个模型的上下文长度未知，按 ${DEFAULT_CONTEXT} 算；如果它实际更小，请在 /model →「管理模型」里改。`)
     return lines.join('\n')
   }
 
