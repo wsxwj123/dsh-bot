@@ -58,10 +58,12 @@ const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/
 const KEY_ENV_RE = /^PROVIDER_[A-Z0-9_]+_KEY(_[0-9]+)?$/
 /** 密钥的"可见 ASCII、不含空白"（! 到 ~）。模型 id 不适用（见 MODEL_ID_ILLEGAL，方案 3.1.1） */
 const VISIBLE = /^[\x21-\x7e]+$/
-/** 模型 id 里不能出现的字符（方案 3.1.1、3.7）：空白、控制字符、程序标记 ⟦⟧（混进模型名会污染给模型的说明），
+/** 模型 id 里不能出现的字符（方案 3.1.1、3.7）：除半角空格外的空白、控制字符、程序标记 ⟦⟧（混进模型名会污染给模型的说明），
  *  以及 Unicode 格式字符与代理码位（零宽 U+200B、双向控制 U+202E、行首 BOM U+FEFF 之类：能在菜单/日志里伪装成别的模型名）。
- *  其余字符连非 ASCII 都允许：第三方聚合商常把渠道写进 id，如 [次]deepseek-v4-pro */
-const MODEL_ID_ILLEGAL = /[\s\u0000-\u001f\u007f-\u009f\p{Cf}\p{Cs}⟦⟧]/u
+ *  其余字符连非 ASCII 都允许：第三方聚合商常把渠道写进 id，如 [次]deepseek-v4-pro。
+ *  半角空格是放开的（2026-10-11 契约修订）：16z 那类聚合商把渠道与价格写在 id 里，中间带一个空格
+ *  如 `[0.01/次][备用按次1] gemini-3-flash`，原来一律丢掉，196 个模型只进得来 2 个。首尾空白仍会被 cleanModelId 去掉 */
+const MODEL_ID_ILLEGAL = /[^\S ]|[\u0000-\u001f\u007f-\u009f\p{Cf}\p{Cs}⟦⟧]/u
 
 export const providersPath = (root: string) => join(root, 'providers.json')
 export const providersLockPath = (root: string) => join(root, 'providers.lock')

@@ -102,7 +102,7 @@ export const urlStepHint = CREATE_STEP3
 export const modelNameHint = '请输入模型名（对方接口里的模型 id，最多 200 个字符）：'
 export const ctxStepHint = `上下文长度（token 数，比如 128000、128k、1.5m）；不知道就点「跳过」（按 ${DEFAULT_CONTEXT} 算）：`
 export const CONTEXT_BAD = '上下文长度要是 1024 到 100000000 之间的整数，可以写 128k 或 1.5m'
-export const MODEL_NAME_BAD = '模型名要 1–200 个字符，不能有空白、控制字符，也不能有 ⟦ ⟧'
+export const MODEL_NAME_BAD = '模型名要 1–200 个字符，中间的空格可以用，但不能有换行、制表符这类空白或控制字符，也不能有 ⟦ ⟧'
 
 /** 管理页逐行：<id>（上下文 <ctx>，[未知，按 DEFAULT_CONTEXT 算]） */
 export function modelLine(id: string, ctx: number, guessed: boolean): string {

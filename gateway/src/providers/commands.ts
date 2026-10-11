@@ -426,7 +426,7 @@ export class ProviderCommands {
     const action = body.action
     if (action !== 'add' && action !== 'remove' && action !== 'set_context') return apiErr(400, 'bad_action', 'action 只能是 add、remove、set_context')
     const id = cleanModelId(body.id)
-    if (!id) return apiErr(400, 'bad_id', '模型名要 1–200 个字符，不能有空白、控制字符，也不能有 ⟦ ⟧')
+    if (!id) return apiErr(400, 'bad_id', '模型名要 1–200 个字符，中间的空格可以用，但不能有换行、制表符这类空白或控制字符，也不能有 ⟦ ⟧')
     const hasCtx = body.contextWindow !== undefined
     if (hasCtx && !isContextWindow(body.contextWindow)) return apiErr(400, 'bad_context', '上下文长度要是 1024 到 100000000 之间的整数')
     if (action === 'set_context' && !hasCtx) return apiErr(400, 'bad_context', '上下文长度要是 1024 到 100000000 之间的整数')

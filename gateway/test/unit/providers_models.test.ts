@@ -26,7 +26,7 @@ const run = (r: Partial<FetchModelsRequest> & { baseURL: string }, timeoutMs = 5
 
 test('OpenAI：GET <地址>/models 带 Bearer 与 Accept；id 去空白、去重保序、不合格跳过、非 ASCII 照收；上下文按字段顺序取第一个合格整数', async () => {
   const s = serve(() => json({ object: 'list', data: [
-    { id: ' a ', max_input_tokens: 500, context_length: 32000 }, { id: 'a' }, { id: 'bad id' }, { id: '模型' }, { id: 'x'.repeat(201) },
+    { id: ' a ', max_input_tokens: 500, context_length: 32000 }, { id: 'a' }, { id: 'bad\tid' }, { id: '模型' }, { id: 'x'.repeat(201) },
     { id: 'b', input_token_limit: 2048 }, { id: 'c', context_window: 99999999999 }, { id: 'd', max_model_len: 4096.5 }, { id: '<b>' }, 'not-an-object',
   ] }))
   const r = await run({ baseURL: `${s.url}/v1` })
@@ -93,7 +93,7 @@ test('302：按 redirect 失败，不跟随（跳转目标收到 0 个请求）'
 
 test('格式不认识：不是 JSON、没有 data/models 数组、全部 id 不合格、回包超过 4 MiB；成功但 0 个：empty', async () => {
   const big = JSON.stringify({ data: [{ id: 'm', pad: 'x'.repeat(4 * 1024 * 1024) }] })
-  for (const body of ['<html>', '{"object":"list"}', JSON.stringify({ data: [{ id: 'bad id' }, { name: 'n' }] }), big]) {
+  for (const body of ['<html>', '{"object":"list"}', JSON.stringify({ data: [{ id: 'bad\tid' }, { name: 'n' }] }), big]) {
     const s = serve(() => new Response(body, { headers: { 'content-type': 'application/json' } }))
     expect(await run({ baseURL: `${s.url}/v1` })).toEqual({ ok: false, reason: 'bad_response', status: null })
   }
