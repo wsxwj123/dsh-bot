@@ -1,17 +1,18 @@
-{# bot 二次编辑弹窗（INTERFACE §10）：bot 状态页与供应商与模型页共用一份。
+{# bot 二次编辑弹窗（INTERFACE §10、§13c）：bot 状态页与供应商与模型页共用一份。
    两个页面的脚本各自定义了 $（getElementById），所以本片段必须**在页面脚本之后** include。
-   保存成功后调页面自己定义的 onBotEdited()（有就调，没有就算了）。 #}
+   保存成功后把一句提示交给页面自己定义的 onBotEdited(text)（有就调，没有就算了）。
+   版式：居中靠全站公共样式里那条 dialog 规则（_nav.html）；宽、高、内部滚动写在内层卡片上。 #}
 <dialog id="editDialog">
-  <div class="card" style="margin:0;min-width:min(560px,92vw)">
+  <div class="card" style="margin:0;width:min(720px,92vw);max-height:88vh;overflow:auto">
     <h2 style="margin:0 0 4px">编辑 bot</h2>
     <div class="muted" id="edit-who"></div>
     <label for="edit-name">显示名</label>
     <input id="edit-name" autocomplete="off" spellcheck="false" placeholder="1-64 字，不含控制字符">
-    <label for="edit-persona">人设正文（最多 64 KiB）</label>
-    <textarea id="edit-persona" rows="10"
-      style="width:100%;padding:9px 11px;font-size:14px;font-family:var(--font-body);
-             color:var(--ink);background:transparent;border:1px solid var(--hairline-strong);
-             border-radius:8px"></textarea>
+    <label for="edit-persona">人设正文（最多 65536 个字）</label>
+    <textarea id="edit-persona" rows="16"
+      style="width:100%;min-height:320px;resize:vertical;padding:9px 11px;font-size:14px;
+             font-family:var(--font-body);color:var(--ink);background:transparent;
+             border:1px solid var(--hairline-strong);border-radius:8px"></textarea>
     <div id="voice-box">
       <label for="edit-voice">音色 id（留空 = 这只 bot 不发语音）</label>
       <input id="edit-voice" autocomplete="off" spellcheck="false"
@@ -25,31 +26,51 @@
   </div>
 </dialog>
 <script>
-let editCtx = null;                 // {botId, btn}：btn 是打开弹窗的那枚行内按钮
+// 三格与请求体的键一一对应。原值与现值都经 editValues() 从输入框里读出来：输入框会把
+// 换行之类规整掉，拿接口给的原串去比的话，没动过的格子也会被当成改过而交上去。
+const EDIT_FIELDS = {display_name: 'edit-name', persona: 'edit-persona', fish_voice_id: 'edit-voice'};
+// {botId, btn, seq, orig}：btn 是打开弹窗的那枚行内按钮；orig 是读成功时三格的原值，
+// 没读成功就一直是 null（那就没有东西可比，不许存）
+let editCtx = null;
+// 每次打开加一。读取的响应回来先核对这个号：对不上就是别的那一次打开发出去的，整个丢掉
+let editSeq = 0;
 
-// 打开：先把三格清空显示「读取中…」，GET 回来再填。读失败就把原因留在消息位
-// （保存按钮照旧能点，但提交后同样会被后端拒，所以不给"假装成功"的余地）。
+function editValues() {
+  const now = {};
+  for (const key of Object.keys(EDIT_FIELDS)) now[key] = $(EDIT_FIELDS[key]).value;
+  return now;
+}
+
+// 打开：三格清空、保存禁用、显示「读取中…」，GET 回来再填。保存按钮只在读成功之后才放开：
+// 读不出现在的内容就没有原值可比，这时候让人存，等于拿空着的格子去盖掉人设与音色。
 async function openEdit(botId, btn) {
   const dlg = $('editDialog');
-  editCtx = {botId: botId, btn: btn || null};
+  // 上一次打开没走 closeEdit 就被这一次顶掉了：把它那枚行内按钮还回去
+  if (editCtx && editCtx.btn && editCtx.btn !== btn) editCtx.btn.disabled = false;
+  const seq = ++editSeq;
+  editCtx = {botId: botId, btn: btn || null, seq: seq, orig: null};
   if (btn) btn.disabled = true;
+  $('edit-save').disabled = true;
   $('edit-who').textContent = botId;
   $('edit-name').value = '';
   $('edit-persona').value = '';
   $('edit-voice').value = '';
   $('edit-msg').textContent = '读取中…';
-  dlg.showModal();
+  if (!dlg.open) dlg.showModal();
   const r = await hubApi('/hub/api/bots/' + encodeURIComponent(botId) + '/edit');
-  if (!dlg.open || !editCtx) return;          // 读回来之前用户已经关掉了
+  // 响应要对得上号：弹窗已经关了，或者现在开着的不是发出这次读取的那一次打开，什么都不填
+  if (!dlg.open || !editCtx || editCtx.seq !== seq) return;
   if (r.status !== 200) {
-    $('edit-msg').textContent = (r.body && (r.body.detail || r.body.error))
-                                || ('读取失败（' + r.status + '）');
-    return;
+    $('edit-msg').textContent = '读不出这只 bot 现在的内容，所以不能在这里改：'
+      + ((r.body && (r.body.detail || r.body.error)) || ('读取失败（' + r.status + '）'));
+    return;                                     // 保存保持禁用
   }
   const b = r.body || {};
   $('edit-name').value = b.display_name || '';
   $('edit-persona').value = b.persona || '';
   $('edit-voice').value = b.fish_voice_id || '';
+  editCtx.orig = editValues();
+  $('edit-save').disabled = false;
   $('edit-msg').textContent = '';
 }
 
@@ -60,20 +81,34 @@ function closeEdit() {
   editCtx = null;
 }
 
-// 三个键一次提交（后端按「给了哪个键改哪个」处理）；成功后重拉本页。
+// 只提交改过的键（后端是「给哪个键改哪个」）：三格现在的值与读成功时记下的原值比，
+// 不一样的才放进请求体，一个都没改就不发请求。以前每次三个键全交，读失败后填个名字
+// 点保存，空着的人设框就把人设写成了空文件。
 async function saveEdit() {
-  if (!editCtx) return;
+  const ctx = editCtx;
+  if (!ctx || !ctx.orig) return;                // 按钮此时本来就是禁用的，这里再把一道关
+  const now = editValues();
+  const body = {};
+  for (const key of Object.keys(now)) {
+    if (now[key] !== ctx.orig[key]) body[key] = now[key];
+  }
+  if (!Object.keys(body).length) { $('edit-msg').textContent = '没有改动'; return; }
   const btn = $('edit-save');
   btn.disabled = true;
   $('edit-msg').textContent = '保存中…';
-  const body = {display_name: $('edit-name').value, persona: $('edit-persona').value,
-                fish_voice_id: $('edit-voice').value};
-  const r = await hubApi('/hub/api/bots/' + encodeURIComponent(editCtx.botId) + '/edit',
+  const r = await hubApi('/hub/api/bots/' + encodeURIComponent(ctx.botId) + '/edit',
                          {method: 'POST', body: JSON.stringify(body)});
+  const said = ctx.botId + '：' + ((r.body && r.body.text) || '已保存');
+  if (editCtx !== ctx) {
+    // 保存还没回来，这一次打开就已经被关掉了（现在开着的可能是另一只）：弹窗不是它的，
+    // 不去动；存成功了页面仍然要知道，好重拉名单
+    if (r.status === 200 && typeof onBotEdited === 'function') onBotEdited(said);
+    return;
+  }
   btn.disabled = false;
   if (r.status === 200) {
     closeEdit();
-    if (typeof onBotEdited === 'function') onBotEdited();
+    if (typeof onBotEdited === 'function') onBotEdited(said);
     return;
   }
   $('edit-msg').textContent = (r.body && (r.body.detail || r.body.error || r.body.text))
@@ -82,6 +117,7 @@ async function saveEdit() {
 
 $('edit-save').onclick = saveEdit;
 $('edit-cancel').onclick = closeEdit;
+// 关闭只有三条路：取消、Esc、保存成功。点弹窗外面不关：拖着选文字时在框外松手，
+// 会把整篇输入丢掉。
 $('editDialog').addEventListener('cancel', (e) => { e.preventDefault(); closeEdit(); });
-$('editDialog').addEventListener('click', (e) => { if (e.target === $('editDialog')) closeEdit(); });
 </script>
