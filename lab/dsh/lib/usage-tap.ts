@@ -139,7 +139,15 @@ export function deepseekUpstream(path: string): string {
   return `${root}${path}`
 }
 
-export function startUsageTap(opts: { port: number; upstream: string | ((path: string) => string); logBodies?: boolean }): Tap {
+export function startUsageTap(opts: {
+  port: number
+  upstream: string | ((path: string) => string)
+  logBodies?: boolean
+  /** 转发前改请求头。用来把占位密钥换成真密钥：真密钥只留在本进程里，不用写进 dsh 读的凭据文件 */
+  rewriteHeaders?: (headers: Headers) => void
+  /** 每个响应读完后拿到完整正文（流式的是全部 SSE 文本），给调用方在本进程里解析；本代理不落盘 */
+  onResponse?: (rec: TapRecord, text: string) => void
+}): Tap {
   const records: TapRecord[] = []
   const inflight = new Set<Promise<void>>()
   let n = 0
@@ -158,6 +166,7 @@ export function startUsageTap(opts: { port: number; upstream: string | ((path: s
       headers.delete('host')
       headers.delete('content-length')
       headers.delete('accept-encoding') // 让上游回明文，便于边转发边解析
+      opts.rewriteHeaders?.(headers)
       let parsed: any = undefined
       if (reqBody && reqBody.byteLength > 0) { try { parsed = JSON.parse(new TextDecoder().decode(reqBody)) } catch {} }
       const id = ++n
@@ -179,13 +188,14 @@ export function startUsageTap(opts: { port: number; upstream: string | ((path: s
         const text = await new Response(toParse).text()
         rec.usage = parseUsage(text)
         if (rec.purpose === 'compaction') rec.outputText = parseOutputText(text)
+        opts.onResponse?.(rec, text)
       })().catch(() => {}).finally(() => inflight.delete(p))
       inflight.add(p)
       return new Response(toClient, { status: resp.status, headers: outHeaders })
     },
   })
   return {
-    port: server.port,
+    port: server.port ?? 0,
     records,
     stop: () => server.stop(true),
     settled: async () => { await Promise.all([...inflight]) },
