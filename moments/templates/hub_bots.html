@@ -117,9 +117,11 @@ async function restartOne(botId, btn) {
 }
 
 // 操作区：编辑（仅新系统来源的行，弹窗见 _edit_bot.html）+ 重启（仅启用行）+ 停止/启用。
-// 停用了、进程却还在跑（state 是 online 或 starting）的行多一个「再停一次」（§13a 第 7 条）：
-// 这一行的开关已经变成「启用」，再点是反方向；同步被别的任务挡住或失败之后，得有一个
-// 只动这一只、同方向再交一次的入口。它走的就是「停止」那条路，确认框与之后的显示都一样。
+// 停用的行都有一个「再停一次」，不看 state（§13a 第 7 条）：这一行的开关已经变成「启用」，
+// 再点是反方向；同步被别的任务挡住或失败之后，得有一个只动这一只、同方向再交一次的入口。
+// 启动项文件还装着而进程此刻没在跑的行（显示已停用、离线）也要有入口把它停干净，不然它
+// 一恢复或下次登录就会跑起来。对已经停干净的行再点没有副作用，停用同步是幂等的。
+// 它走的就是「停止」那条路，确认框与之后的显示都一样。
 function actsCell(b, enabled, source) {
   const td = document.createElement('td');
   const box = document.createElement('div');
@@ -139,7 +141,7 @@ function actsCell(b, enabled, source) {
     rs.textContent = '重启';
     rs.addEventListener('click', () => restartOne(b.id, rs));
     box.appendChild(rs);
-  } else if (b.state === 'online' || b.state === 'starting') {
+  } else {
     const again = document.createElement('button');
     again.type = 'button';
     again.className = 'btn mini ghost';
@@ -215,7 +217,7 @@ async function setEnabled(botId, enabled, btn) {
 // 开关成功后的唯一显示入口（INTERFACE §13a）：按 sync.state 分三路，各说各的。
 // 只有 started 那一路接着轮询那一个任务；busy 与 skipped 不再发任何请求。
 // busy 按方向各指一个只动这一只的入口：启用方向是这一行本来就有的「重启」，
-// 停用方向是 actsCell 给停用而还在跑的行渲染的「再停一次」。
+// 停用方向是 actsCell 给停用的行渲染的「再停一次」。
 function showSync(botId, enabled, sync) {
   const head = botId + ' 的配置已改成' + (enabled ? '启用' : '停用');
   const state = sync && sync.state;
