@@ -23,6 +23,7 @@ SECRET_RE = re.compile(
     r"|pst-[\w-]+"
     r"|AIza[\w-]{20,}"
     r"|ghp_\w+"
+    r"|fk_[\w-]{5,}"                    # Fish Audio key 前缀（§6b 的形状判据太宽，这里只认前缀）
     r"|Bearer\s+\S+"
     r"|Authorization[^\n]*"
     r"|x-api-key[^\n]*"
