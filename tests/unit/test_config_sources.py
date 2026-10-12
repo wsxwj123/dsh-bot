@@ -43,6 +43,9 @@ def test_默认读两边_新系统在后(roots):
 
 def test_默认新系统目录跟HOME走(tmp_path, monkeypatch):
     monkeypatch.delenv("HUB_CONFIGS_DSH_DIR", raising=False)
+    # 测试总闸（tests/conftest.py）默认把 DSH_BOT_HOME 改道到临时目录；要量的是「两个都没设时
+    # 跟 HOME 走」，所以它也得删。HOME 下一行就钉在 tmp，默认路径落不到真家目录。
+    monkeypatch.delenv("DSH_BOT_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     assert cs.dsh_dir() == tmp_path / ".dsh-bot" / "configs"
 
