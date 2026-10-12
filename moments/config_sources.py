@@ -200,6 +200,23 @@ def effective_configs():
     return {name: _effective_of(copies) for name, copies in _copies_by_name().items()}
 
 
+def channel_dir(cfg):
+    """这份配置的频道目录：``bot_channel_path`` 把开头的 ``~`` 展开成家目录之后的值（§14）。
+
+    管理台里凡是拿这个键去拼路径、建目录、读写文件的地方都经这一处取。配置里可以写成
+    ``~/…``；拿到值不展开就去拼路径，会在进程的工作目录下建出一棵名字就叫 ``~`` 的目录，
+    通知文件写进那里，bot 收不到。
+
+    **只展开，不做别的规整**：本来就是绝对路径的原样返回，那些 bot 的行为逐字节不变。
+    没写（键缺失、不是字符串、空或纯空白）返回空串 —— 调用方拿到空串必须停手，
+    拿它去拼路径等于往工作目录里写。
+    """
+    raw = cfg.get("bot_channel_path") if isinstance(cfg, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    return os.path.expanduser(raw)
+
+
 def person_id(cfg):
     """这份配置在朋友圈里记的名字（新系统的 bot 用 life 别名，如 bot4 记 chenlulu）。"""
     return cfg.get("_life_id") or cfg["_bot_id"]

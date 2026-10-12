@@ -1692,7 +1692,7 @@ def _dm_bots():
                                                dirs=config_sources.roots()):
         if cfg.get("_source") != config_sources.SOURCE_DSH:
             continue
-        ch = cfg.get("bot_channel_path")
+        ch = config_sources.channel_dir(cfg)        # 管理台里只有这一种取法（§14）
         if ch and gateway_client.available(ch):
             out.append((cfg["_bot_id"], cfg.get("display_name") or cfg["_bot_id"], ch))
     return out

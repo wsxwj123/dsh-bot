@@ -219,8 +219,11 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
     if since_user_min is not None and since_user_min < 30:
         try:
             from chat_history import get_recent_dialog
-            chat_snippet = (get_recent_dialog(bot_cfg["bot_channel_path"],
-                                              days=1, max_chars=600) or "").strip()
+            from moments import config_sources
+            channel = config_sources.channel_dir(bot_cfg)      # 管理台里只有这一种取法（§14）
+            # 没写频道目录：与以前一样不带这段素材（不拿空串去读，那等于读工作目录）
+            chat_snippet = ((get_recent_dialog(channel, days=1, max_chars=600) or "").strip()
+                            if channel else "")
         except Exception:
             chat_snippet = ""
 
@@ -537,7 +540,10 @@ def _write_moment_image(bot_id: str, bot_cfg: dict, moment_id: int,
     if bot_id in disabled_ids_safe():
         sys.stderr.write(f"[moments.post] {bot_id} stopped, skip\n")
         return None
-    bot_dir = bot_cfg["bot_channel_path"]
+    from moments import config_sources
+    bot_dir = config_sources.channel_dir(bot_cfg)   # 展开开头的 ~（§14）
+    if not bot_dir:
+        raise KeyError("bot_channel_path")          # 没写频道目录：与以前一样投不了
     chat_id = str(bot_cfg.get("chat_id", ""))
     if not chat_id:
         return None

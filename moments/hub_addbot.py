@@ -460,8 +460,11 @@ def _env_paths(cfg):
     bot_id = cfg["_bot_id"]
     paths = [os.path.join(channels_dir(), bot_id, ".env")]
     raw = cfg.get("bot_channel_path")
-    if isinstance(raw, str) and raw.strip():
-        paths.append(os.path.join(os.path.expanduser(raw.strip()), ".env"))
+    if isinstance(raw, str):
+        # 展开只有 config_sources 那一处（§14）；先去首尾空白是这里既有的口径，保持不变
+        written = config_sources.channel_dir({"bot_channel_path": raw.strip()})
+        if written:
+            paths.append(os.path.join(written, ".env"))
     home = config_sources.dsh_bot_dir(bot_id)
     if home is not None:
         paths.append(os.path.join(str(home), "channel", ".env"))
@@ -587,14 +590,6 @@ def _yaml_str(value):
     return json.dumps(value, ensure_ascii=False)
 
 
-def _channel_path_literal(target):
-    """`bot_channel_path`：能收进 `~` 就收（与既有 `configs/*.yml` 同形），否则给绝对路径。"""
-    home = os.path.expanduser("~")
-    if target == home or target.startswith(home + os.sep):
-        return "~" + target[len(home):]
-    return target
-
-
 def _new_namespace():
     """uuid4 + 全表去重。namespace 撞车 = 两个 bot 共用会话历史，所以去重是契约的一部分
     （撞的概率是 0，这个 while 只是把契约写进代码里）。扫描范围是**两套根**：
@@ -612,6 +607,10 @@ def _render_yml(fields, target):
 
     `id` 与 `display_name` 同一种写法，带双引号（§7）：`null`、`true`、`no`、`on` 这类名字
     形状合法，裸写的话读回来是空值或布尔值，安装脚本拿到的就不是这只的名字了。
+
+    `bot_channel_path` 写**绝对路径**（§7、§14）。此前能收进 `~` 就收成 `~/…`，而管理台里
+    有几处拿到值不展开就去拼路径，在工作目录下建出一棵名字叫 `~` 的目录。读的一侧已经
+    统一展开（`config_sources.channel_dir`），写的一侧也不再产出那个形状。
     """
     return ("id: %s\n"
             "display_name: %s\n"
@@ -620,7 +619,7 @@ def _render_yml(fields, target):
             "dispatcher_port: %d\n"
             "namespace_uuid: %s\n"
             % (_yaml_str(fields["bot_id"]), _yaml_str(fields["display_name"]),
-               _yaml_str(_channel_path_literal(target)),
+               _yaml_str(os.path.abspath(target)),
                fields["chat_id"], fields["port"], _new_namespace()))
 
 
@@ -1043,7 +1042,8 @@ def _channel_dir(bot_id, root):
     """
     raw = _top_str(root, "bot_channel_path").strip()
     home = os.path.join(os.path.realpath(str(config_sources.dsh_home())), "bots", bot_id)
-    channel = os.path.realpath(os.path.expanduser(raw) if raw else os.path.join(home, "channel"))
+    written = config_sources.channel_dir({"bot_channel_path": raw})   # 展开只有那一处（§14）
+    channel = os.path.realpath(written or os.path.join(home, "channel"))
     if channel != home and not channel.startswith(home + os.sep):
         raise HubError(409, "bad_channel_path", BAD_CHANNEL_PATH_DETAIL)
     return channel

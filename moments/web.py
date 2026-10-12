@@ -485,7 +485,9 @@ def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
     只是判定改问"算不算在跑"那一处（``config_sources.is_running``）—— 旧版问的是
     只扫旧根的单根口径，迁到新系统的 bot 会被误判成停的。
     """
-    bot_dir = cfg["bot_channel_path"]
+    bot_dir = config_sources.channel_dir(cfg)       # 展开开头的 ~（§14），不然会建出一棵叫 ~ 的目录
+    if not bot_dir:
+        raise KeyError("bot_channel_path")          # 没写频道目录：与以前一样投不了，绝不往工作目录里写
     chat_id = str(cfg["chat_id"])
     target = cfg["_bot_id"] if "_bot_id" in cfg else cfg.get("id")
     if not config_sources.is_running(target):
@@ -680,7 +682,9 @@ def _trigger_bot_see_user_moment(bot_cfg: dict, moment_id: int, text: str,
     """
     import json as _json
     bot_id = _moments_id(bot_cfg)
-    bot_dir = bot_cfg["bot_channel_path"]
+    bot_dir = config_sources.channel_dir(bot_cfg)   # 展开开头的 ~（§14）
+    if not bot_dir:
+        raise KeyError("bot_channel_path")          # 没写频道目录：与以前一样投不了
     chat_id = str(bot_cfg.get("chat_id", ""))
     if not chat_id:
         return
