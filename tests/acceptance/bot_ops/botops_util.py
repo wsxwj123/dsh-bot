@@ -99,6 +99,30 @@ def tree_bytes(root):
 GATE_404_DETAIL = "没有这个新系统的 bot（这一页只管新系统的 bot）"
 
 
+#: §10「落点校验」命中时的 detail（第 7 稿，逐字）
+BAD_CHANNEL_PATH_DETAIL = ("频道目录不在这只 bot 的新系统家目录里（bot_channel_path 或软链指到了外面），"
+                           "这一页不读也不改它")
+
+#: §0 第 7 条的保留名：`com.dsh-bot.` 前缀下不属于 bot 的单元名
+RESERVED_IDS = ("jiwen", "director", "voicecall")
+
+
+def argv_blob(fake):
+    """假件（假 launchctl 或假 bun）全部调用的参数拼成一段文字，给「没提到某个单元」的断言用。"""
+    return "\n".join(" ".join(str(a) for a in (c.get("argv") or [])) for c in fake.calls())
+
+
+def assert_units_never_named(fake, *bot_ids):
+    """假件的调用记录里，一次都没提到 `com.dsh-bot.<id>` 这些单元名（只读的 print 也算提到）。
+
+    按子串找：单元名后面跟着换行、`.plist`、别的参数，都逃不掉。
+    """
+    blob = argv_blob(fake)
+    for bot_id in bot_ids:
+        unit = "com.dsh-bot.%s" % bot_id
+        assert unit not in blob, ("假件的调用记录里出现了不该碰的单元 %s" % unit, fake.calls())
+
+
 def freeze_roots(*roots):
     """给几个目录各拍一张快照：文件字节 + 每个条目的（类型, 大小, 纳秒 mtime）+ 根自己的 mtime。
 
