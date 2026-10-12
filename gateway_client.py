@@ -71,14 +71,43 @@ def model_set(channel_dir: str, spec: str) -> tuple[bool, dict]:
 PROVIDER_REFRESH_TIMEOUT = 55.0
 
 
-def provider_refresh(channel_dir: str, name: str) -> tuple[int, dict]:
+def provider_refresh(channel_dir: str, name: str, only: list | None = None) -> tuple[int, dict]:
     """刷新一个自建供应商的模型列表（管理台用）。
 
     原样把网关的状态码与正文带回去（网关按 INTERFACE 3.8 返回 200/400/404/409/502/503）；
     连不上网关（URLError）或超时（TimeoutError）由调用方接住。
+
+    `only` 给了就转发（勾选落盘，INTERFACE §11b）；缺省时请求体仍只有 `{"name"}` ——
+    既有行为一字不变。
     """
-    return _call(channel_dir, "POST", "/v1/provider/refresh", {"name": name},
+    body = {"name": name}
+    if only is not None:
+        body["only"] = only
+    return _call(channel_dir, "POST", "/v1/provider/refresh", body,
                  timeout=PROVIDER_REFRESH_TIMEOUT)
+
+
+def provider_preview(channel_dir: str, name: str) -> tuple[int, dict]:
+    """只拉不写：预览一个自建供应商这次能拉到哪些模型（管理台用，INTERFACE §11a）。
+
+    网关侧是只读端点（不写盘、不更新 lastRefresh、不占 refreshing 去重），超时口径
+    与刷新一致 —— 它同样要真的去拉一遍上游目录。
+    """
+    return _call(channel_dir, "POST", "/v1/provider/preview", {"name": name},
+                 timeout=PROVIDER_REFRESH_TIMEOUT)
+
+
+# 测试连接的超时：契约 §13 = 网关单次请求 15 秒（modelFetchTimeoutMs）+ 10 秒余量。
+PROVIDER_TEST_TIMEOUT = 25.0
+
+
+def provider_test(channel_dir: str, name: str) -> tuple[int, dict]:
+    """测一个自建供应商通不通（管理台用，INTERFACE §12a）：网关发一次最小对话请求。
+
+    只读端点，超时 25 秒；连不上 / 超时由调用方按只读文案接住。
+    """
+    return _call(channel_dir, "POST", "/v1/provider/test", {"name": name},
+                 timeout=PROVIDER_TEST_TIMEOUT)
 
 
 # 写端点的超时：INTERFACE-管理台UI 2.2 = 55 秒（贴着网关最坏情况，45 秒拉模型列表加 10 秒等锁）。
