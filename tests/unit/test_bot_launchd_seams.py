@@ -104,10 +104,12 @@ def world(tmp_path, monkeypatch):
         monkeypatch.setenv("HUB_CONFIGS_DIR", str(d["legacy2"]))
         monkeypatch.setenv("HOME", str(d["home2"]))
 
-    def bot(root, bot_id, enabled=None):
+    def bot(root, bot_id, enabled=None, **fields):
         text = "id: %s\n" % bot_id
         if enabled is not None:
             text += "enabled: %s\n" % ("true" if enabled else "false")
+        for key in sorted(fields):
+            text += "%s: %s\n" % (key, fields[key])
         (root / ("%s.yml" % bot_id)).write_text(text, encoding="utf-8")
 
     def beat(home, bot_id, pid=4242):
@@ -466,3 +468,63 @@ def test_restart_group_回落bootstrap与失败行都用受理时的目录(world
     assert boots == ["bootstrap gui/%d %s" % (os.getuid(),
                                               world.agents1 / "com.dsh-bot.abot.plist")]
     assert world.b.calls() == []
+
+
+# ------------------------------------------------------------ 列表的 dsh 行判活（§2 / §1a 末段）
+
+def _swap_when_probe_starts(world, monkeypatch):
+    """让每个 dsh 探活线程一开跑就先把环境换掉，再去判活。
+
+    列表接口有 2 秒预算，超出预算的探活线程会在响应之后才收尾，那时环境可能已经变了。
+    这里把「环境变了」提前到线程开跑的那一刻，量它用的是不是请求线程里解析的那一份。
+    """
+    from moments import bots_client as bc
+    real = bc._dsh_probe
+
+    def late(bot_id, *rest):
+        world.swap()
+        return real(bot_id, *rest)
+
+    monkeypatch.setattr(bc, "_dsh_probe", late)
+    return bc
+
+
+def test_列表探活_心跳读的是请求线程里解析的家目录(world, monkeypatch):
+    world.bot(world.dsh, "xbot", dispatcher_port=17951)
+    world.beat(world.h1, "xbot", pid=11)
+    world.beat(world.h2, "xbot", pid=22)
+    bc = _swap_when_probe_starts(world, monkeypatch)
+    rows = bc.probe_bots(bc.list_bots(), bc.bot_sources())
+    assert [(r["id"], r["state"], r["pid"]) for r in rows] == [("xbot", "online", 11)]
+    assert world.a.calls() == [] and world.b.calls() == []
+
+
+def test_列表探活_print打到请求线程里解析的那支(world, monkeypatch):
+    world.bot(world.dsh, "xbot", dispatcher_port=17951)
+    bc = _swap_when_probe_starts(world, monkeypatch)
+    rows = bc.probe_bots(bc.list_bots(), bc.bot_sources())
+    assert [(r["state"], r["pid"]) for r in rows] == [("starting", 4242)]
+    assert world.a.verbs() == ["print"] and world.b.calls() == []
+
+
+def test_列表探活_几只dsh行共用一次解析_没有dsh行就不解析(world, monkeypatch):
+    from moments import bots_client as bc
+    real, seen = bl.resolve_seams, []
+
+    def counting():
+        seen.append(1)
+        return real()
+
+    monkeypatch.setattr(bl, "resolve_seams", counting)
+    world.bot(world.dsh, "abot", dispatcher_port=17951)
+    world.bot(world.dsh, "bbot", dispatcher_port=17952)
+    world.beat(world.h1, "abot")
+    world.beat(world.h1, "bbot")
+    rows = bc.probe_bots(bc.list_bots(), bc.bot_sources())
+    assert [r["state"] for r in rows] == ["online", "online"]
+    assert len(seen) == 1
+    del seen[:]
+    monkeypatch.setattr(bc, "_probe_one", lambda port: None)        # 其余行：不真发本机探活
+    assert bc.probe_bots([{"id": "plainbot", "display_name": "plainbot"}], {})[0]["state"] in (
+        "offline", "unknown")
+    assert seen == []
