@@ -48,7 +48,10 @@ def test_停用且心跳新鲜_print说找不到服务_pid是null(client, sandbo
 
 
 def test_停用且心跳新鲜_print说在运行_是online(client, sandbox, heartbeat, launchctl):
-    """配置说停、进程却还在：如实显示在线（页面据此给出「再停一次」，§13a 第 7 条）。"""
+    """配置说停、进程却还在：如实显示在线。
+
+    页面上的「再停一次」第 9 稿起不看这一列，停用的行恒有（§13a 第 7 条，见 test_pages_draft9.py）。
+    """
     u.dsh_bot(sandbox.dsh_cfg, BOT, enabled=False)
     heartbeat.write(BOT, pid=4242)
     launchctl.set_default(installed=True, running=True, pid=4242)
