@@ -1908,7 +1908,17 @@ def _dm_check_base_url(raw):
     这里调的就是那个私有函数，判定与逃生门都跟老路径同一份；**不要**在这另写判据。
     返回形状按本段的写端点（``{"ok","error","text"}``），错误码用网关对同一件事的
     ``bad_url``，正文是 ``_check_base_url`` 给出的固定原因（不含用户输入）。
+
+    内网判定之前先看这串地址本身（§11e）：含反斜杠、``@``、任何空白字符、控制字符
+    （U+0000 到 U+001F、U+007F）就拒绝，不往下判。管理台用 ``urlsplit`` 取主机，网关按另
+    一套规则拆地址：``http://127.0.0.1:8317\\@example.com/..`` 这里认出的主机是
+    ``example.com``，网关认出的是 ``127.0.0.1``，内网判定就被绕过去了。两边拆得出分歧的
+    正是这几类字符，所以带着它们的地址一律不进判定。这一格只加在模型页这条路径上，
+    旧系统供应商页共用的那个判定函数不动。
     """
+    if isinstance(raw, str) and any(ch in "\\@" or ch.isspace() or ord(ch) < 0x20
+                                    or ord(ch) == 0x7f for ch in raw):
+        return _dm_bad(400, "bad_url", "接口地址里不能有反斜杠、@ 或空白字符")
     try:
         provider_model._check_base_url(
             raw, allow_private=os.environ.get("HUB_ALLOW_PRIVATE_BASE_URL") == "1")
