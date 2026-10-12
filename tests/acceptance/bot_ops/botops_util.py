@@ -74,6 +74,96 @@ def snapshot_tree(root):
     return out
 
 
+def tree_bytes(root):
+    """递归读一个目录：相对路径 -> 文件字节（目录记 None）。用于「逐字节没变」断言。
+
+    目录不存在返回 None。读不出来的文件记成 ("unreadable", 权限位)，照样能比。
+    """
+    root = Path(root)
+    if not root.exists():
+        return None
+    out = {}
+    for p in sorted(root.rglob("*")):
+        rel = str(p.relative_to(root))
+        if p.is_dir():
+            out[rel] = None
+            continue
+        try:
+            out[rel] = p.read_bytes()
+        except OSError:
+            out[rel] = ("unreadable", _stat.S_IMODE(p.stat().st_mode))
+    return out
+
+
+#: §4b 第 3 格与 §10 的 404 共用的那句 detail（同一道放行闸、同一句话）
+GATE_404_DETAIL = "没有这个新系统的 bot（这一页只管新系统的 bot）"
+
+
+def freeze_roots(*roots):
+    """给几个目录各拍一张快照：文件字节 + 每个条目的（类型, 大小, 纳秒 mtime）+ 根自己的 mtime。
+
+    字节用来断言「逐字节没变」；mtime 用来抓「内容一样但被重写过」与「建了又删的临时文件」
+    （原子写会动目录的 mtime）。目录不存在也记得住（之后冒出来算变了）。
+    """
+    out = []
+    for r in roots:
+        r = Path(r)
+        own = r.stat().st_mtime_ns if r.exists() else None
+        out.append((r, tree_bytes(r), snapshot_tree(r), own))
+    return out
+
+
+def assert_roots_untouched(frozen):
+    for root, data, meta, own in frozen:
+        assert tree_bytes(root) == data, "%s 下的文件字节变了（或多了、少了文件）" % root
+        assert snapshot_tree(root) == meta, "%s 下有文件被重写过（字节一样，mtime 变了）" % root
+        now = root.stat().st_mtime_ns if root.exists() else None
+        assert now == own, "%s 这个目录被写过（建过或删过文件）" % root
+
+
+def assert_no_job_left(client, monkeypatch, tmp):
+    """「没有后台任务产生」的可观察面：此刻再发一次重启全部，必须被受理。
+
+    重启全部、单只重启、开关同步共用一把互斥（§4b）。前一个请求要是偷偷起了任务且还在跑，
+    这里会拿到 409 restart_in_progress。探测走覆盖命令：设了 HUB_RESTART_CMD 可用性恒真（§1），
+    整段换成执行这条命令、不发任何 launchctl（§3），所以不依赖平台与配置根，也不会弄脏调用方
+    对假 launchctl「零调用」的断言。探测自己起的那个任务等到终态才返回。
+    """
+    probe = Path(tmp) / "mutex-probe.txt"
+    monkeypatch.setenv("BOTOPS_PROBE", str(probe))
+    monkeypatch.setenv("HUB_RESTART_CMD",
+                       python_cmd("import os;open(os.environ['BOTOPS_PROBE'],'w').write('probe')"))
+    try:
+        r = client.post("/hub/api/bots/restart")
+        body = r.get_json()
+        assert r.status_code == 202, (
+            "前一个请求留下了还在跑的后台任务（互斥被占着）：%s %r" % (r.status_code, body))
+        st = wait_job(client, body["job_id"])
+        assert st["state"] == "done", st
+    finally:
+        monkeypatch.delenv("HUB_RESTART_CMD", raising=False)
+
+
+def assert_gate_rejected(resp, frozen, launchctl, client, monkeypatch, tmp, calls_before=0):
+    """没过放行闸（§0 第 2 条）的请求，四件事一起成立。
+
+    ① 404 + 错误体逐字；② 快照里的配置根逐字节没变、也没被写过；
+    ③ 假 launchctl 零调用；④ 没有后台任务产生。
+
+    `calls_before`：发这个请求之前假 launchctl 已有的调用条数（场景里先做过别的动作时用），
+    「零调用」指的是这之后一条都没多。
+    """
+    assert resp.status_code == 404, (resp.status_code, resp.get_json())
+    assert resp.get_json() == {"error": "bot_not_found", "detail": GATE_404_DETAIL}, resp.get_json()
+    assert_roots_untouched(frozen)
+    extra = launchctl.calls()[calls_before:]
+    assert extra == [], ("被拒了还调了 launchctl", extra)
+    assert_no_job_left(client, monkeypatch, tmp)
+    extra = launchctl.calls()[calls_before:]
+    assert extra == [], ("被拒之后冒出了 launchctl 调用", extra)
+    assert_roots_untouched(frozen)
+
+
 def heartbeat_path(dsh_home, bot):
     return Path(dsh_home) / "bots" / bot / "state" / "heartbeat"
 

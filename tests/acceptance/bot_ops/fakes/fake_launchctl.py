@@ -13,8 +13,13 @@ conftest 生成的 shim 以
   kickstart_missing   true 时 kickstart 一律报「Could not find service」退出 3
   bootstrap_fail      true 时 bootstrap 退出 1
   print_text    直接指定 print 的原文（用来构造解析边界）
+  hold          {"cmd": 子命令, "reached": 文件, "release": 文件, "max_wait": 秒}
+                —— 该子命令的**第一次**调用先不返回：到达时建出 reached 文件，然后等
+                release 文件出现（或等满 max_wait）再照常往下做。用来构造「受理之后、
+                后续命令发出之前」这个窗口（INTERFACE §1a 场景乙）。只卡第一次，
+                之后的调用不受影响。
 
-每次调用向 log 追一行 JSON：{"argv": [...], "cmd": ..., "label": ...}。
+每次调用向 log 追一行 JSON：{"argv": [...], "cmd": ..., "label": ..., "t": 到达时刻}。
 绝不碰真 launchctl、真 LaunchAgents。
 """
 import json
@@ -75,6 +80,23 @@ def _log(path, rec):
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+def _hold_first(hold, cmd):
+    """hold 配置命中时，该子命令的第一次调用卡住等放行（见头部注释）。"""
+    if not hold or hold.get("cmd") != cmd:
+        return
+    reached, release = hold.get("reached"), hold.get("release")
+    if not reached or not release:
+        return
+    try:
+        fd = os.open(reached, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except OSError:
+        return                      # reached 已经在了：不是第一次，不卡
+    os.close(fd)
+    deadline = time.time() + float(hold.get("max_wait", 8))
+    while not os.path.exists(release) and time.time() < deadline:
+        time.sleep(0.02)
+
+
 def _emit(out, err, code):
     if out:
         sys.stdout.write(out)
@@ -90,7 +112,9 @@ def main():
     cfg = _load(cfg_path)
     cmd = rest[0] if rest else ""
     label = _label_of(rest)
-    _log(log_path, {"argv": rest, "cmd": cmd, "label": label})
+    _log(log_path, {"argv": rest, "cmd": cmd, "label": label, "t": time.time()})
+
+    _hold_first(cfg.get("hold") or {}, cmd)
 
     delay = (cfg.get("delay") or {}).get(cmd)
     if delay:

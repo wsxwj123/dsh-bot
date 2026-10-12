@@ -18,6 +18,7 @@
 平台敏感用例会误红 —— 这是契约含糊点，已在测试报告里点名。
 """
 
+
 def _require_total_gate():
     """自检：tests/conftest.py 的总闸没加载，就拒绝运行本目录的用例。
 
@@ -45,6 +46,7 @@ def _require_total_gate():
 
 _require_total_gate()
 del _require_total_gate
+
 import importlib
 import json
 import os
@@ -117,11 +119,36 @@ def _write_poison(dirpath, name):
     return p
 
 
-class FakeLaunchctl:
-    """假 launchctl：状态机 + 调用记录（见 fakes/fake_launchctl.py 的头部注释）。"""
+class _Hold:
+    """假 launchctl 上「第一次调用卡住等放行」的句柄。"""
 
-    def __init__(self, tmp_path):
-        self.dir = Path(tmp_path) / "fake-launchctl"
+    def __init__(self, reached, release):
+        self.reached = Path(reached)
+        self.released = Path(release)
+
+    def wait_reached(self, timeout=10.0):
+        """等被卡的那次调用真的到了假件里（后台线程已经发出它、正等它返回）。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.reached.exists():
+                return
+            time.sleep(0.01)
+        raise AssertionError("%.0f 秒内假 launchctl 没等到要卡的那条命令" % timeout)
+
+    def release(self):
+        self.released.parent.mkdir(parents=True, exist_ok=True)
+        self.released.write_text("go", encoding="utf-8")
+
+
+class FakeLaunchctl:
+    """假 launchctl：状态机 + 调用记录（见 fakes/fake_launchctl.py 的头部注释）。
+
+    `name` 不同就是互不相干的两个假件，各记各的调用（INTERFACE §1a 的 A、B 两支）。
+    """
+
+    def __init__(self, tmp_path, name="fake-launchctl"):
+        self.dir = Path(tmp_path) / name
+        self.holds = []
         self.cfg_path = self.dir / "cfg.json"
         self.log_path = self.dir / "calls.jsonl"
         self.cfg = {"default": {"installed": True, "running": True, "pid": 4242},
@@ -188,6 +215,18 @@ class FakeLaunchctl:
     def set_bootstrap_fail(self, flag=True):
         return self._set(bootstrap_fail=bool(flag))
 
+    def hold_first(self, cmd, max_wait=8.0):
+        """让 `cmd` 这个子命令的第一次调用先不返回，等测试放行。返回句柄。
+
+        max_wait 是假件自己的保险：没人放行也只卡这么久，必须小于被测代码的单次
+        launchctl 超时（§1：10 秒），否则那次调用会被判超时。
+        """
+        hold = _Hold(self.dir / ("hold-%s.reached" % cmd), self.dir / ("hold-%s.release" % cmd))
+        self._set(hold={"cmd": cmd, "reached": str(hold.reached),
+                        "release": str(hold.released), "max_wait": max_wait})
+        self.holds.append(hold)
+        return hold
+
     # -- 读记录 ----------------------------------------------------------
     def calls(self):
         if not self.log_path.exists():
@@ -207,6 +246,9 @@ class FakeLaunchctl:
 
     def labels(self):
         return [c.get("label") for c in self.calls()]
+
+    def calls_of(self, cmd):
+        return [c for c in self.calls() if c.get("cmd") == cmd]
 
     def state_of(self, bot):
         self._reload()
@@ -616,7 +658,29 @@ def _jobs_reach_terminal(request):
 
 @pytest.fixture
 def launchctl(tmp_path, monkeypatch):
-    return FakeLaunchctl(tmp_path).install(monkeypatch)
+    fake = FakeLaunchctl(tmp_path).install(monkeypatch)
+    yield fake
+    for hold in fake.holds:          # 保险：卡着的调用别拖到用例之外
+        hold.release()
+
+
+@pytest.fixture
+def spare_launchctl(tmp_path):
+    """再造几支假 launchctl，**不装进环境**：谁要换，自己 `monkeypatch.setenv`。
+
+    §1a 的场景要「受理之后把 HUB_LAUNCHCTL 换成另一支假件 B」，B 就从这里来。
+    """
+    made = []
+
+    def _make(name):
+        fake = FakeLaunchctl(tmp_path, name="fake-launchctl-%s" % name)
+        made.append(fake)
+        return fake
+
+    yield _make
+    for fake in made:
+        for hold in fake.holds:
+            hold.release()
 
 
 @pytest.fixture
@@ -650,19 +714,20 @@ def heartbeat(sandbox):
     tickers = []
 
     class HB:
-        def path(self, bot):
-            return u.heartbeat_path(sandbox.dsh_home, bot)
+        def path(self, bot, home=None):
+            """`home` 不给就是沙箱的新系统家目录；给了就写到那个家目录下（§1a 的 H2）。"""
+            return u.heartbeat_path(home or sandbox.dsh_home, bot)
 
-        def write(self, bot, pid=4242, at_ms=None):
-            u.write_heartbeat(self.path(bot), pid, at_ms)
+        def write(self, bot, pid=4242, at_ms=None, home=None):
+            u.write_heartbeat(self.path(bot, home), pid, at_ms)
 
         def raw(self, bot, text):
             p = self.path(bot)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
 
-        def tick(self, bot, pid=4242):
-            t = _HeartbeatTicker(self.path(bot), pid).start()
+        def tick(self, bot, pid=4242, home=None):
+            t = _HeartbeatTicker(self.path(bot, home), pid).start()
             tickers.append(t)
             return t
 
