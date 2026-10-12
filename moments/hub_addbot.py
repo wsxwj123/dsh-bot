@@ -5,14 +5,15 @@ A 只读校验（失败零副作用）→ B 落盘（可回滚）→ C 注册常
 
 改本文件前先读这三条红线：
 
-1. **token 的唯一落点是 `channels/<bot>/.env`**（F5）。`configs/<bot>.yml` 不含它；
-   响应、stdout/stderr、异常文本一律不含它 —— 所以对外只抛 ``type(e).__name__``，
-   绝不抛 ``str(e)``：requests 的异常消息里带完整请求 URL，而 URL 里就有 token。
+1. **token 的唯一落点是 `<DSH_BOT_HOME>/bots/<bot>/channel/.env`**（F5）。
+   `<dsh 配置根>/<bot>.yml` 不含它；响应、stdout/stderr、异常文本一律不含它 ——
+   所以对外只抛 ``type(e).__name__``，绝不抛 ``str(e)``：requests 的异常消息里
+   带完整请求 URL，而 URL 里就有 token。
 2. **回滚按精确清单 unlink**（R8-3），绝不 ``rm -rf`` 任何已存在目录 ——
-   用户的 bot 目录可能早就在那儿，一次手滑就是别人的聊天记录没了。
-3. **重启成功判定看探活，不看退出码**（F4）。老用户的 `restart-bots.sh` 是
-   `install.sh` 从 `.example` 拷出来的工作副本，里面是一张硬编码的 `BOTS=(...)` 名单，
-   门户调它会"正常重启了别人、退出码 0"，据此回 201 就是成功响应撒谎。
+   用户的 bot 家可能早就在那儿，一次手滑就是别人的聊天记录没了。
+3. **重启成功判定看 §5 判活，不看退出码**（F4）。autostart.ts 返回 0 只说明
+   launchd 受理了，进程可能秒退；等不到心跳/pid 对不上就不算活（实现见
+   `moments/bot_launchd.py`，本模块只等它判）。
 """
 import contextlib
 import json
@@ -96,11 +97,6 @@ def configs_dir():
 def _config_dirs():
     """新旧两套配置根（顺序 = 覆盖优先级）。注册表按"同名以新系统为准"合并。"""
     return [str(d) for _source, d in config_sources.roots()]
-
-
-def launchagents_dir():
-    return (os.environ.get("HUB_LAUNCHAGENTS_DIR")
-            or os.path.expanduser("~/Library/LaunchAgents"))
 
 
 def api_base():
