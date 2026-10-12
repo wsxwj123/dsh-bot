@@ -15,6 +15,7 @@ import json
 import os
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -137,18 +138,26 @@ def test_旧栈在跑的bot不进这一页(roots, live_status):
 
 
 def test_新系统在跑的bot_来源停用在线三个标注指向同一份(roots, live_status):
-    """新根那份在跑（live_status 端口）、旧根那份停用：来源说 dsh、不在 disabled、
-    状态 online，三者不许互相打脸。"""
+    """新根那份在跑、旧根那份停用：来源说 dsh、不在 disabled、状态 online。
+
+    第 2 稿起 dsh 行的「活」由**心跳文件**做证据，本机 `/status` 探活只留给其余行
+    （§2）—— 所以这里给它一份新鲜心跳，并钉住真服务必须收不到探活请求。
+    """
     legacy, dsh = roots
-    _write_bot(dsh, "bot2", display_name="李彤彤",
-               dispatcher_port=live_status.server_address[1])
+    port = live_status.server_address[1]
+    _write_bot(dsh, "bot2", display_name="李彤彤", dispatcher_port=port)
     _write_bot(legacy, "bot2", enabled=False, display_name="李彤彤",
                dispatcher_port=free_port())
+    hb = Path(os.environ["HOME"]) / ".dsh-bot" / "bots" / "bot2" / "state" / "heartbeat"
+    hb.parent.mkdir(parents=True, exist_ok=True)
+    hb.write_text(json.dumps({"at": int(time.time() * 1000), "pid": 4321}),
+                  encoding="utf-8")
     body = _hub_client().get("/hub/api/bots").get_json()
     row = [b for b in body["bots"] if b["id"] == "bot2"][0]
     assert body["sources"]["bot2"]["source"] == "dsh"
     assert "bot2" not in body["disabled"]
-    assert (row["port"], row["state"]) == (live_status.server_address[1], "online")
+    assert (row["port"], row["state"]) == (port, "online")
+    assert live_status.hits == [], "dsh 行发了本机探活：%s" % live_status.hits
 
 
 def test_接缝名单态_端口仍按注册表口径(roots, live_status, tmp_path, monkeypatch):
