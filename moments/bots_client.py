@@ -303,11 +303,15 @@ def _row(entry, port, status):
     return row
 
 
-def _dsh_probe(bot_id):
+def _dsh_probe(bot_id, seams=None):
     """dsh 行的判活（§2 第 1–3 条，实现在 ``bot_launchd.row_state``）：心跳新鲜 → online；
-    否则 ``launchctl print`` 说 running → starting；否则 offline。dsh 行**不发本机 HTTP 探活**。"""
+    否则 ``launchctl print`` 说 running → starting；否则 offline。dsh 行**不发本机 HTTP 探活**。
+
+    ``seams`` 是 ``probe_bots`` 在处理请求的线程里解析好的接缝（§1a）：探活线程只用它，
+    自己不读环境 —— 超出预算的线程会在响应之后才收尾。
+    """
     from moments import bot_launchd       # 延迟 import：与 bot_launchd 双向依赖，函数内解
-    state, pid = bot_launchd.row_state(bot_id)
+    state, pid = bot_launchd.row_state(bot_id, seams)
     return {"state": state, "pid": pid}
 
 
@@ -351,9 +355,15 @@ def probe_bots(entries, sources=None):
         else:
             plain_t.append((e, port))
     if dsh_t or plain_t:
+        seams = None
+        if dsh_t:
+            # §1a：判活用的 launchctl 路径与新系统家目录在这里（处理请求的线程）解析一次，
+            # 再交给各探活线程 —— 超预算的线程拖到响应之后，也不会回头去读环境。
+            from moments import bot_launchd   # 延迟 import：理由同 _dsh_probe
+            seams = bot_launchd.resolve_seams()
         ex = ThreadPoolExecutor(max_workers=min(PROBE_WORKERS, len(dsh_t) + len(plain_t)))
         try:
-            todo = [(e, p, True, ex.submit(_dsh_probe, e["id"])) for e, p in dsh_t]
+            todo = [(e, p, True, ex.submit(_dsh_probe, e["id"], seams)) for e, p in dsh_t]
             todo += [(e, p, False, ex.submit(_probe_one, p)) for e, p in plain_t]
             wait([t[3] for t in todo], timeout=PROBE_BUDGET)
             for e, port, is_dsh, fut in todo:
