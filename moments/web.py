@@ -509,41 +509,39 @@ def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
         speaker = "你" if c["from_user"] == bot_id else user_address
         history_lines.append(f"  {speaker}: {c['text']}")
     history_block = (
-        "\n【这条朋友圈下的历史评论（按时间从早到晚）】\n" + "\n".join(history_lines) + "\n"
+        "\n这条朋友圈下的历史评论（按时间从早到晚）：\n" + "\n".join(history_lines) + "\n"
         if history_lines else ""
     )
 
     is_public = (moment.get("visibility") or "public") != "private"
     _del_script = os.path.join(_REPO_ROOT, "scripts", "moment_delete_comment.py")
     public_warn = (
-        "⚠️【公开朋友圈泄密风险】\n"
-        f"原朋友圈是公开的，所有朋友都能看到评论。绝对不要在回复正文里用「{user_address}」这种亲密称呼，\n"
-        f"也不要透露你和 {user_address} 的私密关系。装作和 ta 是普通朋友、像回复任何一个评论一样。\n"
-        "如果发现自己之前的回复（在【历史评论】里）已经泄密了亲密称呼，请用 Bash 工具删除：\n"
+        "这条朋友圈是公开的，所有朋友都能看到评论。不要在回复里用"
+        f"「{user_address}」这种亲密称呼，也不要透露你和 {user_address} 的私密关系，就当回复一个普通朋友的评论。\n"
+        "如果之前的历史评论里已经泄密了亲密称呼，用 Bash 工具删掉：\n"
         f"  {PYTHON_BIN} {_del_script} <comment_id>\n"
     ) if is_public else (
-        "（这是私密朋友圈，仅 " + user_address + " 可见，可以放开亲密称呼。）\n"
+        "（这是私密朋友圈，只有 " + user_address + " 能看到，可以放开亲密称呼。）\n"
     )
 
     text = (
         f"[moment-interaction] {user_address}在你的朋友圈下评论了：\n"
         f"\"{user_text}\"\n\n"
-        f"原朋友圈（id={moment['id']}, {visibility_label}）：\"{moment_text}\"\n"
+        f"原朋友圈（{visibility_label}）：\"{moment_text}\"\n"
         f"{history_block}\n"
         f"{public_warn}\n"
-        f"请用 Bash 工具回写朋友圈评论：\n"
+        f"用 Bash 工具回写朋友圈评论：\n"
         f"{PYTHON_BIN} {MOMENT_REPLY_SCRIPT} {moment['id']} {comment_id} \"<你的回复内容>\" [--image <图绝对路径>]\n\n"
-        f"【可附图（推荐配合人设需要时）】\n"
-        f"- 如果评论场景适合配图（{user_address} 让你发图、自拍、晒东西、画面感强），\n"
-        f"  先用 novelai-skill 生图，再加 --image <路径> 参数\n"
+        f"可以配图：评论场景适合配图时（{user_address} 让你发图、自拍、晒东西、画面感强），"
+        f"先用 novelai-skill 生图，再加 --image <路径> 参数。\n"
         f"\n"
-        f"【👀 如果 {user_address} 在评论里说了「私发/私聊/发我/单独发我」等】\n"
-        f"- 这种情况下你**同时**用 reply() 工具发到 telegram 私聊（含图）\n"
-        f"- 朋友圈评论里只回一句简短的「私发了/已发」等表态，但真正的内容/图走 telegram\n"
-        f"- 否则不要在 telegram 私聊里说话\n"
+        f"如果 {user_address} 在评论里说了「私发/私聊/发我/单独发我」这类话：\n"
+        f"- 同时用 reply() 工具把内容（含图）发到 telegram 私聊\n"
+        f"- 朋友圈评论里只回一句简短的「私发了/已发」表态\n"
+        f"- 其他情况下不要在 telegram 私聊里说话\n"
         f"\n"
-        f"【其他要求】\n"
-        f"- 回复要符合人设和当下心情；公开圈不暴露亲密关系\n"
+        f"回复要求：\n"
+        f"- 符合人设和当下心情；公开圈不暴露亲密关系\n"
         f"- 顺着历史评论来，不要重复\n"
         f"- 不用「你」指代任何人，直接称呼或省略主语\n"
         f"- 朋友圈评论一句话即可"
@@ -707,7 +705,7 @@ def _trigger_bot_see_user_moment(bot_cfg: dict, moment_id: int, text: str,
             speaker = other_cfg.get("display_name", c["from_user"])
         others.append(f"  {speaker}: {c['text']}")
     history_block = (
-        "\n【这条朋友圈下其他人已经评过的】\n" + "\n".join(others) + "\n"
+        "\n这条朋友圈下其他人已经评过的：\n" + "\n".join(others) + "\n"
         if others else ""
     )
 
@@ -722,7 +720,7 @@ def _trigger_bot_see_user_moment(bot_cfg: dict, moment_id: int, text: str,
             lines = [f"  · [{datetime.fromtimestamp(m['ts']).strftime('%m-%d %H:%M')}] {m['text'][:60]}"
                      for m in items]
             user_history_block = (
-                f"\n【{user_address} 最近 7 天发过的其他朋友圈】（参考语境，不要直接复述）：\n"
+                f"\n{user_address} 最近 7 天发过的其他朋友圈（供参考，不要复述）：\n"
                 + "\n".join(lines) + "\n"
             )
 
@@ -731,22 +729,22 @@ def _trigger_bot_see_user_moment(bot_cfg: dict, moment_id: int, text: str,
         f"[user-moment] {user_address} 刚发了一条朋友圈（{label}）：\n"
         f"\"{text}\"{image_note}\n"
         f"{history_block}{user_history_block}\n"
-        f"你看到了。**自己决定**4 选 1（按真人朋友圈逻辑）：\n"
-        f"  A. **只点赞**（看到了但没话说，最常见的轻互动）：\n"
+        f"你看到了，可以从下面四种做法里挑一个：\n"
+        f"  A. 只点赞（看到了但没话说，最常见的轻互动）：\n"
         f"     {PYTHON_BIN} {moment_like_script} {moment_id}\n"
-        f"  B. **只评论**：\n"
+        f"  B. 只评论：\n"
         f"     {PYTHON_BIN} {MOMENT_REPLY_SCRIPT} {moment_id} 0 \"<你的评论>\" [--image <图>]\n"
-        f"  C. **点赞+评论**（确实有话想说）：先调 A 再调 B\n"
-        f"  D. **什么都不做**（无感、跟自己没关系）：什么也不写\n"
+        f"  C. 点赞+评论（确实有话想说）：先调 A 再调 B\n"
+        f"  D. 什么都不做（无感、跟自己没关系）\n"
         f"\n"
-        f"判断准则（按你的人设）：\n"
-        f"- 内容真戳到你/想呼应 → C（赞+评）\n"
-        f"- 内容轻量好玩但没特别想说 → A（点赞）\n"
-        f"- 看不太懂 / 跟你无关 → D（无视）\n"
+        f"按你的人设判断：\n"
+        f"- 内容真戳到你、想呼应 → C\n"
+        f"- 内容轻量好玩但没特别想说 → A\n"
+        f"- 看不太懂、跟你无关 → D\n"
         f"- 私密内容（仅你可见的）→ 倾向 C\n"
-        f"- 已有其他人评过 → **不要重复**同样意思；可以接话或换角度，或者改成 A 点赞\n"
+        f"- 已有其他人评过 → 不要重复同样的意思；可以接话或换角度，或者改成 A 点赞\n"
         f"- 不要在 telegram 私聊里说话\n"
-        f"- 评论里**不要**用「你」指代 {user_address}，直接称「{user_address}」或省略主语"
+        f"- 评论里不要用「你」指代 {user_address}，直接称「{user_address}」或省略主语"
     )
 
     ms = int(time.time() * 1000)
