@@ -85,6 +85,15 @@ const crebByEnv = (refs: Record<string, unknown> | null, env: string): string | 
   return typeof v === 'string' && v.trim() ? v.trim() : null
 }
 
+/**
+ * 「上游回了空目录算不算失败」的唯一判据（INTERFACE §11a、§11b），预览与刷新共用这一处。
+ * emptyIsOk 为真（预览、带 only 的刷新）时空目录按「拉到 0 个」往下走：有的供应商不提供模型目录、
+ * 只能手动加模型，预览放行而落盘拒绝的话，勾选弹窗里点确定永远失败。别的失败照旧算失败。
+ */
+function isFetchFailure(res: FetchModelsResult, emptyIsOk: boolean): res is Extract<FetchModelsResult, { ok: false }> {
+  return !res.ok && !(emptyIsOk && res.reason === 'empty')
+}
+
 export class ProviderService {
   private readonly now: () => number
   private readonly refreshing = new Set<string>()
@@ -298,7 +307,7 @@ export class ProviderService {
     if (!secret) return { status: 'key_missing' }
     const res: FetchModelsResult = await this.d.fetchModels({ api: found.entry.route.api, baseURL: found.entry.route.baseURL, key: secret })
     // 拉到 0 个（empty）在 preview 里不是失败：200 + 只含仅本地的行（§11a）
-    if (!res.ok && res.reason !== 'empty') {
+    if (isFetchFailure(res, true)) {
       this.d.log.warn('provider.models_failed', { name: found.name, reason: res.reason, status: res.status })
       return { status: 'failed', name: found.name, reason: res.reason, status2: res.status, ...(res.seconds !== undefined ? { seconds: res.seconds } : {}) }
     }
@@ -350,6 +359,7 @@ export class ProviderService {
    * 刷新模型列表：锁外拉（key 从凭据现读，读不到 = key_missing）→ 锁内比对 baseURL/api/keyRev 后写。
    * only 给出时按勾选落盘（INTERFACE §11b：落盘 =（拉到的 ∩ only）∪（列表 ∩ only），勾上而本次没
    * 拉到的并入 manualModels）；only 缺省时行为与扩展前一字不变。
+   * 上游回空目录：带 only 时按「拉到 0 个」照勾选落盘、记成成功；only 缺省时仍是失败（reason 为 empty）。
    */
   async refresh(name: string, only?: string[]): Promise<RefreshResult> {
     const key = normName(name)
@@ -365,7 +375,8 @@ export class ProviderService {
       if (!secret) return { status: 'key_missing' }
       const before = found.entry
       const res: FetchModelsResult = await this.d.fetchModels({ api: before.route.api, baseURL: before.route.baseURL, key: secret })
-      if (!res.ok) {
+      // 带 only 时空目录不算失败（§11b 第 8 稿，判据与 preview 同一个）；only 缺省时这一行等价于原来的 !res.ok
+      if (isFetchFailure(res, only !== undefined)) {
         this.d.log.warn('provider.models_failed', { name: found.name, reason: res.reason, status: res.status })
         try {
           await withProvidersLock(this.d.root, { waitMs: this.d.lockWaitMs, log: this.d.log, now: this.now }, () => {
@@ -384,7 +395,9 @@ export class ProviderService {
         this.d.log.info('provider.models_failed', { name: found.name, reason: res.reason, status: res.status })
         return { status: 'failed', name: found.name, reason: res.reason, status2: res.status, ...(res.seconds !== undefined ? { seconds: res.seconds } : {}) }
       }
-      this.d.log.info('provider.models_fetched', { name: found.name, count: res.models.length })
+      // 走到这里只有两种：拉成功；或带 only 而上游回空目录（按拉到 0 个落盘）
+      const fetched = res.ok ? res.models : []
+      this.d.log.info('provider.models_fetched', { name: found.name, count: fetched.length })
       return await withProvidersLock(this.d.root, { waitMs: this.d.lockWaitMs, log: this.d.log, now: this.now }, () => {
         const cur = this.read()
         const e = this.byNorm(cur, found.name)
@@ -394,12 +407,12 @@ export class ProviderService {
         }
         // only 缺省：与扩展前同一套（拉到的 + 手动加的，manual 不动）；带 only：按勾选集合算（§11b）
         const built: { models: ProviderModel[]; guessed: string[]; manual: string[] } = only === undefined
-          ? { ...this.buildModels(res.models, e.entry, null), manual: e.entry.meta.manualModels }
-          : this.buildSelected(res.models, e.entry, only)
+          ? { ...this.buildModels(fetched, e.entry, null), manual: e.entry.meta.manualModels }
+          : this.buildSelected(fetched, e.entry, only)
         const beforeIds = new Set(e.entry.route.models.map(m => m.id))
         const afterIds = new Set(built.models.map(m => m.id))
         // <N> 和 lastRefresh.count 都指"拉到的个数"（手动加的另算保留），新增/去掉按落盘集合与旧列表比
-        const fetchedCount = res.models.length
+        const fetchedCount = fetched.length
         const added = built.models.filter(m => !beforeIds.has(m.id)).length
         const removed = e.entry.route.models.filter(m => !afterIds.has(m.id)).map(m => m.id)
         const meta = { ...e.entry.meta, updatedAt: this.now(), guessedContext: built.guessed, manualModels: built.manual, lastRefresh: { at: this.now(), ok: true, count: fetchedCount, reason: null } }
