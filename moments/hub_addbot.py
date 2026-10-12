@@ -606,14 +606,18 @@ def _new_namespace():
 
 
 def _render_yml(fields, target):
-    """`configs/<bot>.yml`：**不含 token**（F5），只有注册表要的那几个键。"""
+    """`configs/<bot>.yml`：**不含 token**（F5），只有注册表要的那几个键。
+
+    `id` 与 `display_name` 同一种写法，带双引号（§7）：`null`、`true`、`no`、`on` 这类名字
+    形状合法，裸写的话读回来是空值或布尔值，安装脚本拿到的就不是这只的名字了。
+    """
     return ("id: %s\n"
             "display_name: %s\n"
             "bot_channel_path: %s\n"
             "chat_id: %d\n"
             "dispatcher_port: %d\n"
             "namespace_uuid: %s\n"
-            % (fields["bot_id"], _yaml_str(fields["display_name"]),
+            % (_yaml_str(fields["bot_id"]), _yaml_str(fields["display_name"]),
                _yaml_str(_channel_path_literal(target)),
                fields["chat_id"], fields["port"], _new_namespace()))
 
