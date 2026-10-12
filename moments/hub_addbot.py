@@ -324,6 +324,50 @@ def _bad(why):
     raise HubError(400, "bad_field", why)
 
 
+def _name_char_banned(ch):
+    """显示名里不许出现的码位（§0 第 9 条）：U+0000–U+001F、U+007F–U+009F、U+2028、U+2029、
+    U+D800–U+DFFF（落单的代理，也就是半个表情符号）、U+FFFE、U+FFFF。
+
+    按这张清单判，不按字符类别判：表情符号、零宽连接符、各种文字一律放行。清单里的码位
+    写进 yml 要么被当成换行（U+0085、U+2028、U+2029 读回来变成空格）、要么让整份配置读
+    不出来（其余控制字符），落单的代理根本写不成 UTF-8。
+    """
+    cp = ord(ch)
+    return (cp <= 0x1F or 0x7F <= cp <= 0x9F or cp in (0x2028, 0x2029, 0xFFFE, 0xFFFF)
+            or 0xD800 <= cp <= 0xDFFF)
+
+
+def _display_name(value):
+    """显示名的规矩，**新建与编辑共用这一条**（§0 第 9 条）。返回去掉首尾空白之后的值。
+
+    先去掉首尾空白，然后必须是 1 到 64 个字符，并且不含 `_name_char_banned` 那张清单里的
+    码位。它会进 yml、进页面渲染、可能进 plist 的 Label（R8-1）。落盘用的是返回值。
+    """
+    if isinstance(value, str):
+        name = value.strip()
+        if 1 <= len(name) <= MAX_DISPLAY_NAME and not any(_name_char_banned(ch) for ch in name):
+            return name
+    _bad("display_name 必须是 1-64 字的字符串，且不含控制字符")
+
+
+def _readback(text, expect):
+    """**写配置之前先读回来核对**（§0 第 9 条）：`text` 是准备写的那份配置全文，`expect` 是
+    这次写进去的字符串键值。解析不出、顶层不是映射、或哪个键读回来不是同一个字符串，
+    就抛 400，调用方据此不写盘。
+
+    这是兜底：`_display_name` 的码位清单漏掉的由它拦住。只用管理台这一侧的解析器
+    （PyYAML），网关用的是另一个，这里过了不等于那边一定读得一样。
+    """
+    try:
+        data = yaml.safe_load(text)
+    except (yaml.YAMLError, ValueError):
+        data = None
+    same = isinstance(data, dict) and all(
+        isinstance(data.get(key), str) and data.get(key) == value for key, value in expect.items())
+    if not same:
+        _bad("这份配置写出来之后读不回原样，多半是名字里有特殊字符")
+
+
 def _check_free(bot_id):
     """同名判定看四处：保留单元名、两套配置根的 `configs/<id>.yml`、旧根 `channels/<id>/`、
     新系统 `<DSH_BOT_HOME>/bots/<id>`。
@@ -490,11 +534,7 @@ def _validate(body):
         _bad("bot_id 只能是小写字母开头的 2-32 位小写字母/数字/下划线")
     if not _is_int(port) or not 1024 <= port <= 65535:
         _bad("dispatcher_port 必须是 1024-65535 的整数")
-    name = body.get("display_name")
-    if (not isinstance(name, str) or not name.strip() or len(name) > MAX_DISPLAY_NAME
-            or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in name)):
-        # R8-1：它会进 yml、进页面渲染、可能进 plist 的 Label，控制字符一路带进去必炸
-        _bad("display_name 必须是 1-64 字的字符串，且不含控制字符")
+    name = _display_name(body.get("display_name"))      # 落盘用去掉首尾空白之后的值
     if not _is_int(chat_id):
         _bad("chat_id 必须是整数")
     persona = _persona(body)
@@ -502,15 +542,19 @@ def _validate(body):
     # （四个组合独立落盘，不做成对约束）。
     fish_voice_id = _fish_voice(_optional(body, "fish_voice_id"))
     fish_api_key = _fish_key(_optional(body, "fish_api_key"))
+    out = {"bot_id": bot_id, "token": fields["telegram_token"], "port": port,
+           "chat_id": chat_id, "display_name": name, "persona": persona,
+           "fish_voice_id": fish_voice_id, "fish_api_key": fish_api_key}
+    # 写配置之前先读回来核对（§0 第 9 条）：排在 fish_* 之后、环境与冲突错（409）之前，
+    # 此刻一个文件都还没建。核对过的这份全文就是 B 段要落盘的那份，不再渲染第二遍。
+    out["yml_text"] = _checked_yml(out)
     # 环境错（用户自己改不了）：新系统配置根被关掉就落不了盘，这一页只建新系统的 bot
     if config_sources.dsh_dir() is None:
         raise HubError(409, "dsh_root_off",
                        "新系统配置根被关掉了（HUB_CONFIGS_DSH_DIR=off），这一页只建新系统的 bot")
     _check_free(bot_id)
     _check_port(port)
-    return {"bot_id": bot_id, "token": fields["telegram_token"], "port": port,
-            "chat_id": chat_id, "display_name": name, "persona": persona,
-            "fish_voice_id": fish_voice_id, "fish_api_key": fish_api_key}
+    return out
 
 
 def _check_token_free(bot_id, telegram_id):
@@ -527,13 +571,30 @@ def _check_token_free(bot_id, telegram_id):
 
 def _create_file(path, text, mode=0o600):
     """`O_CREAT|O_EXCL|O_WRONLY` 一次建成：没有"先建再 chmod"的 0644 窗口，
-    也顺带挡住同名并发创建（R4）。"""
+    也顺带挡住同名并发创建（R4）。`text` 是 str（按 UTF-8 写）或 bytes（原样写）。
+
+    **这一步自己收尾**（§7）：文件建出来了但内容没写完的，自己把它删掉再把异常抛出去 ——
+    落盘的每个文件都经这里，所以「建出来就算进回滚清单」不靠调用方记得登记。此前显示名里
+    有半个表情符号时，配置被建成空文件又不在回滚清单里，留下一只空配置的 bot，同名再也建
+    不了。文件本来就在（`O_EXCL` 报错）的不是这一步建的，不删。
+    """
+    data = text if isinstance(text, bytes) else text.encode("utf-8")   # 编不出来就不建文件
     # O_BINARY（只有 Windows 有）：不加的话 CRT 走文本模式，下面按 "wb" 写的 \n 会被悄悄
     # 换成 \r\n —— yml/.env 的内容就不再逐字节等于我们生成的那份。
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY
                  | getattr(os, "O_BINARY", 0), mode)
-    with os.fdopen(fd, "wb") as f:
-        f.write(text.encode("utf-8"))
+    try:
+        f = os.fdopen(fd, "wb")
+    except BaseException:
+        os.close(fd)
+        _unlink(path)
+        raise
+    try:
+        with f:
+            f.write(data)
+    except BaseException:
+        _unlink(path)
+        raise
 
 
 def _unlink(path):
@@ -602,7 +663,7 @@ def _new_namespace():
     return ns
 
 
-def _render_yml(fields, target):
+def _render_yml(fields, target, namespace=None):
     """`configs/<bot>.yml`：**不含 token**（F5），只有注册表要的那几个键。
 
     `id` 与 `display_name` 同一种写法，带双引号（§7）：`null`、`true`、`no`、`on` 这类名字
@@ -620,7 +681,21 @@ def _render_yml(fields, target):
             "namespace_uuid: %s\n"
             % (_yaml_str(fields["bot_id"]), _yaml_str(fields["display_name"]),
                _yaml_str(os.path.abspath(target)),
-               fields["chat_id"], fields["port"], _new_namespace()))
+               fields["chat_id"], fields["port"], namespace or _new_namespace()))
+
+
+def _checked_yml(fields):
+    """渲染这只 bot 的配置全文并**读回来核对**（§0 第 9 条），返回核对过的那份文本。
+
+    核对的是这次写进去的四个字符串键。频道目录直接由新系统家目录拼出，不依赖配置根在
+    不在场，所以这一步可以排在 409 `dsh_root_off` 之前。对不上抛 400，一个文件都没建。
+    """
+    target = os.path.join(str(config_sources.dsh_bot_dir(fields["bot_id"])), "channel")
+    namespace = _new_namespace()
+    text = _render_yml(fields, target, namespace)
+    _readback(text, {"id": fields["bot_id"], "display_name": fields["display_name"],
+                     "bot_channel_path": os.path.abspath(target), "namespace_uuid": namespace})
+    return text
 
 
 def lay_down(fields):
@@ -639,6 +714,9 @@ def lay_down(fields):
     cfg_root = config_sources.dsh_dir()
     if cfg_root is None:
         raise HubError(409, "dsh_root_off", "新系统配置根被关掉了，落不了盘")
+    # 要落盘的配置全文：A 段核对过的那份（`_validate` 放进来的）。没经 A 段直接调到这里的，
+    # 在建任何文件之前现渲染、现核对 —— 没读回来核对过的文本不许落盘。
+    yml_text = fields.get("yml_text") or _checked_yml(fields)
     # 这两级目录可能本来就是有的（新系统早就在跑）；只记下"哪些是这次才建出来的"，
     # 失败回滚时把它们摘掉 —— 否则一次失败的创建会在新系统家目录里留一个空的 bots/。
     seeded = [d for d in (str(cfg_root), os.path.dirname(home)) if not os.path.isdir(d)]
@@ -682,7 +760,7 @@ def lay_down(fields):
             made.append((_MADE_HOME, home))
             made.append((_MADE_TREE, channel))
         _fix_modes(home)
-        _create_file(yml, _render_yml(fields, channel))
+        _create_file(yml, yml_text)               # 没写完它自己删，不会留下空配置
         made.append((_MADE_FILE, yml))
         _check_port(fields["port"], skip=bot_id)   # R4：A 段那次 bind 试探到这里已经有窗口
     except BaseException:
@@ -1127,16 +1205,6 @@ def edit_read(bot_id):
             "persona": persona, "fish_voice_id": _voice_of(access_raw)}
 
 
-def _edit_name(value):
-    """§10b 显示名：给了这个键就必须是 1-64 字、不含控制字符的字符串（判据取 strip 后的值）。"""
-    if isinstance(value, str):
-        name = value.strip()
-        if (1 <= len(name) <= MAX_DISPLAY_NAME
-                and not any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in name)):
-            return name
-    _bad("display_name 必须是 1-64 字的字符串，且不含控制字符")
-
-
 def _edit_voice(value):
     """§10b 音色：非字符串（含 null）400；strip 后为空 = 清除音色（回空串）；其余与 §6b 同三档。"""
     if not isinstance(value, str):
@@ -1200,7 +1268,7 @@ def edit_save(bot_id, body):
         raise HubError(400, "bad_body", "至少给一个要改的字段：display_name / persona / fish_voice_id")
 
     # 字段形状：display_name 各档 → persona → fish_voice_id 三档
-    name = _edit_name(body["display_name"]) if "display_name" in body else None
+    name = _display_name(body["display_name"]) if "display_name" in body else None
     if "persona" in body and not isinstance(body["persona"], str):
         _bad("persona 必须是字符串")
     voice = _edit_voice(body["fish_voice_id"]) if "fish_voice_id" in body else None
@@ -1220,6 +1288,7 @@ def edit_save(bot_id, body):
             raise ed.yml_err
         from moments import hub_config          # 延迟 import：理由同 set_enabled
         new_text = hub_config.set_scalar(ed.text, ed.root, "display_name", name, "str")
+        _readback(new_text, {"display_name": name})     # 写盘之前读回来核对（§0 第 9 条）
         plan.append((ed.yml_path, new_text.encode("utf-8"), ed.text.encode("utf-8")))
 
     if voice is not None:
