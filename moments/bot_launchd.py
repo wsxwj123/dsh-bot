@@ -430,11 +430,13 @@ def one_runner(bot_id):
 
 def restart_all():
     """「重启全部」的 job 执行体（无参 callable）。执行范围恒为
-    ``hub_visible(list_bots(), bot_sources())``（§3），**执行时**现算：受理与执行之间
-    多出来的 bot 也一起回到配置说的样子。
+    ``hub_visible(list_bots(), bot_sources())`` 的结果里**过放行闸**的那些（§3，``strict``）：
+    来源读不出、名单注入、新系统根不在场时范围为空，一条 launchctl 都不发。
+    **执行时**现算：受理与执行之间多出来的 bot 也一起回到配置说的样子。
     """
     from moments import bots_client     # 延迟 import：与 bots_client 双向依赖，函数内解
-    entries = bots_client.hub_visible(bots_client.list_bots(), bots_client.bot_sources())
+    entries = bots_client.hub_visible(bots_client.list_bots(), bots_client.bot_sources(),
+                                      strict=True)
     pairs = [(e["id"], enabled_of(e["id"])) for e in entries]
     return restart_group(pairs)
 

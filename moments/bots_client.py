@@ -176,7 +176,7 @@ def bot_sources():
         return {}
 
 
-def hub_visible(entries, sources=None):
+def hub_visible(entries, sources=None, strict=False):
     """``/hub/bots`` 这一页该显示的 bot：只留由**新系统**跑着的那些。
 
     判定不在这里发明。``bot_sources()`` 的 ``source`` 就是"这个 bot 生效的那份
@@ -196,10 +196,15 @@ def hub_visible(entries, sources=None):
 
     ``HUB_BOTS_FILE`` 注入名单时来源为空，同样原样放行：那份名单是测试接缝，
     与配置目录无关，不猜。
+
+    ``strict=True`` 是**放行闸**的口径（INTERFACE §0 第 2 条），只给会起进程的两处用：
+    重启全部的执行范围、单只重启的名单。上面几种兜底一律不放行，只留来源明确是
+    新系统的 —— 兜底只管**显示**，不等于过闸：列出来的行点任何动作，照样按来源判。
+    来源读不出、名单注入、新系统根不在场时，严格口径下结果为空。
     """
     from moments import config_sources
     src = bot_sources() if sources is None else sources
-    if not src or _dsh_root() is None:
+    if not strict and (not src or _dsh_root() is None):
         return list(entries)
     keep = {bot for bot, info in src.items()
             if (info or {}).get("source") == config_sources.SOURCE_DSH}

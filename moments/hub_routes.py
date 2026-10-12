@@ -1014,7 +1014,8 @@ def bots_list():
 
 @hub_bp.post("/hub/api/bots/restart")
 def bots_restart():
-    """重启全部（§3）：请求体忽略，范围恒为 ``hub_visible(list_bots(), bot_sources())``。
+    """重启全部（§3）：请求体忽略，范围恒为 ``hub_visible(list_bots(), bot_sources())`` 的
+    结果里过放行闸的那些（来源读不出、名单注入时为空，一条 launchctl 都不发）。
 
     可用性先判（409 `restart_unsupported` 在 `restart_in_progress` 之前）；launchd 路径
     的 runner 由 ``bot_launchd`` 提供，覆盖命令路径包一层既有 ``_run_command``。
@@ -1033,7 +1034,7 @@ def bots_restart():
 
 @hub_bp.post("/hub/api/bots/<bot_id>/restart")
 def bots_restart_one(bot_id):
-    """行内手动重启这一只（§4）。判定顺序：id 形状 → 在不在名单 → 能不能重启 → 停没停 → 忙。
+    """行内手动重启这一只（§4）。判定顺序：id 形状 → 过没过放行闸 → 能不能重启 → 停没停 → 忙。
 
     对停用中的 bot 拒绝是刻意的（拍板 2）：本端点只服务「用户手点行内重启」。把停用中
     的 bot 真正停下来的动作走开关端点（§4b 的同步），不经这里的 409。
@@ -1041,14 +1042,17 @@ def bots_restart_one(bot_id):
     if not isinstance(bot_id, str) or not hub_addbot.BOT_ID_RE.match(bot_id):
         return jsonify({"error": "bad_bot_id"}), 400
     try:
-        names = {e["id"] for e in bots_client.hub_visible(bots_client.list_bots(),
-                                                          bots_client.bot_sources())}
+        # 名单 = 重启全部的执行范围（§3），同一句判据：只留过放行闸的
+        names = {e["id"] for e in bots_client.hub_visible(
+            bots_client.list_bots(), bots_client.bot_sources(), strict=True)}
     except Exception as e:
         return jsonify({"error": "config_unreadable", "detail": type(e).__name__}), 500
     if bot_id not in names:
-        # 旧系统的 bot 与不存在的 bot 都走这一格：这一页只管新系统的 bot
+        # 没过放行闸：旧系统的 bot、来源读不出的、名单注入的、新系统根不在场时的、不存在的
+        # 都走这一格，排在 restart_unsupported 之前；不产生任何 launchctl 或其它子进程调用。
+        # 那句话与开关、编辑的 404 逐字相同。
         return jsonify({"error": "bot_not_found",
-                        "detail": "%s 不在这一页的名单里（这一页只管新系统的 bot）" % bot_id}), 404
+                        "detail": hub_addbot.GATE_404_DETAIL}), 404
     plan = bots_client.restart_plan()
     if not plan.available:
         return jsonify({"error": "restart_unsupported",
