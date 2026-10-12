@@ -464,6 +464,42 @@ def _no_touch_real():
         assert b == a, "用例动到了真实目录 %s 的条目（接缝漏了）" % d
 
 
+# ------------------------------------------------------------ 后台 job 收尾
+
+#: 管理台跑重启 / 开关同步 job 的后台线程名。契约里没写这个名字，是跑起来观察到的。
+#: 实现改了名，这里就等不到了，届时 tests/conftest.py 的总闸会重新报出
+#: 「夹具撤掉假件之后才发出的调用」，不会悄悄放过。
+JOB_THREAD_NAME = "hub-restart"
+#: 实测这些线程发完 launchctl 调用只要几百毫秒。个别用例的 job 会接着等满判活上限
+#: （45 秒），那种等不起也不必等：要紧的调用在这几秒里已经发完了。
+JOB_DRAIN_TIMEOUT = 3.0
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    item._threads_before = set(threading.enumerate())
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_teardown(item):
+    """拆夹具之前，先等这条用例触发的后台 job 跑完。
+
+    开关（§4b）与重启（§3、§4）都是「先回响应，后台线程接着干活」。用例拿到响应就结束的话，
+    线程会拖到假 launchctl 被撤掉之后才去读 `HUB_LAUNCHCTL`。实测拖出来的调用是
+    `bootout` 与 `kickstart -k`：有总闸时打在毒丸上，记到下一条不相干的用例头上；
+    没有总闸时读到的就是真 `/bin/launchctl`。
+
+    tryfirst：排在 pytest 自己拆夹具之前，此刻假 launchctl、心跳、桩都还在位。
+    只等本用例期间新出现的线程，前面用例留下的不归这条用例等。
+    等不到（超过 JOB_DRAIN_TIMEOUT）就放行，不在这里判失败，交给总闸去报。
+    """
+    before = getattr(item, "_threads_before", set())
+    deadline = time.time() + JOB_DRAIN_TIMEOUT
+    for t in threading.enumerate():
+        if t not in before and t.name.startswith(JOB_THREAD_NAME):
+            t.join(max(0.0, deadline - time.time()))
+
+
 # ------------------------------------------------------------ 假件/桩
 
 @pytest.fixture
