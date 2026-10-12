@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -902,3 +903,314 @@ def create(body, jobs):
     steps.append(register(fields))
     steps.append(restart(fields))
     return _respond(fields, probe, steps)
+
+
+# ======================================================================
+# bot 二次编辑（INTERFACE §10）：改名 / 换人设 / 换音色
+#
+# 用户看得见的三样东西各写一处，显示名额外写第二处（同一个人的两份读源）：
+#   yml 顶层 display_name → 画风页与状态页现读；`bot_profiles.display_name` → 朋友圈；
+#   `<channelDir>/CLAUDE.md` → 人设正文；`<channelDir>/access.json` 的 voiceId → 音色。
+# **只对新系统的 bot 开放**（放行 = `bot_sources()` 说它生效的那份来自 dsh），
+# 旧系统一个字节都不碰。
+#
+# 四口写入顺序固定（yml → access.json → CLAUDE.md → 朋友圈库），全部校验通过才动
+# 第一个字节；任一步失败按**逆序**把已写的恢复旧内容，然后 500 —— 三个字段可能同一
+# 弹窗一起提交，"保存失败但名字已经变了"是最难排查的状态（PLAN §11.4）。
+# 本端点**不产生任何 launchctl 调用、不发网络请求、不产生 job**：人设由网关侧
+# mtime 轮询自己发现（默认 5 秒），名字与音色都是每次现读。
+# ======================================================================
+
+_EDIT_FIELDS = ("display_name", "persona", "fish_voice_id")
+_EDIT_TEXT = ("已保存。名字与音色立即生效；人设会被在跑的 bot 在几秒内检测到，"
+              "空闲时自动换上。")
+_EDIT_404 = "没有这个新系统的 bot（这一页只管新系统的 bot）"
+_EDIT_BAD_ACCESS = "access.json 读不出内容（不存在或解析失败），先修好"
+
+
+def _atomic_bytes(path, data):
+    """原子写字节：mkstemp → fsync → chmod 0600 → replace。
+
+    权限**恒 0600**（契约 §10b：三个文件都按 0600 走）：写的是 .env / access.json /
+    yml 这类配置，历史遗留的宽权限顺手收紧，绝不反向放松。
+
+    不复用 `hub_config.atomic_write` 的两条理由：它只收 str，而人设与 access.json 的
+    旧内容要按**字节**原样恢复（字符串往返会改变非法 UTF-8 的字节）；它把 OSError 包成
+    HubError，类名会被壳盖掉，而契约要的 detail 正是「写配置失败：<类名>」。
+    """
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                                   prefix="." + os.path.basename(path) + "-", suffix=".tmp")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp:
+            _unlink(tmp)
+
+
+def _read_bytes(path, missing_ok=False):
+    """读文件的字节。`missing_ok` 时"不存在"回 None；其余 OSError 照抛给调用方翻码。"""
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise
+
+
+def _edit_target(bot_id):
+    """编辑端点的放行闸（§10）：只对新系统的 bot 开放，返回它生效的那份配置。
+
+    放行条件 = `bot_sources()` 说这只生效的那份配置来自 dsh；legacy、`HUB_BOTS_FILE`
+    注入名单、压根没这只 —— 一律 404 `bot_not_found`，与单只重启同款口径。
+
+    只有一种情况越过 `bot_sources()`：**新系统配置根下确实有这只的 yml、但那份文件
+    解析不出来**（`bot_sources()` 会跳过坏配置，直接判死会让契约里的 409 `bad_yaml`
+    永远不可达）。这时放它过去，让读文件那一步报 409/500，用户才知道要修什么。
+    返回值可能为 None（坏配置算不出生效配置），channelDir 与朋友圈身份各自有回落。
+    """
+    if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
+        raise HubError(400, "bad_bot_id", "bot id 形状非法")
+    if os.environ.get("HUB_BOTS_FILE"):
+        raise HubError(404, "bot_not_found", _EDIT_404)
+    info = bots_client.bot_sources().get(bot_id) or {}
+    source = info.get("source")
+    if source == config_sources.SOURCE_DSH:
+        return config_sources.effective_config(bot_id)
+    if source:
+        raise HubError(404, "bot_not_found", _EDIT_404)      # 来源判得出来，但不是新系统
+    d = config_sources.dsh_dir()
+    if d is not None and os.path.isfile(os.path.join(str(d), bot_id + ".yml")):
+        return config_sources.effective_config(bot_id)       # 坏配置：通常是 None
+    raise HubError(404, "bot_not_found", _EDIT_404)
+
+
+def _channel_dir(cfg, bot_id):
+    """§10 的 channelDir：yml 的 `bot_channel_path`（expanduser）；缺失或空 → 新系统家目录下的 channel。
+
+    与网关 `config.ts:286` 同款 —— 用户手改过 `bot_channel_path` 的机器上，编辑跟着写
+    网关真正读的那一份，而不是硬编码路径。`cfg` 为 None（yml 读不出来）时按缺失算。
+    """
+    raw = (cfg or {}).get("bot_channel_path")
+    if isinstance(raw, str) and raw.strip():
+        return os.path.expanduser(raw.strip())
+    return os.path.join(str(config_sources.dsh_bot_dir(bot_id)), "channel")
+
+
+def _top_str(root, key):
+    """yml 顶层某个键的字符串值；键缺失 / 非字符串 / 空 → 空串（§10a）。"""
+    from moments import hub_config              # 延迟 import：理由同 set_enabled
+    node = hub_config.find(root, [key])
+    # compose 出来的是节点树：`display_name: 123` 也是 ScalarNode，靠 tag 才分得清字符串
+    if isinstance(node, yaml.ScalarNode) and node.tag == "tag:yaml.org,2002:str":
+        value = node.value
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _voice_of(raw):
+    """access.json 里的 voiceId：文件不存在 / 坏 JSON / 非对象 / 键缺失或非字符串 → 空串（§10a）。"""
+    if raw is None:
+        return ""
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if not isinstance(obj, dict):
+        return ""
+    value = obj.get("voiceId")
+    return value if isinstance(value, str) else ""
+
+
+def edit_read(bot_id):
+    """GET /hub/api/bots/<bot_id>/edit（§10a）：读当前值，供弹窗回填。
+
+    读路径只有一个地方会报错：yml 读不出来（500）或解析不出（409）。坏 access.json、
+    缺人设文件都回空串 —— 保存时才拦（§10b 的 409 条件是"要写那个字段"）。
+    """
+    cfg = _edit_target(bot_id)
+    yml_path = config_sources.find_path(bot_id)
+    if yml_path is None:
+        raise HubError(404, "bot_not_found", _EDIT_404)
+    channel = _channel_dir(cfg, bot_id)
+    try:
+        text = _read_bytes(str(yml_path)).decode("utf-8")
+        persona_raw = _read_bytes(os.path.join(channel, "CLAUDE.md"), missing_ok=True)
+        access_raw = _read_bytes(os.path.join(channel, "access.json"), missing_ok=True)
+    except OSError as e:
+        raise HubError(500, "config_unreadable", type(e).__name__)
+    except UnicodeDecodeError as e:
+        raise HubError(500, "config_unreadable", type(e).__name__)
+    from moments import hub_config              # 延迟 import：理由同 set_enabled
+    try:
+        root = hub_config.compose(text)
+    except yaml.YAMLError as e:
+        raise HubError(409, "bad_yaml", hub_config.yaml_error_detail(e, "%s.yml 解析失败" % bot_id))
+    if persona_raw is None:
+        persona = ""
+    else:
+        try:
+            persona = persona_raw.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise HubError(500, "config_unreadable", type(e).__name__)
+    return {"bot_id": bot_id, "display_name": _top_str(root, "display_name"),
+            "persona": persona, "fish_voice_id": _voice_of(access_raw)}
+
+
+def _edit_name(value):
+    """§10b 显示名：给了这个键就必须是 1-64 字、不含控制字符的字符串（判据取 strip 后的值）。"""
+    if isinstance(value, str):
+        name = value.strip()
+        if (1 <= len(name) <= MAX_DISPLAY_NAME
+                and not any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in name)):
+            return name
+    _bad("display_name 必须是 1-64 字的字符串，且不含控制字符")
+
+
+def _edit_voice(value):
+    """§10b 音色：非字符串（含 null）400；strip 后为空 = 清除音色（回空串）；其余与 §6b 同三档。"""
+    if not isinstance(value, str):
+        _bad("fish_voice_id 必须是字符串")
+    voice = value.strip()
+    if not voice:
+        return ""
+    if len(voice) > MAX_FISH_VOICE:
+        _bad("音色 id 最长 64 个字符")
+    if not FISH_VOICE_RE.match(voice):
+        _bad("音色 id 只能是字母、数字、下划线或连字符")
+    return voice
+
+
+def _restore_writes(undo):
+    """逆序恢复已写的东西（§10b 第 3 条）；返回"有没有恢复也失败的"。
+
+    恢复里再抛异常会把真正的错因盖掉，所以逐个吞掉、只记下有人没恢复回来 ——
+    那一档要给用户「部分文件已改动，请手工核对」。
+    """
+    partial = False
+    for restore in reversed(undo):
+        try:
+            restore()
+        except Exception:                       # noqa: BLE001
+            partial = True
+    return partial
+
+
+def _write_detail(exc, partial):
+    """§10b 的两档 detail（类名不带消息：异常消息里可能有路径）。"""
+    tail = "部分文件已改动，请手工核对" if partial else "这次没有改动任何文件"
+    return "写配置失败：%s；%s" % (type(exc).__name__, tail)
+
+
+def _save_db_name(cfg, bot_id, value, undo):
+    """朋友圈库那一口（§10b 第 4 步）：读旧值 → upsert → 记下恢复动作。
+
+    读旧值也在这步里：库文件不可写时 `get_profile` 一样会炸，与写一起走同一条
+    「写配置失败」路径（契约那两档文案就在这条路上）。恢复 = 写回旧 display_name；
+    原本没有这行时会留下一行空值，`get_profile` 读出来仍是空，等效无值。
+    """
+    import db as botlife_db                     # 延迟 import：与 bots_registry 同一理由
+    pid = config_sources.person_id(cfg) if cfg else bot_id   # 朋友圈身份（life 名），不是 bot id
+    old = (botlife_db.get_profile(pid) or {}).get("display_name")
+    botlife_db.set_display_name(pid, value)
+    undo.append(lambda p=pid, v=old: botlife_db.set_display_name(p, v))
+
+
+def edit_save(bot_id, body):
+    """POST /hub/api/bots/<bot_id>/edit（§10b）：校验 → 读旧 → 写四口 → 失败逆序恢复。
+
+    返回 `(响应体, 状态码)`；一切失败以 HubError 抛出，判序照契约的表先命中先回。
+    「不改某个字段」的表达是**不给这个键**：给了就必须是字符串，null 也是 400。
+    """
+    if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
+        raise HubError(400, "bad_bot_id", "bot id 形状非法")
+    if not isinstance(body, dict):
+        raise HubError(400, "bad_body", "请求体必须是一个 JSON 对象")
+    if not any(k in body for k in _EDIT_FIELDS):
+        raise HubError(400, "bad_body", "至少给一个要改的字段：display_name / persona / fish_voice_id")
+
+    # 字段形状：display_name 各档 → persona → fish_voice_id 三档
+    name = _edit_name(body["display_name"]) if "display_name" in body else None
+    if "persona" in body and not isinstance(body["persona"], str):
+        _bad("persona 必须是字符串")
+    voice = _edit_voice(body["fish_voice_id"]) if "fish_voice_id" in body else None
+    persona = body.get("persona") if "persona" in body else None
+    if persona is not None and len(persona.encode("utf-8")) > MAX_PERSONA:
+        raise HubError(413, "payload_too_large", "人设正文超过 64 KiB")
+
+    cfg = _edit_target(bot_id)                  # 404
+    yml_path = config_sources.find_path(bot_id)
+    if yml_path is None:
+        raise HubError(404, "bot_not_found", _EDIT_404)
+    channel = _channel_dir(cfg, bot_id)
+
+    # 读旧内容：409 / 500 全在这一步，全部过了才动第一个字节
+    plan = []                                   # [(路径, 新字节, 旧字节或 None)]，按写入顺序
+    if name is not None:
+        try:
+            text = _read_bytes(str(yml_path)).decode("utf-8")
+        except OSError as e:
+            raise HubError(500, "config_unreadable", type(e).__name__)
+        except UnicodeDecodeError as e:
+            raise HubError(500, "config_unreadable", type(e).__name__)
+        from moments import hub_config          # 延迟 import：理由同 set_enabled
+        try:
+            root = hub_config.compose(text)
+        except yaml.YAMLError as e:
+            raise HubError(409, "bad_yaml",
+                           hub_config.yaml_error_detail(e, "%s.yml 解析失败" % bot_id))
+        new_text = hub_config.set_scalar(text, root, "display_name", name, "str")
+        plan.append((str(yml_path), new_text.encode("utf-8"), text.encode("utf-8")))
+
+    if voice is not None:
+        acc_path = os.path.join(channel, "access.json")
+        try:
+            raw = _read_bytes(acc_path)
+        except FileNotFoundError:
+            raise HubError(409, "bad_access_json", _EDIT_BAD_ACCESS)
+        except OSError as e:
+            raise HubError(500, "config_unreadable", type(e).__name__)
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            obj = None
+        if not isinstance(obj, dict):
+            raise HubError(409, "bad_access_json", _EDIT_BAD_ACCESS)
+        if voice:
+            obj["voiceId"] = voice              # 已存在则原位替换、不存在则追加末尾
+        else:
+            obj.pop("voiceId", None)
+        plan.append((acc_path, (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"), raw))
+
+    if persona is not None:
+        md_path = os.path.join(channel, "CLAUDE.md")
+        try:
+            old_md = _read_bytes(md_path, missing_ok=True)
+        except OSError as e:
+            raise HubError(500, "config_unreadable", type(e).__name__)
+        plan.append((md_path, persona.encode("utf-8"), old_md))
+
+    # 写入：顺序固定 yml → access.json → CLAUDE.md → 朋友圈库
+    undo = []                                   # 逆序恢复清单（无参 callable）
+    try:
+        for path, new_bytes, old_bytes in plan:
+            _atomic_bytes(path, new_bytes)
+            undo.append(lambda p=path, b=old_bytes: (_unlink(p) if b is None
+                                                     else _atomic_bytes(p, b)))
+        if name is not None:
+            _save_db_name(cfg, bot_id, name, undo)
+    except Exception as e:                      # noqa: BLE001 下面按契约翻成 500
+        partial = _restore_writes(undo)
+        raise HubError(500, "config_write_failed", _write_detail(e, partial))
+    return {"ok": True,
+            "saved": {"display_name": name is not None, "persona": persona is not None,
+                      "fish_voice_id": voice is not None},
+            "text": _EDIT_TEXT}, 200
