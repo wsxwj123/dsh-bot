@@ -685,8 +685,9 @@ function switchTab(name) {
 }
 $('tab-model').onclick = () => switchTab('model');
 $('tab-providers').onclick = () => switchTab('providers');
-// 编辑弹窗（共享片段）保存成功后重拉本文，好让名字跟着变
-function onBotEdited() { load(); }
+// 编辑弹窗（共享片段）保存成功后把那句提示交到这里：显示在 bot 表上面的消息位
+// （与「换」模型同一个出口），再重拉本页，好让名字跟着变
+function onBotEdited(text) { showMsg(text); load(); }
 
 $('add-open').onclick = () => openForm('create', null);
 $('refresh').onclick = load;
