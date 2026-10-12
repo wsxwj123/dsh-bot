@@ -54,6 +54,14 @@ GETME_TIMEOUT = 10               # §4.1
 MAX_BODY = 64 * 1024             # §4.1 R2-2：读满即停
 MAX_PERSONA = 64 * 1024          # §4.2 A 段
 MAX_DISPLAY_NAME = 64            # R8-1
+# §6b 两个可选字段的形状（全是本地判据，不做在线校验 —— 不因它们调任何语音服务）
+MAX_FISH_VOICE = 64
+MIN_FISH_KEY = 8
+MAX_FISH_KEY = 256
+FISH_VOICE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+FISH_KEY_RE = re.compile(r"^[\x21-\x7e]{8,256}$")
+#: 把 Telegram token / 供应商 key 填错格子是最常见的两种手滑，各给一句人话
+FISH_KEY_TELEGRAM_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{30,}$")
 REQUIRED_FIELDS = ("bot_id", "telegram_token", "dispatcher_port", "chat_id")
 BLANK_TEMPLATE = "_persona_template"
 MEMORY_SEED = "# 记忆\n\n（还没聊过，记忆会自己长出来。）\n"
@@ -264,6 +272,53 @@ def _is_int(value):
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _optional(body, name):
+    """可选字段的「未填」四等价（§6b）：键缺失、`null`、空串、纯空白。
+
+    四者都回 None；填了的回**去首尾空白后**的值（契约：判定与落盘一律用它）。
+    非 str 且非 None（`123`/`True`/`[]`）原样返回，由各自的形状函数报它那一档 ——
+    这里不替它们报，因为文案按字段不同。
+    """
+    value = body.get(name)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    return value
+
+
+def _fish_voice(value):
+    """§6b 音色三档（非字符串 / 超长 / 字符非法），任一命中抛 400。未填回 None。"""
+    if value is not None and not isinstance(value, str):
+        _bad("fish_voice_id 必须是字符串")
+    if value is None:
+        return None
+    if len(value) > MAX_FISH_VOICE:
+        _bad("音色 id 最长 64 个字符")
+    if not FISH_VOICE_RE.match(value):
+        _bad("音色 id 只能是字母、数字、下划线或连字符")
+    return value
+
+
+def _fish_key(value):
+    """§6b Fish key 各档，顺序：非字符串 → 太短 → 太长 → 形状 → 像谁家的 key。未填回 None。"""
+    if value is not None and not isinstance(value, str):
+        _bad("fish_api_key 必须是字符串")
+    if value is None:
+        return None
+    if len(value) < MIN_FISH_KEY:
+        _bad("Fish key 太短（至少 8 个字符）")
+    if len(value) > MAX_FISH_KEY:
+        _bad("Fish key 太长（最多 256 个字符）")
+    if not FISH_KEY_RE.match(value):
+        _bad("Fish key 只能是 8-256 位的可打印 ASCII，不含空格")
+    if FISH_KEY_TELEGRAM_RE.match(value):
+        _bad("这看起来是 Telegram bot token，不是 Fish Audio 的 key")
+    if value.startswith("sk-"):
+        _bad("这看起来是模型供应商的 key（sk- 开头），不是 Fish Audio 的 key")
+    return value
+
+
 def _bad(why):
     raise HubError(400, "bad_field", why)
 
@@ -439,6 +494,10 @@ def _validate(body):
     if not _is_int(chat_id):
         _bad("chat_id 必须是整数")
     persona = _persona(body)
+    # §6b 两个可选字段：判序在人设二选一之后、环境与冲突错（409）之前；两个字段各判各的
+    # （四个组合独立落盘，不做成对约束）。
+    fish_voice_id = _fish_voice(_optional(body, "fish_voice_id"))
+    fish_api_key = _fish_key(_optional(body, "fish_api_key"))
     # 环境错（用户自己改不了）：新系统配置根被关掉就落不了盘，这一页只建新系统的 bot
     if config_sources.dsh_dir() is None:
         raise HubError(409, "dsh_root_off",
@@ -446,7 +505,8 @@ def _validate(body):
     _check_free(bot_id)
     _check_port(port)
     return {"bot_id": bot_id, "token": fields["telegram_token"], "port": port,
-            "chat_id": chat_id, "display_name": name, "persona": persona}
+            "chat_id": chat_id, "display_name": name, "persona": persona,
+            "fish_voice_id": fish_voice_id, "fish_api_key": fish_api_key}
 
 
 def _check_token_free(bot_id, telegram_id):
@@ -575,6 +635,9 @@ def lay_down(fields):
     cfg_root = config_sources.dsh_dir()
     if cfg_root is None:
         raise HubError(409, "dsh_root_off", "新系统配置根被关掉了，落不了盘")
+    # 这两级目录可能本来就是有的（新系统早就在跑）；只记下"哪些是这次才建出来的"，
+    # 失败回滚时把它们摘掉 —— 否则一次失败的创建会在新系统家目录里留一个空的 bots/。
+    seeded = [d for d in (str(cfg_root), os.path.dirname(home)) if not os.path.isdir(d)]
     os.makedirs(str(cfg_root), exist_ok=True)
     os.makedirs(os.path.dirname(home), exist_ok=True)   # <DSH_BOT_HOME>/bots
     yml = os.path.join(str(cfg_root), bot_id + ".yml")
@@ -587,10 +650,18 @@ def lay_down(fields):
         os.mkdir(chan, 0o700)
         for rel in TREE_DIRS:
             os.mkdir(os.path.join(chan, rel), 0o700)
-        # token 的唯一落点（F5）。yml 里一个字都没有它
-        _create_file(os.path.join(chan, ".env"), "TELEGRAM_BOT_TOKEN=%s\n" % fields["token"])
+        # token 的唯一落点（F5）。yml 里一个字都没有它。§6b 的 Fish key 是它的第二行
+        # （独立一行、键序 token 在前），只有填了才写；两个字段都落在既有文件内，
+        # 回滚清单不用动（整树删自然覆盖）。
+        env_lines = "TELEGRAM_BOT_TOKEN=%s\n" % fields["token"]
+        if fields.get("fish_api_key"):
+            env_lines += "FISH_AUDIO_API_KEY=%s\n" % fields["fish_api_key"]
+        _create_file(os.path.join(chan, ".env"), env_lines)
+        access = {"allowFrom": [fields["chat_id"]]}
+        if fields.get("fish_voice_id"):
+            access["voiceId"] = fields["fish_voice_id"]      # 键序 allowFrom 在前、voiceId 在后
         _create_file(os.path.join(chan, "access.json"),
-                     json.dumps({"allowFrom": [fields["chat_id"]]}, ensure_ascii=False) + "\n")
+                     json.dumps(access, ensure_ascii=False) + "\n")
         _create_file(os.path.join(chan, "CLAUDE.md"), fields["persona"])
         _create_file(os.path.join(chan, "memory", "MEMORY.md"), MEMORY_SEED)
         if os.path.exists(home):
@@ -612,6 +683,8 @@ def lay_down(fields):
         _check_port(fields["port"], skip=bot_id)   # R4：A 段那次 bind 试探到这里已经有窗口
     except BaseException:
         _rollback(made)
+        for d in reversed(seeded):                 # 逆序：先摘深的 bots/，再摘配置根
+            _rmdir(d)                              # 只删空的，里面还有别人的东西就留着
         raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)     # 只删自己 mkdtemp 出来的那个
