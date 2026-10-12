@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import namedtuple
 from urllib.parse import urlsplit
 
 import requests
@@ -927,6 +928,12 @@ _EDIT_TEXT = ("已保存。名字与音色立即生效；人设会被在跑的 b
 #: 旧系统的 bot 与不存在的 bot 不区分。
 GATE_404_DETAIL = "没有这个新系统的 bot（这一页只管新系统的 bot）"
 _EDIT_BAD_ACCESS = "access.json 读不出内容（不存在或解析失败），先修好"
+#: 落点校验命中时的那一句（§10，逐字）
+BAD_CHANNEL_PATH_DETAIL = ("频道目录不在这只 bot 的新系统家目录里（bot_channel_path 或软链指到了外面），"
+                           "这一页不读也不改它")
+#: `_edit_open` 交回的东西：闸交回的配置、yml 路径、yml 原文、节点树、yml 自己的错（或 None）、
+#: 频道目录的真实路径
+_Edit = namedtuple("_Edit", "cfg yml_path text root yml_err channel")
 
 
 def _atomic_bytes(path, data):
@@ -1018,16 +1025,54 @@ def _dsh_yml(bot_id):
     return path
 
 
-def _channel_dir(cfg, bot_id):
-    """§10 的 channelDir：yml 的 `bot_channel_path`（expanduser）；缺失或空 → 新系统家目录下的 channel。
+def _channel_dir(bot_id, root):
+    """§10 的 channelDir 连同**落点校验**：读与写共用这一处，交出去的是可以放心读写的目录。
 
-    与网关 `config.ts:286` 同款 —— 用户手改过 `bot_channel_path` 的机器上，编辑跟着写
-    网关真正读的那一份，而不是硬编码路径。`cfg` 为 None（yml 读不出来）时按缺失算。
+    取法。新系统配置根下这只的 yml **自己**顶层写的 `bot_channel_path`（expanduser）；
+    没写、为空、不是字符串、或这份 yml 读不出结构（`root` 为 None）→ 家目录下的 `channel`。
+    与网关 `config.ts:286` 同款，只认这份 yml 自己的键：`life_config` 指向的那份里写的
+    不参与。此前取的是两份合并之后的值，那个目录可以在新系统家目录之外，而且与网关读的
+    不是同一处。
+
+    落点。把新系统家目录解析成真实路径，这只 bot 的家 = 它下面的 `bots/<bot_id>`。频道目录
+    解析成真实路径（软链跟到底）之后必须就是这个家或在它里面，否则 409 `bad_channel_path`。
+    显式写到外面的、经软链出去的、`bots/<bot_id>` 这一级本身是软链的，都落在这一格；
+    名字以这只打头的另一个目录（`<bot_id>_x`）不算在里面，所以比的是带分隔符的前缀。
+
+    返回**解析后的真实路径**：校验的是哪条路径，随后读写的就是哪条。
     """
-    raw = (cfg or {}).get("bot_channel_path")
-    if isinstance(raw, str) and raw.strip():
-        return os.path.expanduser(raw.strip())
-    return os.path.join(str(config_sources.dsh_bot_dir(bot_id)), "channel")
+    raw = _top_str(root, "bot_channel_path").strip()
+    home = os.path.join(os.path.realpath(str(config_sources.dsh_home())), "bots", bot_id)
+    channel = os.path.realpath(os.path.expanduser(raw) if raw else os.path.join(home, "channel"))
+    if channel != home and not channel.startswith(home + os.sep):
+        raise HubError(409, "bad_channel_path", BAD_CHANNEL_PATH_DETAIL)
+    return channel
+
+
+def _edit_open(bot_id):
+    """编辑的读与写共用的前半段，判定顺序照 §10：404 → `bad_channel_path` → yml 自己的错。
+
+    过放行闸 → 定位新系统那份 yml → 读它、解析成节点树 → 定频道目录并校验落点。
+    yml 读不出（500）或解析不出（409）时**先不抛**：这种时候目录按默认位置算，落点那一格
+    照判，两种错互不遮挡。yml 的错放进返回值，由调用方在用得着这份 yml 时再抛 ——
+    只改人设与音色用不着它，yml 坏了照样能保存。
+
+    落点不过就在这里抛。此刻只读过这一份 yml：频道目录下的文件一个没碰，什么都没写，
+    朋友圈库也没动。
+    """
+    from moments import hub_config              # 延迟 import：理由同 set_enabled
+    cfg = _edit_target(bot_id)
+    yml_path = _dsh_yml(bot_id)
+    text = root = yml_err = None
+    try:
+        text = _read_bytes(yml_path).decode("utf-8")
+        root = hub_config.compose(text)
+    except (OSError, UnicodeDecodeError) as e:
+        yml_err = HubError(500, "config_unreadable", type(e).__name__)
+    except yaml.YAMLError as e:
+        yml_err = HubError(409, "bad_yaml",
+                           hub_config.yaml_error_detail(e, "%s.yml 解析失败" % bot_id))
+    return _Edit(cfg, yml_path, text, root, yml_err, _channel_dir(bot_id, root))
 
 
 def _top_str(root, key):
@@ -1059,33 +1104,26 @@ def _voice_of(raw):
 def edit_read(bot_id):
     """GET /hub/api/bots/<bot_id>/edit（§10a）：读当前值，供弹窗回填。
 
-    读路径只有一个地方会报错：yml 读不出来（500）或解析不出（409）。坏 access.json、
+    判定顺序：404 → 频道目录落点（409 `bad_channel_path`）→ yml 解析不出（409）或读不出
+    （500）→ 读人设与白名单。落点没过之前不碰频道目录下的任何文件。坏 access.json、
     缺人设文件都回空串 —— 保存时才拦（§10b 的 409 条件是"要写那个字段"）。
     """
-    cfg = _edit_target(bot_id)
-    yml_path = _dsh_yml(bot_id)
-    channel = _channel_dir(cfg, bot_id)
+    ed = _edit_open(bot_id)                     # 404 → bad_channel_path
+    if ed.yml_err:
+        raise ed.yml_err
     try:
-        text = _read_bytes(yml_path).decode("utf-8")
-        persona_raw = _read_bytes(os.path.join(channel, "CLAUDE.md"), missing_ok=True)
-        access_raw = _read_bytes(os.path.join(channel, "access.json"), missing_ok=True)
-    except OSError as e:
-        raise HubError(500, "config_unreadable", type(e).__name__)
-    except UnicodeDecodeError as e:
-        raise HubError(500, "config_unreadable", type(e).__name__)
-    from moments import hub_config              # 延迟 import：理由同 set_enabled
-    try:
-        root = hub_config.compose(text)
-    except yaml.YAMLError as e:
-        raise HubError(409, "bad_yaml", hub_config.yaml_error_detail(e, "%s.yml 解析失败" % bot_id))
+        persona_raw = _read_bytes(os.path.join(ed.channel, "CLAUDE.md"), missing_ok=True)
+        access_raw = _read_bytes(os.path.join(ed.channel, "access.json"), missing_ok=True)
+    except OSError as err:
+        raise HubError(500, "config_unreadable", type(err).__name__)
     if persona_raw is None:
         persona = ""
     else:
         try:
             persona = persona_raw.decode("utf-8")
-        except UnicodeDecodeError as e:
-            raise HubError(500, "config_unreadable", type(e).__name__)
-    return {"bot_id": bot_id, "display_name": _top_str(root, "display_name"),
+        except UnicodeDecodeError as err:
+            raise HubError(500, "config_unreadable", type(err).__name__)
+    return {"bot_id": bot_id, "display_name": _top_str(ed.root, "display_name"),
             "persona": persona, "fish_voice_id": _voice_of(access_raw)}
 
 
@@ -1170,27 +1208,19 @@ def edit_save(bot_id, body):
     if persona is not None and len(persona.encode("utf-8")) > MAX_PERSONA:
         raise HubError(413, "payload_too_large", "人设正文超过 64 KiB")
 
-    cfg = _edit_target(bot_id)                  # 404
-    yml_path = _dsh_yml(bot_id)
-    channel = _channel_dir(cfg, bot_id)
+    # 404 → 频道目录落点。不论改的是哪个字段都先过落点这一格（只改名字也一样）：
+    # 落在这只 bot 的家目录之外就整个拒掉，零读取零写入。
+    ed = _edit_open(bot_id)
+    channel = ed.channel
 
     # 读旧内容：409 / 500 全在这一步，全部过了才动第一个字节
     plan = []                                   # [(路径, 新字节, 旧字节或 None)]，按写入顺序
     if name is not None:
-        try:
-            text = _read_bytes(yml_path).decode("utf-8")
-        except OSError as e:
-            raise HubError(500, "config_unreadable", type(e).__name__)
-        except UnicodeDecodeError as e:
-            raise HubError(500, "config_unreadable", type(e).__name__)
+        if ed.yml_err:                          # 要写名字才用得着这份 yml：读不出 500、解析不出 409
+            raise ed.yml_err
         from moments import hub_config          # 延迟 import：理由同 set_enabled
-        try:
-            root = hub_config.compose(text)
-        except yaml.YAMLError as e:
-            raise HubError(409, "bad_yaml",
-                           hub_config.yaml_error_detail(e, "%s.yml 解析失败" % bot_id))
-        new_text = hub_config.set_scalar(text, root, "display_name", name, "str")
-        plan.append((yml_path, new_text.encode("utf-8"), text.encode("utf-8")))
+        new_text = hub_config.set_scalar(ed.text, ed.root, "display_name", name, "str")
+        plan.append((ed.yml_path, new_text.encode("utf-8"), ed.text.encode("utf-8")))
 
     if voice is not None:
         acc_path = os.path.join(channel, "access.json")
@@ -1228,10 +1258,10 @@ def edit_save(bot_id, body):
             undo.append(lambda p=path, b=old_bytes: (_unlink(p) if b is None
                                                      else _atomic_bytes(p, b)))
         if name is not None:
-            _save_db_name(cfg, bot_id, name, undo)
-    except Exception as e:                      # noqa: BLE001 下面按契约翻成 500
+            _save_db_name(ed.cfg, bot_id, name, undo)
+    except Exception as err:                    # noqa: BLE001 下面按契约翻成 500
         partial = _restore_writes(undo)
-        raise HubError(500, "config_write_failed", _write_detail(e, partial))
+        raise HubError(500, "config_write_failed", _write_detail(err, partial))
     return {"ok": True,
             "saved": {"display_name": name is not None, "persona": persona is not None,
                       "fish_voice_id": voice is not None},
