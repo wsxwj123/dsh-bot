@@ -12,6 +12,10 @@
   --ink-faint:#8a8a8a;--hairline:rgba(255,255,255,.08);--hairline-strong:rgba(255,255,255,.16);
   --soft-bg:#2c2c2e;--link:#7d8db5;}}
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+/* 上一条把所有元素的外边距清成了零，弹窗自带的居中也跟着没了（贴在左上角），单独还给它 */
+dialog{margin:auto;}
+/* 显隐用的类放在公共样式里：页面一开始绘制它就生效，藏着的面板不会先闪一下 */
+.hidden{display:none !important;}
 body{font-family:var(--font-body);background:var(--bg);color:var(--ink);line-height:1.6;
   font-size:15px;min-height:100vh;}
 a{color:var(--link);text-decoration:none;}
