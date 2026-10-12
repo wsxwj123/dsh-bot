@@ -143,15 +143,16 @@ def test_重启全部_两只一成一败_tail首行汇总(
 
 def test_重启全部_旧系统的bot不被碰(client, sandbox, heartbeat, launchctl, as_darwin):
     """旧根里的 bot 不在这一页的名单里，任何 launchctl 调用都不许提到它。"""
-    u.write_bot_yml(sandbox.legacy_cfg, "bot2", display_name="旧二", dispatcher_port=17899)
-    u.dsh_bot(sandbox.dsh_cfg, "bot4")
+    # 假名：这台机器上真有 bot2 / bot4，会走到 launchctl 的流程一律不用真名
+    u.write_bot_yml(sandbox.legacy_cfg, "oldbot", display_name="旧二", dispatcher_port=17899)
+    u.dsh_bot(sandbox.dsh_cfg, "newbot")
     launchctl.set_default(installed=True, running=False, pid=4242)
-    heartbeat.tick("bot4", pid=4242)
+    heartbeat.tick("newbot", pid=4242)
     legacy_before = u.snapshot_tree(sandbox.legacy_cfg)
     body = _post_accepted(client)
     st = u.wait_job(client, body["job_id"])
     assert st["state"] == "done", st
-    assert set(launchctl.labels()) == {"com.dsh-bot.bot4"}, launchctl.calls()
+    assert set(launchctl.labels()) == {"com.dsh-bot.newbot"}, launchctl.calls()
     assert u.snapshot_tree(sandbox.legacy_cfg) == legacy_before, "旧配置根被动过"
 
 

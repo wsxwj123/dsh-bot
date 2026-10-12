@@ -50,8 +50,8 @@ def test_单只重启_停用中_409_bot_disabled且不碰进程(
 
 def test_单只重启_旧系统的bot_404且detail点明只管新系统(
         client, sandbox, launchctl, as_darwin):
-    u.write_bot_yml(sandbox.legacy_cfg, "bot2", display_name="旧二", dispatcher_port=17899)
-    r = _post(client, "bot2")
+    u.write_bot_yml(sandbox.legacy_cfg, "oldbot", display_name="旧二", dispatcher_port=17899)
+    r = _post(client, "oldbot")
     assert r.status_code == 404, (r.status_code, r.get_data(as_text=True)[:200])
     body = _json(r)
     assert body["error"] == "bot_not_found"
