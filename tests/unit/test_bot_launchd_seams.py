@@ -294,19 +294,23 @@ def test_sync_one_给了方向与对象_不读配置也不读环境(world, monke
     assert read & WATCHED == set(), read & WATCHED
 
 
-def test_sync_one_停用方向_只发bootout(world):
+def test_sync_one_停用方向_只发两条bootout_主单元与定时单元(world):
+    """第 8 稿 §5c：停用方向由一条 bootout 变成两条（主单元、主动消息的定时单元）。"""
     s = bl.resolve_seams()
     world.swap()
     with world.spy() as read:
         assert bl.sync_one("xbot", False, s) == ("done", None, "重启 1 只：成功 1\nxbot 已停止")
-    assert world.a.verbs() == ["bootout"] and world.b.calls() == []
+    uid = os.getuid()
+    assert world.a.calls() == ["bootout gui/%d/com.dsh-bot.xbot" % uid,
+                               "bootout gui/%d/com.dsh-bot.self-initiate.xbot" % uid]
+    assert world.b.calls() == []
     assert read & WATCHED == set(), read & WATCHED
 
 
 def test_sync_one_方向缺省时现读配置(world):
     world.bot(world.dsh, "offbot", enabled=False)
     assert bl.sync_one("offbot")[0] == "done"
-    assert world.a.verbs() == ["bootout"]
+    assert world.a.verbs() == ["bootout", "bootout"]
 
 
 # ------------------------------------------------------------ one_runner：受理时读一次方向
@@ -331,7 +335,7 @@ def test_one_runner_受理时是停用_之后改成启用_仍走bootout(world):
     world.bot(world.dsh, "xbot", enabled=True)
     world.swap()
     assert runner() == ("done", None, "重启 1 只：成功 1\nxbot 已停止")
-    assert world.a.verbs() == ["bootout"] and world.b.calls() == []
+    assert world.a.verbs() == ["bootout", "bootout"] and world.b.calls() == []
 
 
 def test_one_runner_同名且生效的是旧系统那份_方向是停用(world):
@@ -339,7 +343,9 @@ def test_one_runner_同名且生效的是旧系统那份_方向是停用(world):
     world.bot(world.legacy, "twinbot", enabled=True)
     world.bot(world.dsh, "twinbot", enabled=False)
     assert bl.one_runner("twinbot")()[2].splitlines()[-1] == "twinbot 已停止"
-    assert world.a.calls() == ["bootout gui/%d/com.dsh-bot.twinbot" % os.getuid()]
+    uid = os.getuid()
+    assert world.a.calls() == ["bootout gui/%d/com.dsh-bot.twinbot" % uid,
+                               "bootout gui/%d/com.dsh-bot.self-initiate.twinbot" % uid]
 
 
 def test_one_runner_调用方给了方向就不读配置(world, monkeypatch):
@@ -413,8 +419,9 @@ def test_all_runner_受理后改配置改环境_仍按受理时的范围与方�
     calls = world.a.calls()
     assert "kickstart -k gui/%d/com.dsh-bot.onbot" % uid in calls
     assert "bootout gui/%d/com.dsh-bot.offbot" % uid in calls
+    assert "bootout gui/%d/com.dsh-bot.self-initiate.offbot" % uid in calls   # 第 8 稿：定时单元也停
     assert not any("latebot" in c for c in calls), calls
-    assert len([c for c in calls if c.startswith(("kickstart", "bootout"))]) == 2, calls
+    assert len([c for c in calls if c.startswith(("kickstart", "bootout"))]) == 3, calls
     assert world.b.calls() == []
     assert read & WATCHED == set(), read & WATCHED
 

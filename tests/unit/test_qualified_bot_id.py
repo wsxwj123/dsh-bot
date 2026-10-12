@@ -178,7 +178,9 @@ def test_多只编组_不合格的那只失败_合格的那只照常(roots, _fak
     lines = tail.splitlines()
     assert lines[0] == "重启 2 只：成功 1，失败 1"
     assert lines[1].startswith("jiwen 失败：launchctl bootout 失败") and lines[2] == "goodbot 已停止"
-    assert _fakes.launchctl.calls() == ["bootout gui/%d/com.dsh-bot.goodbot" % os.getuid()]
+    uid = os.getuid()                    # 第 8 稿 §5c：停用方向两条 bootout（主单元、定时单元）
+    assert _fakes.launchctl.calls() == ["bootout gui/%d/com.dsh-bot.goodbot" % uid,
+                                        "bootout gui/%d/com.dsh-bot.self-initiate.goodbot" % uid]
 
 
 # ------------------------------------------------------------ 名单的两个出口
