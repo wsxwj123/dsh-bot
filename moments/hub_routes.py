@@ -967,7 +967,9 @@ def _oauth_activate_locked(provider, email_hash):
 # import 放在本段内而不是文件顶部：段界就是分工线，顶部 import 区是各段的公共冲突点。
 from flask import current_app                          # noqa: E402
 
+from moments import bot_launchd                        # noqa: E402
 from moments import bots_client                        # noqa: E402
+from moments import hub_addbot                         # noqa: E402  单只重启的 id 形状校验共用
 
 
 @hub_bp.record_once
@@ -994,12 +996,16 @@ def bots_list():
     # 来源标注同理走顶层：`sources` = {id: {source, shadowed}}，两边同名的以新系统为准，
     # 被压住的旧那份在 `overrides` 里点名（页面提示覆盖关系，别静默）。
     # 四个出口一律按页面上这几只过滤：接口回的东西不许超出这一页的范围。
+    # `restart_available` / `restart_reason`（§2）：这台机器走不走得了 launchd 由
+    # `restart_plan()` 一个出处判；不可用时 reason 恒带一句人话，页面不必自己编。
     src = bots_client.bot_sources()
     entries = bots_client.hub_visible(entries, src)
     on_page = {e["id"] for e in entries}
-    return jsonify({"bots": bots_client.probe_bots(entries),
+    plan = bots_client.restart_plan()
+    return jsonify({"bots": bots_client.probe_bots(entries, src),
                     "disabled": [b for b in bots_client.disabled_ids() if b in on_page],
-                    "restart_available": bots_client.restart_plan()[1],
+                    "restart_available": plan.available,
+                    "restart_reason": plan.reason,
                     "sources": {k: v for k, v in src.items() if k in on_page},
                     "overrides": sorted(k for k, v in src.items()
                                         if v["shadowed"] and k in on_page)})
@@ -1007,10 +1013,53 @@ def bots_list():
 
 @hub_bp.post("/hub/api/bots/restart")
 def bots_restart():
-    argv, available = bots_client.restart_plan()
-    if not available:
-        return jsonify({"error": "restart_script_missing", "detail": "先跑 install.sh"}), 409
-    acc = _jobs().start(argv)
+    """重启全部（§3）：请求体忽略，范围恒为 ``hub_visible(list_bots(), bot_sources())``。
+
+    可用性先判（409 `restart_unsupported` 在 `restart_in_progress` 之前）；launchd 路径
+    的 runner 由 ``bot_launchd`` 提供，覆盖命令路径包一层既有 ``_run_command``。
+    """
+    plan = bots_client.restart_plan()
+    if not plan.available:
+        return jsonify({"error": "restart_unsupported",
+                        "detail": plan.reason or "这台机器走不了 launchd"}), 409
+    runner = (bots_client.command_runner(plan.override) if plan.override
+              else bot_launchd.all_runner())
+    acc = _jobs().start(runner)
+    if acc.busy:
+        return jsonify({"error": "restart_in_progress", "job_id": acc.busy}), 409
+    return jsonify({"job_id": acc.job_id, "started_at": acc.started_at}), 202
+
+
+@hub_bp.post("/hub/api/bots/<bot_id>/restart")
+def bots_restart_one(bot_id):
+    """行内手动重启这一只（§4）。判定顺序：id 形状 → 在不在名单 → 能不能重启 → 停没停 → 忙。
+
+    对停用中的 bot 拒绝是刻意的（拍板 2）：本端点只服务「用户手点行内重启」。把停用中
+    的 bot 真正停下来的动作走开关端点（§4b 的同步），不经这里的 409。
+    """
+    if not isinstance(bot_id, str) or not hub_addbot.BOT_ID_RE.match(bot_id):
+        return jsonify({"error": "bad_bot_id"}), 400
+    try:
+        names = {e["id"] for e in bots_client.hub_visible(bots_client.list_bots(),
+                                                          bots_client.bot_sources())}
+    except Exception as e:
+        return jsonify({"error": "config_unreadable", "detail": type(e).__name__}), 500
+    if bot_id not in names:
+        # 旧系统的 bot 与不存在的 bot 都走这一格：这一页只管新系统的 bot
+        return jsonify({"error": "bot_not_found",
+                        "detail": "%s 不在这一页的名单里（这一页只管新系统的 bot）" % bot_id}), 404
+    plan = bots_client.restart_plan()
+    if not plan.available:
+        return jsonify({"error": "restart_unsupported",
+                        "detail": plan.reason or "这台机器走不了 launchd"}), 409
+    if not bot_launchd.enabled_of(bot_id):
+        return jsonify({"error": "bot_disabled",
+                        "detail": "这只 bot 现在是停用状态，先启用再重启（或直接用开关）"}), 409
+    # 执行体与 §4b 的单只同步是同一份（方向按执行时生效配置的 enabled；这里必然启用）；
+    # 覆盖命令路径整段换成执行该命令，命令串本身不拼 bot 参数。
+    runner = (bots_client.command_runner(plan.override) if plan.override
+              else bot_launchd.one_runner(bot_id))
+    acc = _jobs().start(runner)
     if acc.busy:
         return jsonify({"error": "restart_in_progress", "job_id": acc.busy}), 409
     return jsonify({"job_id": acc.job_id, "started_at": acc.started_at}), 202
@@ -1428,12 +1477,18 @@ def setup_write_key():
 @hub_bp.post("/hub/api/bots/<bot_id>/enabled")
 @_api
 def bots_set_enabled(bot_id):
-    """`{"enabled": true|false}` → 写 `configs/<bot>.yml` 的顶层 `enabled`。
+    """`{"enabled": true|false}` → 写 `configs/<bot>.yml` 的顶层 `enabled`，再**同步这一只**。
 
     - 非法 id → `400 bad_bot_id`（形状校验与建 bot 同一个 `BOT_ID_RE`）
     - 没这个 bot → `404 bot_not_found`
     - `enabled` 不是布尔 → `400 bad_body`（`"false"` 这种字符串一律不认：
       按 JS 的真值判它会变成"点了停止反而是启用"）
+
+    写盘是用户的诉求，必须发生；同步（§4b）只是**写盘之后**的追加动作，三档去向：
+    旧系统的 bot `skipped/legacy`（旧系统的东西一律不碰，即使设了覆盖命令）、
+    新系统根不在场 `skipped/no_dsh_root`、非 macOS 无覆盖命令 `skipped/no_launchd`；
+    其余登记单只同步 job（忙 → `busy` 如实写进响应，绝不 409 —— 拒绝会让配置改不成）。
+    同步**不受** `bot_disabled` 检查：它服务的正是「停用」这个动作本身（F1 的解法）。
     """
     body = _require_json_object(request.get_json(silent=True))
     enabled = body.get("enabled")
@@ -1443,7 +1498,28 @@ def bots_set_enabled(bot_id):
     with hub_addbot.hold_addbot_lock():
         value = hub_addbot.set_enabled(bot_id, enabled)
     return jsonify({"ok": True, "enabled": value,
-                    "restart_hint": hub_addbot.RESTART_FLAGS})
+                    "restart_hint": hub_addbot.RESTART_FLAGS,
+                    "sync": _bt_sync(bot_id)})
+
+
+def _bt_sync(bot_id):
+    """写盘成功后把这一只同步到配置说的样子（§4b 的去向判定）。返回 `sync` 对象。"""
+    from moments import config_sources
+    cfg = config_sources.effective_config(bot_id)
+    if cfg is None or cfg.get("_source") != config_sources.SOURCE_DSH:
+        return {"state": "skipped", "reason": "legacy"}
+    d = config_sources.dsh_dir()
+    if d is None or not os.path.isdir(str(d)):
+        return {"state": "skipped", "reason": "no_dsh_root"}
+    plan = bots_client.restart_plan()
+    if sys.platform != "darwin" and not plan.override:
+        return {"state": "skipped", "reason": "no_launchd"}
+    runner = (bots_client.command_runner(plan.override) if plan.override
+              else bot_launchd.one_runner(bot_id))
+    acc = _jobs().start(runner)
+    if acc.busy:
+        return {"state": "busy", "job_id": acc.busy}
+    return {"state": "started", "job_id": acc.job_id, "started_at": acc.started_at}
 
 
 # ======================================================================
