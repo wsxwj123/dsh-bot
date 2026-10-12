@@ -347,3 +347,69 @@ def test_enabled_of_新系统根被关掉_原先放在那里的bot回否(roots, 
     _write(dsh, "gatebot")
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", "off")
     assert bot_launchd.enabled_of("gatebot") is False
+
+
+# ------------------------------------------------------------ 重启的两处：同一句判据（严格口径）
+
+def _entries(*ids):
+    return [{"id": i, "display_name": i} for i in ids]
+
+
+def test_严格口径_只留来源明确是新系统的(roots):
+    legacy, dsh = roots
+    _write(legacy, "oldbot")
+    _write(dsh, "gatebot")
+    _write(legacy, "twinbot", enabled=True)
+    _write(dsh, "twinbot", enabled=False)           # 生效的是旧系统那份
+    got = bots_client.hub_visible(bots_client.list_bots(), bots_client.bot_sources(), strict=True)
+    assert [e["id"] for e in got] == ["gatebot"]
+
+
+def test_严格口径_来源读不出时为空_显示用的兜底不变(roots):
+    es = _entries("gatebot", "oldbot")
+    assert bots_client.hub_visible(es, {}, strict=True) == []
+    assert bots_client.hub_visible(es, {}) == es
+
+
+def test_严格口径_新系统根不在场时为空_显示用的兜底不变(roots, monkeypatch):
+    legacy, _dsh = roots
+    _write(legacy, "oldbot")
+    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", "off")
+    es, src = bots_client.list_bots(), bots_client.bot_sources()
+    assert [e["id"] for e in bots_client.hub_visible(es, src)] == ["oldbot"]
+    assert bots_client.hub_visible(es, src, strict=True) == []
+
+
+def test_严格口径_名单注入时为空_显示用的兜底不变(roots, monkeypatch, tmp_path):
+    _legacy, dsh = roots
+    _write(dsh, "gatebot")                          # 新系统根下明明有它的启用配置
+    p = tmp_path / "bots.json"
+    p.write_text('[{"id": "gatebot"}]', encoding="utf-8")
+    monkeypatch.setenv("HUB_BOTS_FILE", str(p))
+    es = bots_client.list_bots()
+    assert [e["id"] for e in es] == ["gatebot"]
+    assert bots_client.hub_visible(es, strict=True) == []       # 来源现取：注入时为空
+    assert bots_client.hub_visible(es) == es
+
+
+@pytest.fixture
+def client(roots):
+    from flask import Flask
+
+    from moments.hub_routes import hub_bp
+    app = Flask(__name__)
+    app.register_blueprint(hub_bp)
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+@pytest.mark.parametrize("bot_id", ["oldbot", "twinbot", "ghostbot"])
+def test_单只重启_没过闸的404_与开关编辑逐字同一句(roots, client, bot_id):
+    """旧系统的、同名且生效的是旧系统那份的、不存在的：同一格，同一句话。"""
+    legacy, dsh = roots
+    _write(legacy, "oldbot")
+    _write(legacy, "twinbot", enabled=True)
+    _write(dsh, "twinbot", enabled=False)
+    r = client.post("/hub/api/bots/%s/restart" % bot_id)
+    assert r.status_code == 404
+    assert r.get_json() == {"error": "bot_not_found", "detail": hub_addbot.GATE_404_DETAIL}
