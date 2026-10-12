@@ -63,9 +63,17 @@ def _roots(sandbox):
 
 
 @pytest.fixture(autouse=True)
-def fakes(sandbox, bun, telegram, launchctl, as_darwin, monkeypatch):
-    """新建流程要的假件全部在位：假 bun、假 launchctl、假 Telegram。探活上限收到 1 秒。"""
-    u.tighten_constant(monkeypatch, value=30, new=1.0)
+def fakes(request, sandbox, bun, telegram, launchctl, as_darwin, monkeypatch):
+    """新建流程要的假件全部在位：假 bun、假 launchctl、假 Telegram。
+
+    探活上限（§1：30 秒，测试可改）只对「应当被拒」的用例收到 1 秒：实现没按约定拒掉、真的
+    走到等它启动那一步时，红用例不用陪着等满。要它建成的用例（取用了 heartbeat、让心跳一直
+    新鲜的那几条）不收，在约定的原值下跑：这几条实测每条本身就要 1 秒上下（假件头一次被执行
+    就要零点几秒，见 botops_util.tightened 的说明），1 秒的上限正顶在它头上，机器一忙就可能
+    偶发 207。
+    """
+    if "heartbeat" not in request.fixturenames:
+        u.tighten_constant(monkeypatch, value=30, new=1.0)
     telegram.mode = "ok"
     launchctl.set_default(installed=True, running=True, pid=4242)
     return type("Fakes", (), {"bun": bun, "telegram": telegram, "launchctl": launchctl})
