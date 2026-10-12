@@ -18,20 +18,61 @@ TOKEN = "123456789:test-AAaaBBbbCCccDDddEEeeFFggHHhh11"
 
 @pytest.fixture(autouse=True)
 def _seams(tmp_path, monkeypatch):
-    """五个接缝全钉在 tmp：落盘、模板扫描、`.env` 比对、plist、自检脚本都不许出 tmp。
+    """接缝全钉在 tmp：落盘（新系统配置根 + `DSH_BOT_HOME`）、模板扫描、`.env` 比对、
+    launchd 假件与 bun 假件都不许出 tmp。
 
-    `HUB_CONFIGS_DSH_DIR=off`：同名判定/端口占用现在也看新系统那套配置
-    （`~/.dsh-bot/configs`），这里关掉它，别让用例摸到真实目录。
+    第 2 稿起新建 bot 落到新系统那套位置（§7）：配置进 `HUB_CONFIGS_DSH_DIR`、
+    频道树进 `<DSH_BOT_HOME>/bots/<bot>/channel`。两个根都指到 tmp ——
+    不钉住就等于拿真机 `~/.dsh-bot` 去建 bot。
+    `HUB_LAUNCHCTL` 指毒丸：任何真调 launchctl 的路径当场失败，绝不碰 gui domain。
     """
-    for name in ("configs", "channels", "agents"):
+    for name in ("configs", "channels", "agents", "dsh-configs", "dsh-home"):
         (tmp_path / name).mkdir()
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(tmp_path / "configs"))
     monkeypatch.setenv("HUB_CHANNELS_DIR", str(tmp_path / "channels"))
     monkeypatch.setenv("HUB_LAUNCHAGENTS_DIR", str(tmp_path / "agents"))
-    monkeypatch.setenv("HUB_RESTART_SCRIPT", str(tmp_path / "no-such.sh"))
     monkeypatch.setenv("HUB_TELEGRAM_API_BASE", "http://127.0.0.1:9")
-    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", "off")
+    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(tmp_path / "dsh-configs"))
+    monkeypatch.setenv("DSH_BOT_HOME", str(tmp_path / "dsh-home"))
+    poison = tmp_path / "poison"
+    poison.mkdir()
+    (poison / "launchctl").write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+    (poison / "launchctl").chmod(0o755)
+    monkeypatch.setenv("HUB_LAUNCHCTL", str(poison / "launchctl"))
+    # 毒丸 bun：register 必须显式注入 fake_bun，否则任何真跑 autostart.ts 的路径当场失败
+    (poison / "bun").write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+    (poison / "bun").chmod(0o755)
+    monkeypatch.setenv("HUB_BUN", str(poison / "bun"))
     return tmp_path
+
+
+def _force_darwin(monkeypatch):
+    """把平台判定钉成 macOS（契约 §1 没有平台接缝，按 sys.platform 判）。"""
+    import sys as _sys
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    if not hasattr(os, "getuid"):
+        monkeypatch.setattr(os, "getuid", lambda: 501, raising=False)
+
+
+@pytest.fixture
+def fake_bun(tmp_path, monkeypatch):
+    """假 bun：记 argv 与 env，按序回退出码，绝不真跑 autostart.ts。"""
+    exe = tmp_path / "fake-bun"
+    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    exe.chmod(0o755)
+    monkeypatch.setenv("HUB_BUN", str(exe))
+    calls = []
+    codes = []
+
+    def run(argv, **kw):
+        calls.append({"argv": list(argv), "env": kw.get("env")})
+        code = codes.pop(0) if codes else 0
+        return type("R", (), {"returncode": code})()
+
+    monkeypatch.setattr(ab.subprocess, "run", run)
+    run.codes = codes
+    run.calls = calls
+    return run
 
 
 def fields(**over):
@@ -345,24 +386,27 @@ def _mode(p):
 
 def test_落盘产物清单齐全_权限对_token只在env里(_seams):
     ab.lay_down(ab._validate(fields()))
-    home = _seams / "channels" / "xiaoyu"
-    yml = _seams / "configs" / "xiaoyu.yml"
-    assert (home / ".env").read_text(encoding="utf-8").strip() == "TELEGRAM_BOT_TOKEN=" + TOKEN
-    assert json.loads((home / "access.json").read_text(encoding="utf-8")) == \
+    home = _seams / "dsh-home" / "bots" / "xiaoyu"
+    chan = home / "channel"
+    yml = _seams / "dsh-configs" / "xiaoyu.yml"
+    assert (chan / ".env").read_text(encoding="utf-8").strip() == "TELEGRAM_BOT_TOKEN=" + TOKEN
+    assert json.loads((chan / "access.json").read_text(encoding="utf-8")) == \
         {"allowFrom": [123456789]}
-    assert (home / "CLAUDE.md").read_text(encoding="utf-8") == "正文"
-    assert (home / "memory" / "MEMORY.md").exists() and (home / "logs").is_dir()
-    assert (_mode(home), _mode(home / "logs"), _mode(home / "memory")) == (0o700,) * 3
-    assert (_mode(home / ".env"), _mode(home / "access.json"), _mode(yml)) == (0o600,) * 3
+    assert (chan / "CLAUDE.md").read_text(encoding="utf-8") == "正文"
+    assert (chan / "memory" / "MEMORY.md").exists()
+    # §7：频道树里不带 logs（dsh 的日志在 <bot 家>/logs，由网关与 autostart.ts 负责）
+    assert not (chan / "logs").exists()
+    assert (_mode(home), _mode(chan), _mode(chan / "memory")) == (0o700,) * 3
+    assert (_mode(chan / ".env"), _mode(chan / "access.json"), _mode(yml)) == (0o600,) * 3
     hits = [str(p) for p in _seams.rglob("*")
             if p.is_file() and TOKEN in p.read_text(encoding="utf-8", errors="ignore")]
-    assert hits == [str(home / ".env")], hits
+    assert hits == [str(chan / ".env")], hits
 
 
 def test_落盘的yml不含token且字段齐全(_seams):
     import yaml
     ab.lay_down(ab._validate(fields(display_name="小雨🌧️ちゃん")))
-    text = (_seams / "configs" / "xiaoyu.yml").read_text(encoding="utf-8")
+    text = (_seams / "dsh-configs" / "xiaoyu.yml").read_text(encoding="utf-8")
     data = yaml.safe_load(text)
     assert TOKEN not in text
     assert data["id"] == "xiaoyu" and data["display_name"] == "小雨🌧️ちゃん"
@@ -376,7 +420,7 @@ def test_namespace每次都新_且不与既有表撞(_seams):
         ab.lay_down(ab._validate(fields(bot_id="bot_%d" % i, dispatcher_port=17900 + i)))
         import yaml
         seen.add(yaml.safe_load(
-            (_seams / "configs" / ("bot_%d.yml" % i)).read_text(encoding="utf-8"))["namespace_uuid"])
+            (_seams / "dsh-configs" / ("bot_%d.yml" % i)).read_text(encoding="utf-8"))["namespace_uuid"])
     assert len(seen) == 3
 
 
@@ -385,8 +429,8 @@ def test_move失败_回滚后磁盘与操作前一致(_seams, monkeypatch):
     monkeypatch.setattr(shutil, "move", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
     with pytest.raises(OSError):
         ab.lay_down(ab._validate(fields()))
-    assert not (_seams / "channels" / "xiaoyu").exists()
-    assert not (_seams / "configs" / "xiaoyu.yml").exists()
+    assert not (_seams / "dsh-home" / "bots" / "xiaoyu").exists()
+    assert not (_seams / "dsh-configs" / "xiaoyu.yml").exists()
     assert list((_seams / "channels").iterdir()) == []
 
 
@@ -401,15 +445,16 @@ def test_写yml失败_已就位的频道树被精确删掉(_seams, monkeypatch):
     monkeypatch.setattr(ab, "_create_file", boom)
     with pytest.raises(OSError):
         ab.lay_down(ab._validate(fields()))
-    assert not (_seams / "channels" / "xiaoyu").exists()
-    assert not (_seams / "configs" / "xiaoyu.yml").exists()
+    assert not (_seams / "dsh-home" / "bots" / "xiaoyu").exists()
+    assert not (_seams / "dsh-configs" / "xiaoyu.yml").exists()
 
 
 def test_回滚绝不碰目录里别人的东西(_seams, monkeypatch):
     """`rm -rf` 版的回滚会把这个文件一起删掉 —— 那是别人的聊天记录。"""
     keep = _existing_bot(_seams, bot_id="laoda", port=17801)
     (keep / "keepme.txt").write_text("别删我", encoding="utf-8")
-    ab._rollback([(True, str(keep)), (False, str(_seams / "configs" / "laoda.yml"))])
+    ab._rollback([(ab._MADE_TREE, str(keep)),
+                  (ab._MADE_FILE, str(_seams / "configs" / "laoda.yml"))])
     assert (keep / "keepme.txt").read_text(encoding="utf-8") == "别删我"
     assert keep.is_dir(), "非空目录被删了"
 
@@ -426,8 +471,8 @@ def test_写完后端口被别人抢走_复查拦下并回滚(_seams, monkeypatc
     with pytest.raises(HubError) as e:
         ab.lay_down(ab._validate(fields()))
     assert e.value.error == "bot_exists"
-    assert not (_seams / "channels" / "xiaoyu").exists()
-    assert not (_seams / "configs" / "xiaoyu.yml").exists()
+    assert not (_seams / "dsh-home" / "bots" / "xiaoyu").exists()
+    assert not (_seams / "dsh-configs" / "xiaoyu.yml").exists()
 
 
 # ---------------------------------------------------------------- C 段 · 207 三种分型
@@ -444,80 +489,64 @@ class _Jobs:
         return type("Acc", (), {"job_id": self._id, "started_at": 0, "busy": None})()
 
 
-def _new_script(root):
-    p = root / "restart-new.sh"
-    p.write_text('out="$(python3 -m bots_registry --format=sh)" || exit 1\n', encoding="utf-8")
-    return str(p)
-
-
-def _old_script(root):
-    p = root / "restart-old.sh"
-    p.write_text('BOTS=("laoda:17801")\n', encoding="utf-8")
-    return str(p)
-
-
-def test_自检_新版通过_旧版与文件不存在都不通过(_seams, monkeypatch):
-    monkeypatch.setenv("HUB_RESTART_SCRIPT", _new_script(_seams))
-    assert ab._script_reads_registry() is True
-    monkeypatch.setenv("HUB_RESTART_SCRIPT", _old_script(_seams))
-    assert ab._script_reads_registry() is False
-    monkeypatch.setenv("HUB_RESTART_SCRIPT", str(_seams / "gone.sh"))
-    assert ab._script_reads_registry() is False
-
-
-def test_旧版脚本_restart是skipped且给两条确切命令(_seams, monkeypatch):
-    monkeypatch.setenv("HUB_RESTART_SCRIPT", _old_script(_seams))
-    jobs = _Jobs()
-    step = ab.restart(ab._validate(fields()), jobs)
-    assert step["state"] == "skipped" and jobs.started == [], "自检没过却还是把重启发出去了"
-    assert "cp restart-bots.example.sh" in step["manual_hint"]
-
-
-def test_脚本是新版但探活不通_是failed不是done(_seams, monkeypatch):
-    monkeypatch.setenv("HUB_RESTART_SCRIPT", _new_script(_seams))
-    monkeypatch.setenv("HUB_RESTART_CMD", "/usr/bin/true")
-    monkeypatch.setattr(ab, "wait_alive", lambda port, **k: False)
-    step = ab.restart(ab._validate(fields()), _Jobs())
-    assert step["state"] == "failed" and step["job_id"] == "job1234"
-    assert step["manual_hint"]
-
-
-def test_探活通了才记done(_seams, monkeypatch):
-    monkeypatch.setenv("HUB_RESTART_SCRIPT", _new_script(_seams))
-    monkeypatch.setenv("HUB_RESTART_CMD", "/usr/bin/true")
-    monkeypatch.setattr(ab, "wait_alive", lambda port, **k: True)
-    assert ab.restart(ab._validate(fields()), _Jobs())["state"] == "done"
-
-
-def test_注册目录只读_register是failed且给能自己补的命令(_seams):
-    if os.name == "nt" or os.getuid() == 0:
-        pytest.skip("root 或 Windows 上只读目录拦不住写入")
-    ro = _seams / "agents"
-    ro.chmod(0o500)
-    try:
-        step = ab.register(ab._validate(fields()))
-    finally:
-        ro.chmod(0o700)
-    assert step["state"] in ("failed", "skipped")
-    assert step["manual_hint"], "207 不给命令 = 用户不知道差哪一步"
-
-
-def test_接缝非默认时不实调launchctl_只记skipped_launchctl(_seams, monkeypatch):
+def test_restart_非macOS是skipped加manual_hint(_seams, monkeypatch):
+    """非 macOS 没有机制会拉起新 bot：skipped 加确切命令，不假装等 30 秒（S7）。"""
     import sys as _sys
-    if _sys.platform != "darwin":
-        pytest.skip("非 macOS 没有 launchd 分支")
-    called = []
-    monkeypatch.setattr(ab.subprocess, "run",
-                        lambda *a, **k: called.append(a) or type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(_sys, "platform", "linux")
+    step = ab.restart(ab._validate(fields()))
+    assert step["state"] == "skipped" and step["manual_hint"]
+    assert "kickstart" in step["manual_hint"]
+
+
+def test_restart_等活不通过_是failed且manual_hint带kickstart与日志(_seams, monkeypatch):
+    _force_darwin(monkeypatch)
+    monkeypatch.setattr(ab, "wait_alive", lambda bot_id: (False, "30 秒内没有新心跳"))
+    step = ab.restart(ab._validate(fields()))
+    assert step["state"] == "failed" and "心跳" in step["detail"]
+    assert "launchctl kickstart -k gui/$UID/com.dsh-bot.xiaoyu" in step["manual_hint"]
+    assert str(_seams / "dsh-home" / "bots" / "xiaoyu" / "logs" / "launchd.log") \
+        in step["manual_hint"]
+
+
+def test_restart_等活通过就是done(_seams, monkeypatch):
+    _force_darwin(monkeypatch)
+    monkeypatch.setattr(ab, "wait_alive", lambda bot_id: (True, None))
+    assert ab.restart(ab._validate(fields()))["state"] == "done"
+
+
+def test_register_bun解析不到_是failed且给手工命令(_seams, monkeypatch):
+    monkeypatch.setenv("HUB_BUN", str(_seams / "no-such-bun"))
     step = ab.register(ab._validate(fields()))
-    assert step == {"name": "register", "state": "done", "detail": "skipped_launchctl"}
-    plist = _seams / "agents" / "com.example.xiaoyu-self-initiate.plist"
-    text = plist.read_text(encoding="utf-8")
-    assert "xiaoyu" in text and "123456789" in text and "{BOT_ID}" not in text
-    # 只比 argv[0]：tmp_path 的目录名里就带着本用例的名字（含 launchctl 三个字），
-    # 拿 str(整个调用) 去匹配会永远为真
-    assert not any(a[0][0].endswith("launchctl") for a in called), "接缝被注入了却动了 gui domain"
-    assert list((_seams / "agents").glob("*.tmp")) == [], "留下了临时文件"
+    assert step["state"] == "failed" and step["detail"] == "bun_missing"
+    assert "autostart.ts" in step["manual_hint"]
+
+
+def test_register_两条命令_装的是新根那份yml(_seams, fake_bun):
+    step = ab.register(ab._validate(fields()))
+    assert step == {"name": "register", "state": "done"}
+    yml = str(_seams / "dsh-configs" / "xiaoyu.yml")
+    assert [c["argv"][2:] for c in fake_bun.calls] == [["install", yml],
+                                                       ["install-jobs", yml]]
+    assert all(c["argv"][1].replace("\\", "/").endswith("gateway/scripts/autostart.ts")
+               for c in fake_bun.calls)
+    assert fake_bun.calls[0]["env"] is not None
+    assert not list((_seams / "agents").iterdir()), "面板不该再自己往 LaunchAgents 写 plist"
+
+
+def test_register_install失败就短路_不跑install_jobs(_seams, monkeypatch, fake_bun):
+    fake_bun.codes[:] = [3]
+    step = ab.register(ab._validate(fields()))
+    assert step["state"] == "failed" and step["detail"] == "install_failed"
+    assert len(fake_bun.calls) == 1
+    assert "autostart.ts" in step["manual_hint"]
+
+
+def test_register_install成功但install_jobs失败_是install_jobs_failed(_seams, fake_bun):
+    fake_bun.codes[:] = [0, 1]
+    step = ab.register(ab._validate(fields()))
+    assert step["state"] == "failed" and step["detail"] == "install_jobs_failed"
+    assert len(fake_bun.calls) == 2
+    assert step["manual_hint"]
 
 
 # ---------------------------------------------------------------- 三段总装（§4.3）
@@ -528,32 +557,40 @@ def test_getMe失败_200且ok为false且磁盘一个产物都没有(_seams, stub
     assert (code, body["ok"], body["stage"]) == (200, False, "invalid_token")
     assert list((_seams / "channels").iterdir()) == []
     assert list((_seams / "configs").glob("*.yml")) == []
+    assert list((_seams / "dsh-configs").glob("*.yml")) == []
+    assert not (_seams / "dsh-home" / "bots" / "xiaoyu").exists()
 
 
-def test_全成功_201且五步都done_restart_hint两个都真(_seams, stub_get, monkeypatch):
+def test_全成功_201且五步都done_restart_hint没有待补动作(_seams, stub_get, monkeypatch,
+                                                  fake_bun):
     stub_get(body={"ok": True, "result": {"id": 123456789, "username": "my_bot"}})
-    monkeypatch.setenv("HUB_RESTART_SCRIPT", _new_script(_seams))
-    monkeypatch.setenv("HUB_RESTART_CMD", "/usr/bin/true")
-    monkeypatch.setattr(ab, "wait_alive", lambda port, **k: True)
+    _force_darwin(monkeypatch)
+    monkeypatch.setattr(ab, "wait_alive", lambda bot_id: (True, None))
     body, code = ab.create(fields(), _Jobs())
     assert code == 201 and body["ok"] is True and body["username"] == "my_bot"
     assert [s["name"] for s in body["steps"]] == ["validate", "getme", "files",
                                                   "register", "restart"]
     assert all(s["state"] == "done" for s in body["steps"]), body["steps"]
-    assert body["restart_hint"] == {"bot": True, "moments_web": True}
+    # S4：全 done 就没有待补的动作（register 的 bootstrap 已把网关拉起并等活通过）
+    assert body["restart_hint"] == {"bot": False, "moments_web": False}
     assert "manual_hint" not in body and "error" not in body
+    assert (_seams / "dsh-configs" / "xiaoyu.yml").exists()
+    assert (_seams / "dsh-home" / "bots" / "xiaoyu" / "channel" / ".env").exists()
 
 
-def test_C段没走完_207且文件仍在且必给manual_hint(_seams, stub_get):
-    """自检脚本不存在（夹具默认）→ restart 是 skipped → 整体 207，但 B 段产物必须留着：
+def test_C段没走完_207且文件仍在且必给manual_hint(_seams, stub_get, monkeypatch):
+    """毒丸 bun（夹具默认）→ register 失败 → 整体 207，但 B 段产物必须留着：
     文件已经是对的，删掉等于用户白填一遍表单。"""
     stub_get(body={"ok": True, "result": {"id": 123456789, "username": "my_bot"}})
+    _force_darwin(monkeypatch)
+    monkeypatch.setattr(ab, "wait_alive", lambda bot_id: (False, "没有新心跳"))
     body, code = ab.create(fields(), _Jobs())
     assert code == 207 and body["error"] == "bot_created_partial" and body["ok"] is False
-    assert {s["name"]: s["state"] for s in body["steps"]}["restart"] == "skipped"
+    assert {s["name"]: s["state"] for s in body["steps"]}["register"] == "failed"
     assert body["manual_hint"]
-    assert (_seams / "configs" / "xiaoyu.yml").exists()
-    assert (_seams / "channels" / "xiaoyu").is_dir()
+    assert body["restart_hint"] == {"bot": True, "moments_web": False}
+    assert (_seams / "dsh-configs" / "xiaoyu.yml").exists()
+    assert (_seams / "dsh-home" / "bots" / "xiaoyu" / "channel").is_dir()
 
 
 def test_token已被别的bot用_落盘前就拦住(_seams, stub_get):
@@ -562,7 +599,8 @@ def test_token已被别的bot用_落盘前就拦住(_seams, stub_get):
     with pytest.raises(HubError) as e:
         ab.create(fields(), _Jobs())
     assert (e.value.status, e.value.error) == (409, "token_in_use")
-    assert not (_seams / "channels" / "xiaoyu").exists()
+    assert not (_seams / "dsh-home" / "bots" / "xiaoyu").exists()
+    assert not (_seams / "dsh-configs" / "xiaoyu.yml").exists()
 
 
 def test_B段异常翻成500_internal且detail只有异常类名(_seams, stub_get, monkeypatch):
@@ -576,6 +614,8 @@ def test_B段异常翻成500_internal且detail只有异常类名(_seams, stub_ge
 
 def test_全流程任何一条失败路径都不把token带进响应(_seams, stub_get, monkeypatch):
     """token 只该在 `.env` 里。这条把三条失败路径的响应体拍平了一起看。"""
+    _force_darwin(monkeypatch)
+    monkeypatch.setattr(ab, "wait_alive", lambda bot_id: (False, "没有新心跳"))
     blobs = []
     stub_get(status=401, body={"error_code": 401, "description": "token=" + TOKEN})
     blobs.append(json.dumps(ab.create(fields(), _Jobs())[0], ensure_ascii=False))
@@ -586,7 +626,9 @@ def test_全流程任何一条失败路径都不把token带进响应(_seams, stu
         ab.create(fields(bot_id="another"), _Jobs())
     blobs.append(e.value.detail)
     for blob in blobs:
-        assert TOKEN not in blob and "/bot" not in blob
+        # `/bot<token>`（Telegram 请求 URL 的形状）与 token 原文都不许出现；
+        # 路径里的 `/bots/`（新系统 bot 家）不在此列
+        assert TOKEN not in blob and ("/bot" + TOKEN) not in blob
 
 
 def test_并发创建_第二个立刻409_config_busy():
