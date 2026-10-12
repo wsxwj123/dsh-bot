@@ -1581,9 +1581,12 @@ from werkzeug.routing import BaseConverter              # noqa: E402  空名字�
 
 from moments import config_sources                      # noqa: E402
 
-_DM_BOT_RE = _dm_re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# 这两条都是**整串匹配**（结尾 `\Z`，INTERFACE-新系统bot运维 §0 第 6 条）：`$` 会放过末尾
+# 多出来的一个换行，带换行的名字就被原样转发给网关了。字符集是它们各自的规则，
+# 不是 bot id 那一条 —— 供应商名里大写字母与连字符都合法。
+_DM_BOT_RE = _dm_re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
 # §3.9：自建供应商名字规则（同网关 3.1.1）—— 不合规则的请求直接 400 bad_provider
-_DM_PROVIDER_RE = _dm_re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+_DM_PROVIDER_RE = _dm_re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}\Z")
 
 # 契约 2.1：providers 行逐字段透传网关 /v1/model 的项；custom_providers 是它的同值投影，
 # 字段集与旧契约逐字相同（锁定测试按那七个字段逐一比对）。
