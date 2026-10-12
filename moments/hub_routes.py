@@ -1567,6 +1567,7 @@ import urllib.error                                     # noqa: E402
 
 import config_loader                                    # noqa: E402
 import gateway_client                                   # noqa: E402
+from werkzeug.routing import BaseConverter              # noqa: E402  空名字段的转换器
 
 from moments import config_sources                      # noqa: E402
 
@@ -1585,6 +1586,10 @@ _DM_MODEL_ACTIONS = ("add", "remove", "set_context")
 _DM_NO_GATEWAY = {"ok": False, "error": "no_gateway", "text": "没有在运行的新系统 bot"}
 _DM_TIMEOUT = {"ok": False, "error": "gateway_timeout",
                "text": "网关没有及时响应，这次操作可能已经保存成功"}
+# 只读端点（preview / test）的 504 文案：这次操作没有写，别让用户以为"可能已生效"，
+# 两句话刻意不同（契约 §11c/§12b 钉住了各自的逐字文案）。
+_DM_TIMEOUT_READONLY = {"ok": False, "error": "gateway_timeout",
+                        "text": "网关没有及时响应，请稍后重试"}
 # 网关响应收到之后才在管理台这侧出的岔子（响应体不是 JSON、读 state 文件失败之类）。
 # 形状必须跟上面两条一样，页面按 JSON 取 text；冒泡出去会变成框架级的 {"error":"internal"}，
 # 没有 text 可显示。措辞与 _DM_TIMEOUT 同源：请求已经发出去过，结果以页面重拉的列表为准。
@@ -1614,12 +1619,13 @@ def _dm_net_kind(err):
     return None
 
 
-def _dm_forward(call):
+def _dm_forward(call, read_only=False):
     """契约 2.2 的多网关语义。call(频道目录) -> (状态码, 正文)，原样透传给页面。
 
     只认第一个回了响应的网关，不管那是 200 还是业务错误码；请求根本没发出去才换下一个；
-    全都连不上才是 503 no_gateway。
+    全都连不上才是 503 no_gateway。`read_only=True`（preview / test）时 504 换成只读文案。
     """
+    timeout_body = _DM_TIMEOUT_READONLY if read_only else _DM_TIMEOUT
     for _bot_id, _name, ch in _dm_bots():
         try:
             code, body = call(ch)
@@ -1628,7 +1634,7 @@ def _dm_forward(call):
             if kind == "unreachable":
                 continue                                  # 换下一个网关
             if kind == "broken":
-                return jsonify(_DM_TIMEOUT), 504
+                return jsonify(timeout_body), 504
             # 本地错误不再冒泡（那会变成没有 text 的框架级 500），翻成与写端点同形状的固定 JSON
             return jsonify(_DM_INTERNAL), 500
         if not isinstance(body, dict):
@@ -1753,35 +1759,109 @@ def dsh_model_set(bot_id):
     return jsonify({"ok": ok, "text": r.get("text") or r.get("error") or "", "current": r.get("current")}), (200 if ok else 400)
 
 
+#: only 的两个上限（契约 §11c；与网关 cleanModelId 同一把尺）
+_DM_ONLY_MAX = 1000
+_DM_ONLY_NAME_MAX = 200
+
+
+def _dm_json_object_or_400():
+    """只读端点的体判据（契约 §11c/§12b）：不是 JSON 对象 → 同形状的 400 bad_body。
+
+    写端点的 `_require_json_object` 抛的是 `{"error","detail"}`；只读这两个端点的契约
+    钉死了 `{"ok":false,"error":"bad_body","text"}`，所以在这里自己翻一次。
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _dm_bad(400, "bad_body", "请求体必须是一个 JSON 对象"), None
+    return None, body
+
+
+def _dm_only_or_400(body):
+    """`(错误响应, only)`：only 的校验在管理台这侧、**转发之前**（形状不对零转发）。
+
+    「缺省」与「给了空数组」是两回事：前者连这个键都不转发（既有行为一字不变），
+    后者按契约的「清空列表与 manual」如实转发。项判据：非空、≤200 字符、无控制字符。
+    """
+    if "only" not in body:
+        return None, None
+    only = body["only"]
+    good = (isinstance(only, list) and len(only) <= _DM_ONLY_MAX
+            and all(isinstance(x, str) and 0 < len(x) <= _DM_ONLY_NAME_MAX
+                    and not any(ord(c) < 0x20 or ord(c) == 0x7f for c in x)
+                    for x in only))
+    if not good:
+        return _dm_bad(400, "bad_only", "only 必须是模型名数组"), None
+    return None, only
+
+
 @hub_bp.post("/hub/api/dsh-model/provider/<name>/refresh")
 @_api
 def dsh_model_provider_refresh(name):
-    """§3.9：刷新一个自建供应商的模型列表，转发到第一个能连上的新系统网关。
+    """§3.9 / §11c：刷新一个自建供应商的模型列表，转发到第一个能连上的新系统网关。
 
     没有在跑的新系统网关 → 503 no_gateway；连上网关但超时/断开 → 504 gateway_timeout；
-    否则原样返回网关的状态码 + 正文 {ok, text}。
+    否则原样返回网关的状态码 + 正文（第 4 稿起 200 体带 count/added/removed/kept_manual/
+    selected/text，一律透传，不在这里重新拼）。
+
+    `only` 的校验在管理台这侧、转发之前：形状不对 **零转发**（stub 网关记录不到任何请求）。
     """
-    _require_json_object(request.get_json(silent=True))
-    if not _DM_PROVIDER_RE.match(name):
-        raise HubError(400, "bad_provider", "供应商名字不合法")
-    bots = _dm_bots()
-    if not bots:
-        return jsonify({"ok": False, "error": "no_gateway", "text": "没有在运行的新系统 bot"}), 503
-    saw_timeout = False
-    for _bot_id, _name, ch in bots:
-        try:
-            code, body = gateway_client.provider_refresh(ch, name)
-        except TimeoutError:                              # 连上了但 55 秒没有回应
-            saw_timeout = True
-            continue
-        except Exception:                                 # 连不上（拒连等）：换下一个网关
-            continue
-        if not isinstance(body, dict):
-            body = {}
-        return jsonify({"ok": bool(body.get("ok")), "text": body.get("text") or ""}), code
-    if saw_timeout:
-        return jsonify({"ok": False, "error": "gateway_timeout", "text": "网关没有及时响应，稍后刷新页面看结果"}), 504
-    return jsonify({"ok": False, "error": "no_gateway", "text": "没有在运行的新系统 bot"}), 503
+    body = _require_json_object(request.get_json(silent=True))
+    bad = _dm_provider_or_400(name)
+    if bad:
+        return bad
+    bad, only = _dm_only_or_400(body)
+    if bad:
+        return bad
+    return _dm_forward(lambda ch: gateway_client.provider_refresh(ch, name, only=only))
+
+
+class _DmNameConverter(BaseConverter):
+    """吃空段的字符串段：契约 §11c 的空名字档要 400，不是 404。
+
+    werkzeug 默认的字符串段 `[^/]+` 不吃空段，`/provider//preview` 会先匹配失败、
+    再被 merge_slashes 规范化重定向（308）—— 匹配不上就轮不到端点自己报 bad_provider。
+    """
+
+    regex = r"[^/]*"
+
+
+@hub_bp.record_once
+def _init_dm_name_converter(state):
+    # 转换器是 app 级的，蓝图只能借 record_once 拿 app 注册；Rules 是惰性编译的，
+    # 注册在这里一定早于第一次请求。
+    state.app.url_map.converters["dmname"] = _DmNameConverter
+
+
+@hub_bp.post("/hub/api/dsh-model/provider/<dmname:name>/preview")
+@_api
+def dsh_model_provider_preview(name):
+    """§11c（新增）：只拉不写，拿候选模型给弹窗勾选。
+
+    只读端点：504 用只读文案（这次操作没有写）。其余状态码与正文字面透传网关。
+    """
+    bad, _body = _dm_json_object_or_400()
+    if bad:
+        return bad
+    bad = _dm_provider_or_400(name)
+    if bad:
+        return bad
+    return _dm_forward(lambda ch: gateway_client.provider_preview(ch, name), read_only=True)
+
+
+@hub_bp.post("/hub/api/dsh-model/provider/<name>/test")
+@_api
+def dsh_model_provider_test(name):
+    """§12b（新增）：测试连接 —— 网关真发一次最小对话请求，只读，超时 25 秒。
+
+    与 preview 同族的只读端点：504 用只读文案，其余透传。
+    """
+    bad, _body = _dm_json_object_or_400()
+    if bad:
+        return bad
+    bad = _dm_provider_or_400(name)
+    if bad:
+        return bad
+    return _dm_forward(lambda ch: gateway_client.provider_test(ch, name), read_only=True)
 
 
 # ── 三个新写端点与思考强度。路径都带 `provider` 这一段，刻意避开
