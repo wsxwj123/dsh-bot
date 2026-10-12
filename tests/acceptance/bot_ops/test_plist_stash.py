@@ -337,6 +337,7 @@ def test_启用_装着且另有一份disabled_现役那份不被旧的盖掉(cli
 
 
 # ============================================================ 幂等：对已经收起的再停一次
+# 第 9 稿把这件事写成了 §5c 场景 8。下面三条各量一项；整个场景逐项量一遍的那条在后面「场景 8、9」。
 
 def test_停用_已经收起的再停一次_job仍是done且tail是已停止(client, sandbox, launchctl):
     u.dsh_bot(sandbox.dsh_cfg, BOT, enabled=False)
@@ -365,6 +366,81 @@ def test_停用_已经收起的再停一次_仍然恰好两条bootout(client, sa
     _toggle(client, False)
     argvs = [c["argv"] for c in launchctl.calls()]
     assert argvs == [["bootout", _target(MAIN)], ["bootout", _target(TIMER)]], argvs
+
+
+# ============================================================ 场景 8、9（第 9 稿）：「再停一次」在后端做的事
+
+def _stop_again(client, bot=BOT):
+    """对一只已经停用的 bot 再请求一次停用。返回 (响应, 200 的体)。"""
+    r = client.post("/hub/api/bots/%s/enabled" % bot, json={"enabled": False})
+    return r, r.get_json()
+
+
+def test_场景8_已停用且两份都已收起_再请求一次停用_照样受理做完_只有两条bootout_文件与配置一个字节不变(
+        client, sandbox, launchctl):
+    """§5c 场景 8：再停一次是幂等的。约定写明的每一项逐条量。
+
+    对已经停干净的行点「再停一次」就是这个请求：没有副作用，最后说的是「已停止」。
+    """
+    yml = u.dsh_bot(sandbox.dsh_cfg, BOT, enabled=False)
+    _stash_both(sandbox.agents)
+    launchctl.set_default(installed=False)      # 早就卸载了：两条 bootout 假件都回 No such process
+    yml_before = yml.read_bytes()
+    agents_before = u.tree_bytes(sandbox.agents)
+
+    r, body = _stop_again(client)
+    assert r.status_code == 200, (r.status_code, body)
+    assert body["sync"]["state"] == "started", ("同步应当重新登记", body)
+    st = u.finish_sync(client, body)
+
+    assert st["state"] == "done", st
+    assert _last_line(st) == "%s 已停止" % BOT, st["tail"]
+    argvs = [c["argv"] for c in launchctl.calls()]
+    assert argvs == [["bootout", _target(MAIN)], ["bootout", _target(TIMER)]], (
+        "应当恰好是那两条 bootout，没有别的调用", argvs)
+    assert _names(sandbox.agents) == sorted([MAIN + ".plist.disabled", TIMER + ".plist.disabled"]), (
+        "启动项目录里的文件名变了", _names(sandbox.agents))
+    assert u.tree_bytes(sandbox.agents) == agents_before, "收起着的那两份文件内容变了"
+    assert yml.read_bytes() == yml_before, "这只的配置文件字节变了（同一个值重写一遍应当一字不差）"
+
+
+def test_场景9_已停用而两份plist还装着进程没在跑_再请求一次停用_做完且两份都收起(
+        client, sandbox, launchctl):
+    """§5c 场景 9：装着却没在跑的也能停干净。页面上对「已停用、离线」的行点「再停一次」做的就是这件事。
+
+    走到这个样子的两条路见 §13a 第 7 条：停用的同步被别的任务挡住了；或者卸载成了、收起文件
+    那一步没成。结局相同：它一恢复或下次登录就会跑起来。
+    """
+    yml = u.dsh_bot(sandbox.dsh_cfg, BOT, enabled=False)
+    main_bytes, timer_bytes = _install_both(sandbox.agents)
+    launchctl.set_default(installed=True, running=False, pid=None)   # launchd 里还装载着，进程此刻没在跑
+    yml_before = yml.read_bytes()
+
+    listing = client.get("/hub/api/bots").get_json()
+    rows = [b for b in listing["bots"] if b["id"] == BOT]
+    assert len(rows) == 1 and rows[0]["state"] == "offline" and BOT in listing["disabled"], (
+        "前提不成立：列表里这一行应当是「已停用、离线」", listing)
+    seen = len(launchctl.calls())               # 列表问过的那次只读 print 不算在下面的动作里
+
+    r, body = _stop_again(client)
+    assert r.status_code == 200, (r.status_code, body)
+    assert body["sync"]["state"] == "started", body
+    st = u.finish_sync(client, body)
+
+    assert st["state"] == "done", st
+    assert _last_line(st) == "%s 已停止" % BOT, st["tail"]
+    # 只数会改状态的动作：列表那次只读的 print 机器忙时可能晚到，落在 seen 之后。
+    # 「除了两条 bootout 没有别的调用」由上面场景 8 那条按全量来量。
+    acts = [c["argv"] for c in launchctl.calls()[seen:] if c["cmd"] != "print"]
+    assert acts == [["bootout", _target(MAIN)], ["bootout", _target(TIMER)]], (
+        "会改状态的动作应当恰好是那两条 bootout", acts)
+    assert (_state(sandbox.agents, MAIN), _state(sandbox.agents, TIMER)) == ("收起", "收起"), (
+        "两份启动项文件没有都收起：下次登录它还会自己起来", _names(sandbox.agents))
+    assert _names(sandbox.agents) == sorted([MAIN + ".plist.disabled", TIMER + ".plist.disabled"]), (
+        "启动项目录里多了或少了文件", _names(sandbox.agents))
+    assert _stash(sandbox.agents, MAIN).read_bytes() == main_bytes, "主单元那份收起之后内容变了"
+    assert _stash(sandbox.agents, TIMER).read_bytes() == timer_bytes, "定时单元那份收起之后内容变了"
+    assert yml.read_bytes() == yml_before, "这只的配置文件字节变了（同一个值重写一遍应当一字不差）"
 
 
 # ============================================================ 场景 4：存量收敛（重启全部）
