@@ -35,9 +35,10 @@ SOURCE_DSH = "dsh"
 SOURCE_LABELS = {SOURCE_LEGACY: "旧系统", SOURCE_DSH: "新系统"}
 
 _OFF_VALUES = {"off", "-", "none", "0", "false", "no"}
-#: `find_path` 拼文件名的信任边界：bot 名只许是"一个文件名的形状"，
-#: 带路径分隔符/`..`/NUL 的一律当"没这个 bot"（别拿它去拼路径）。
-_BOT_ID_RE = re.compile(r"^[^/\\\x00]+$")
+#: bot id 的信任边界：拼 ``<dsh_home>/bots/<id>`` / ``<配置根>/<id>.yml`` 一类路径前先过它。
+#: 与建 bot 的 ``BOT_ID_RE`` 同一把尺（§5b）：大小写、``-``、``..``、路径分隔符、
+#: 长度越界的一律当"没这个 bot"，绝不拿它去拼路径。
+_BOT_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
 
 def legacy_dir() -> Path:
@@ -45,19 +46,46 @@ def legacy_dir() -> Path:
     return Path(os.environ.get("HUB_CONFIGS_DIR") or os.path.join(_REPO_ROOT, "configs"))
 
 
+def dsh_home() -> Path:
+    """新系统家目录：``DSH_BOT_HOME``，默认 ``~/.dsh-bot``。
+
+    与 ``chat_history``、网关（`config.ts` 的 `rootDir()`）同名同义：bot 家在
+    ``<它>/bots/<bot>``、配置在 ``<它>/configs``。空串按"没设"处理（走默认）。
+    """
+    raw = os.environ.get("DSH_BOT_HOME")
+    if raw is None or not str(raw).strip():
+        raw = "~/.dsh-bot"
+    # expanduser 跟 HOME 走：验收环境把 HOME 钉在 tmp 时，这条默认路径自然落空，
+    # 不会去读真实 ~/.dsh-bot（测试隔离靠它，不靠测试逐个个例记得关）。
+    return Path(os.path.expanduser(str(raw).strip()))
+
+
+def dsh_bot_dir(bot_id):
+    """``<dsh_home()>/bots/<bot_id>``；名字过不了信任边界（``_BOT_ID_RE``，合法 bot id
+    形状）回 None。
+
+    这道闸挡的是"拿一个不是 bot id 的串去拼路径"：``../x``、``a/b``、大写、超长一律
+    拒绝（§5b：名字不过 `_BOT_ID_RE` 回 None）。出现在这里的 id 应当已经与页面名单
+    精确匹配过（S9），本节只是把闸门写在一处、不给调用方留 DIY 的空间。
+    """
+    if not isinstance(bot_id, str) or not _BOT_ID_RE.match(bot_id):
+        return None
+    return dsh_home() / "bots" / bot_id
+
+
 def dsh_dir():
-    """新系统配置根：``HUB_CONFIGS_DSH_DIR``，默认 ``~/.dsh-bot/configs``。
+    """新系统配置根：``HUB_CONFIGS_DSH_DIR``，默认 ``dsh_home()/configs``（即 ``~/.dsh-bot/configs``）。
 
     设成 off/-/none/0（大小写不敏感）→ None，这一边不读；空串按"没设"处理（走默认）。
+    默认值经 ``dsh_home()`` 派生：两个默认值（家目录与配置根）只有一个出处，
+    否则换 ``DSH_BOT_HOME`` 时配置根会留在旧位置。
     """
     raw = os.environ.get("HUB_CONFIGS_DSH_DIR")
     if raw is None or not raw.strip():
-        raw = "~/.dsh-bot/configs"
+        return dsh_home() / "configs"
     raw = raw.strip()
     if raw.lower() in _OFF_VALUES:
         return None
-    # expanduser 跟 HOME 走：验收环境把 HOME 钉在 tmp 时，这条默认路径自然落空，
-    # 不会去读真实 ~/.dsh-bot（测试隔离靠它，不靠测试逐个个例记得关）。
     return Path(os.path.expanduser(raw))
 
 
@@ -225,7 +253,8 @@ def find_path(bot_id):
     又在那边留下一处没人看的改动。读坏的 yml 当"没在跑"处理，不改变命中结果
     （坏文件本身照旧由写入端报 409）。
 
-    只认 ``<bot_id>.yml`` 文件名（管理台名单里的 id 就是文件名 stem）。
+    只认 ``<bot_id>.yml`` 文件名（管理台名单里的 id 就是文件名 stem）；名字先过
+    ``_BOT_ID_RE``（合法 bot id 形状），带路径形状的串一律当"没这个 bot"。
     不跟 ``life_config`` 别名走：别名是"读配置"（config_loader）的事，
     写路径（启停开关）落到哪份文件，按文件名命中才不会写错人。
     """
