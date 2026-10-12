@@ -11,12 +11,21 @@
   <h1>添加 bot</h1>
   <div class="sub">填完点创建：建好 configs/&lt;id&gt;.yml 与频道目录、注册主动开口、重启带上它</div>
 
+  {# 五组卡片（§14）：①②④⑤ 默认展开，③ 语音是可选项、默认收起。元素与文案只换位置。 #}
   <div class="card">
     <h2>基本信息</h2>
     <label for="bot_id">bot id（小写字母开头，2-32 位小写字母/数字/下划线）</label>
     <input id="bot_id" placeholder="xiaoyu" autocomplete="off" spellcheck="false">
     <label for="display_name">显示名</label>
     <input id="display_name" placeholder="小雨" autocomplete="off">
+    <label for="dispatcher_port">dispatcher 端口</label>
+    <input id="dispatcher_port" inputmode="numeric" placeholder="17802">
+    <label for="chat_id">你的 Telegram chat id</label>
+    <input id="chat_id" inputmode="numeric" placeholder="123456789">
+  </div>
+
+  <div class="card">
+    <h2>Telegram</h2>
     <label for="telegram_token">Telegram token（只写进 channels/&lt;id&gt;/.env，配置文件里不留）</label>
     <div class="row">
       <input id="telegram_token" type="password" style="flex:1" autocomplete="off"
@@ -24,11 +33,19 @@
       <button class="btn ghost mini" type="button" id="test">测试 token</button>
     </div>
     <div class="muted" id="test-msg" style="margin-top:6px"></div>
-    <label for="dispatcher_port">dispatcher 端口</label>
-    <input id="dispatcher_port" inputmode="numeric" placeholder="17802">
-    <label for="chat_id">你的 Telegram chat id</label>
-    <input id="chat_id" inputmode="numeric" placeholder="123456789">
   </div>
+
+  {# 两个可选字段（INTERFACE §6b）：都不填时两个落盘文件与不带这两个字段时逐字节相同 #}
+  <details class="card" id="voice-box">
+    <summary>语音（可选）</summary>
+    <label for="fish_voice_id">音色 id</label>
+    <input id="fish_voice_id" autocomplete="off" spellcheck="false"
+           placeholder="字母、数字、下划线或连字符，最长 64；留空 = 不发语音">
+    <label for="fish_api_key">Fish Audio key</label>
+    <input id="fish_api_key" type="password" autocomplete="off" spellcheck="false"
+           placeholder="留空 = 不填；只写进 .env">
+    <div class="muted" style="margin-top:6px">两个都填了也不做在线校验，只看形状；key 不落任何全局位置。</div>
+  </details>
 
   <div class="card">
     <h2>人设（二选一）</h2>
@@ -113,6 +130,11 @@ function payload() {
                 dispatcher_port: num($('dispatcher_port').value), chat_id: num($('chat_id').value)};
   if ($('persona_mode').value === 'template') body.persona_template = $('persona_template').value;
   else body.persona_text = $('persona_text').value;
+  // §6b 两个可选字段：留空（trim 后是空）就不带这个键，与"键缺失"完全等价
+  const voice = $('fish_voice_id').value.trim();
+  if (voice) body.fish_voice_id = voice;
+  const fishKey = $('fish_api_key').value;
+  if (fishKey.trim()) body.fish_api_key = fishKey;
   return body;
 }
 function renderSteps(steps) {
