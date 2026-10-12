@@ -281,13 +281,18 @@ def wait_alive(bot_id, since_ms=None, timeout=None):
 
 
 def enabled_of(bot_id):
-    """该 bot **生效配置**的 ``enabled``（判定口径在 ``bots_registry.is_enabled``，这里只是取值）。
+    """新系统这边**该不该跑**这只 bot（``enabled`` 的判定口径在 ``bots_registry.is_enabled``）。
 
-    执行时现读：开关同步的方向按**写盘后**的值走，缓存一份就把刚写的那笔漏掉。
+    读的是新系统那份配置：这只生效的那份不是新系统的（没有这只，或生效的是旧系统那份），
+    一律回否 —— 新系统这边就不该跑它（§5b 第 4 条）。过放行闸进来的重启不受影响；它只在
+    开关「新旧同名、停用之后生效的变成旧系统那份」时起作用：那次同步必须走停用方向，
+    否则会把刚停的 bot 反向拉起，新旧两个进程同 token 双跑。
+
+    每次调用现读、不缓存：开关同步的方向要的是**写盘后**的值。
     """
     from moments import config_sources
     cfg = config_sources.effective_config(bot_id)
-    if cfg is None:
+    if not cfg or cfg.get("_source") != config_sources.SOURCE_DSH:
         return False
     from bots_registry import is_enabled
     return bool(is_enabled(cfg))

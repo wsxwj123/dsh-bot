@@ -1464,10 +1464,11 @@ def setup_write_key():
 # 后者下一次拉起就把它拉回来。现在停用的唯一标记就是那个字段：
 # `bots_registry` 不吐停用 bot → 重启脚本 / 启动与注册脚本 / 门户名单全不认它。
 #
-# 本段只做「校验 + 翻码 + 组响应」，写盘全在 `hub_addbot.set_enabled`
-# （行级 YAML 编辑 + 原子写，全程不 dump —— bot 的 yml 里全是人设正文，dump 一次就毁）。
+# 本段只做「校验 + 翻码 + 组响应」，放行闸与写盘全在 `hub_addbot.set_enabled`
+# （只对新系统的 bot 开放，旧系统的在入口 404；行级 YAML 编辑 + 原子写，全程不 dump ——
+# bot 的 yml 里全是人设正文，dump 一次就毁）。
 # **写盘成功后同步这一只**（§4b，F1 的解法）：启用方向 kickstart、停用方向 bootout，
-# 方向按写盘后的生效配置走、不受 `bot_disabled` 检查 —— 它服务的正是"停用"这个动作
+# 方向按写盘后新系统那份配置走、不受 `bot_disabled` 检查 —— 它服务的正是"停用"这个动作
 # 本身。同步是 job（202 + 轮询，§6.2 的骨架不变），响应的 `sync` 三档见 §4b。
 # 由页面上的二次确认问用户，不由这里替他决定。
 #
@@ -1478,17 +1479,20 @@ def setup_write_key():
 @hub_bp.post("/hub/api/bots/<bot_id>/enabled")
 @_api
 def bots_set_enabled(bot_id):
-    """`{"enabled": true|false}` → 写 `configs/<bot>.yml` 的顶层 `enabled`，再**同步这一只**。
+    """`{"enabled": true|false}` → 写**新系统配置根下** `<bot>.yml` 的顶层 `enabled`，再**同步这一只**。
 
-    - 非法 id → `400 bad_bot_id`（形状校验与建 bot 同一个 `BOT_ID_RE`）
-    - 没这个 bot → `404 bot_not_found`
+    只对新系统的 bot 开放（INTERFACE §4b）。判定顺序：
+
     - `enabled` 不是布尔 → `400 bad_body`（`"false"` 这种字符串一律不认：
       按 JS 的真值判它会变成"点了停止反而是启用"）
+    - 非法 id → `400 bad_bot_id`（形状校验与建 bot 同一个 `BOT_ID_RE`）
+    - 没过放行闸 → `404 bot_not_found`：旧系统的 bot、新系统根不在场、名单注入、不存在的，
+      都在入口 404（`hub_addbot.set_enabled` 的第一步）。不写盘，也走不到下面的同步，
+      设了覆盖命令也一样
 
-    写盘是用户的诉求，必须发生；同步（§4b）只是**写盘之后**的追加动作，三档去向：
-    旧系统的 bot `skipped/legacy`（旧系统的东西一律不碰，即使设了覆盖命令）、
-    新系统根不在场 `skipped/no_dsh_root`、非 macOS 无覆盖命令 `skipped/no_launchd`；
-    其余登记单只同步 job（忙 → `busy` 如实写进响应，绝不 409 —— 拒绝会让配置改不成）。
+    过了闸，写盘是用户的诉求，必须发生；同步（§4b）只是**写盘之后**的追加动作：
+    非 macOS 无覆盖命令 `skipped/no_launchd`；其余登记单只同步 job（忙 → `busy` 如实写进
+    响应，绝不 409 —— 拒绝会让配置改不成）。
     同步**不受** `bot_disabled` 检查：它服务的正是「停用」这个动作本身（F1 的解法）。
     """
     body = _require_json_object(request.get_json(silent=True))
@@ -1504,14 +1508,12 @@ def bots_set_enabled(bot_id):
 
 
 def _bt_sync(bot_id):
-    """写盘成功后把这一只同步到配置说的样子（§4b 的去向判定）。返回 `sync` 对象。"""
-    from moments import config_sources
-    cfg = config_sources.effective_config(bot_id)
-    if cfg is None or cfg.get("_source") != config_sources.SOURCE_DSH:
-        return {"state": "skipped", "reason": "legacy"}
-    d = config_sources.dsh_dir()
-    if d is None or not os.path.isdir(str(d)):
-        return {"state": "skipped", "reason": "no_dsh_root"}
+    """写盘成功后把这一只同步到配置说的样子（§4b 的去向判定）。返回 `sync` 对象。
+
+    走到这里的 bot 都已过放行闸（没过的在写盘之前就 404 了），所以 `skipped` 只剩
+    `no_launchd` 一档。同名、这次停用之后生效的变成旧系统那份的，不跳过：方向由
+    `bot_launchd.enabled_of` 判成停用，对新系统的单元 bootout。
+    """
     plan = bots_client.restart_plan()
     if sys.platform != "darwin" and not plan.override:
         return {"state": "skipped", "reason": "no_launchd"}
