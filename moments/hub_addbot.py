@@ -53,19 +53,26 @@ GETME_TIMEOUT = 10               # §4.1
 MAX_BODY = 64 * 1024             # §4.1 R2-2：读满即停
 MAX_PERSONA = 64 * 1024          # §4.2 A 段
 MAX_DISPLAY_NAME = 64            # R8-1
-PROBE_SECONDS = 30               # §4.2 C 段第 7 步
 REQUIRED_FIELDS = ("bot_id", "telegram_token", "dispatcher_port", "chat_id")
 BLANK_TEMPLATE = "_persona_template"
 MEMORY_SEED = "# 记忆\n\n（还没聊过，记忆会自己长出来。）\n"
-#: A3：门户/朋友圈进程持有 bot 列表，不重启它新 bot 在页面与朋友圈侧一直不可见
-RESTART_FLAGS = {"bot": True, "moments_web": True}
-#: B 段产物清单 = 回滚的精确 unlink 清单（R8-3），两处共用这一份，不许各写各的
+#: S4 分档：207（C 段有一步没 done）待补的动作都属「让 bot 跑起来」面；
+#: 201（register 已把网关拉起并等活通过）没有待补动作。`moments_web` 两档都 false ——
+#: 新 bot 对朋友圈页现读可见（config_sources 每次调用现读），不需要重启任何 web 进程。
+RESTART_FLAGS = {"bot": True, "moments_web": False}
+RESTART_FLAGS_DONE = {"bot": False, "moments_web": False}
+#: B 段产物清单 = 回滚的精确 unlink 清单（R8-3），两处共用这一份，不许各写各的。
+#: 树根 = `<bot 家>/channel`（§7），文件的相对路径以它为准。
 TREE_FILES = (".env", "access.json", "CLAUDE.md", os.path.join("memory", "MEMORY.md"))
-TREE_DIRS = ("memory", "logs")
+TREE_DIRS = ("memory",)
+#: I5：`com.dsh-bot.` 前缀下形状可达的非 bot 单元名。建一只叫这些名字的 bot 会在
+#: register 时 bootout 掉真单元并覆盖其 plist —— 直接拒绝（依据见 PLAN §2.3）。
+RESERVED_UNIT_NAMES = ("jiwen", "director", "voicecall")
+#: register 两条子进程的超时（bun 装 launchd 单元是秒级的事）
+INSTALL_TIMEOUT = 60
+AUTOSTART_TS = os.path.join(REPO_ROOT, "gateway", "scripts", "autostart.ts")
 
-HINT_OUTDATED = ("重启脚本还是旧版（硬编码 bot 列表），它带不上新 bot。执行这两条："
-                 "cp restart-bots.example.sh restart-bots.sh ； bash restart-bots.sh")
-HINT_RESTART = "文件都已就位，手动拉起：bash restart-bots.sh"
+HINT_MANUAL = "文件都已就位，手动注册并拉起：bun %s install <配置文件>" % AUTOSTART_TS
 
 
 # ---------------------------------------------------------------- 测试接缝（§7）
@@ -86,19 +93,14 @@ def configs_dir():
     return str(_registry().configs_dir())
 
 
+def _config_dirs():
+    """新旧两套配置根（顺序 = 覆盖优先级）。注册表按"同名以新系统为准"合并。"""
+    return [str(d) for _source, d in config_sources.roots()]
+
+
 def launchagents_dir():
     return (os.environ.get("HUB_LAUNCHAGENTS_DIR")
             or os.path.expanduser("~/Library/LaunchAgents"))
-
-
-def restart_script():
-    """§7 `HUB_RESTART_SCRIPT`（A2）：**只**决定 C 段第 5 步版本自检读哪个文件；
-    「执行什么来重启」是 `HUB_RESTART_CMD` 的事，二者分工写死、互不覆盖。"""
-    env = os.environ.get("HUB_RESTART_SCRIPT")
-    if env:
-        return env
-    name = os.path.join("windows", "start-bots.ps1") if os.name == "nt" else "restart-bots.sh"
-    return os.path.join(REPO_ROOT, name)
 
 
 def api_base():
@@ -222,16 +224,32 @@ def test_token(token):
 # ---------------------------------------------------------------- A 段 · 只读校验（§4.2）
 
 def templates():
-    """§4.4：`channels/` 下的目录名即可选值。目录读不到是**正常态**，回空列表不是错误。"""
+    """§4.4 + §6：可选的人设模板 = 旧根 `channels/` 下的一级目录 ∪
+    `<DSH_BOT_HOME>/bots/` 下含 `channel/` 的一级目录（同名只出一条，按新系统 id 归属）。
+
+    目录读不到是**正常态**，回空列表不是错误；两边读不到一律跳过、不报错。
+    display_name 取注册表能给的名字，给不到用原名。
+    """
+    names = set()
     try:
-        names = sorted(n for n in os.listdir(channels_dir())
-                       if not n.startswith(".")
-                       and os.path.isdir(os.path.join(channels_dir(), n)))
+        names |= {n for n in os.listdir(channels_dir())
+                  if not n.startswith(".")
+                  and os.path.isdir(os.path.join(channels_dir(), n))}
     except OSError:
-        return []
-    labels = {b["id"]: b["display_name"] for b in _registry().bots()}
-    return [{"id": n, "display_name": "空白模板" if n == BLANK_TEMPLATE else labels.get(n, n)}
-            for n in names]
+        pass
+    try:
+        bots_root = os.path.join(str(config_sources.dsh_home()), "bots")
+        for n in os.listdir(bots_root):
+            if n.startswith("."):
+                continue
+            if os.path.isdir(os.path.join(bots_root, n, "channel")):
+                names.add(n)
+    except OSError:
+        pass
+    labels = {b["id"]: b["display_name"]
+              for b in _registry().bots(include_disabled=True, dirs=_config_dirs())}
+    return [{"id": n, "display_name": "空白模板" if n == BLANK_TEMPLATE else labels.get(n) or n}
+            for n in sorted(names)]
 
 
 def _need(body, name):
@@ -255,12 +273,18 @@ def _bad(why):
 
 
 def _check_free(bot_id):
-    """同名判定看三处：两套配置根（旧 + 新系统）的 `configs/<id>.yml` 与 `channels/<id>/`。
+    """同名判定看四处：保留单元名、两套配置根的 `configs/<id>.yml`、旧根 `channels/<id>/`、
+    新系统 `<DSH_BOT_HOME>/bots/<id>`。
 
-    只看 yml 会在频道目录已存在时把 `shutil.move` 变成"搬进人家目录里"
-    （`channels/<id>/<id>/`），而那个目录里可能是用户手工建的另一个 bot。
-    只看旧系统那份还会放行一个建完就被新系统同名配置压住、根本不生效的 bot。
+    只看 yml 会在目标目录已存在时把 `shutil.move` 变成"搬进人家目录里"
+    （`<bot 家>/<id>/`），而那里可能是用户手工建的另一个 bot。只看旧系统那份还会放行一个
+    建完就被新系统同名配置压住、根本不生效的 bot。保留名（I5）不拦的话，
+    register 会 bootout 掉真单元并覆盖它的 plist。
     """
+    if bot_id in RESERVED_UNIT_NAMES:
+        raise HubError(409, "bot_exists",
+                       "%s 这个单元名已被新系统占用（com.dsh-bot. 前缀下的非 bot 单元），"
+                       "换个名字" % bot_id)
     for source, d in config_sources.roots():
         if os.path.exists(os.path.join(str(d), bot_id + ".yml")):
             raise HubError(409, "bot_exists",
@@ -268,6 +292,27 @@ def _check_free(bot_id):
                            % (bot_id, config_sources.SOURCE_LABELS[source]))
     if os.path.exists(os.path.join(channels_dir(), bot_id)):
         raise HubError(409, "bot_exists", "频道目录 %s 已存在，换个名字或先手动清理" % bot_id)
+    home = config_sources.dsh_bot_dir(bot_id)
+    if home is not None and _bot_home_taken(home):
+        raise HubError(409, "bot_exists",
+                       "新系统里已经有一个叫 %s 的 bot 家了，换个名字或先手动清理" % bot_id)
+
+
+def _bot_home_taken(home):
+    """这个 bot 家已经被真的占了吗（§7 A 段拒绝面的判据）。
+
+    判的是"已经有一棵频道树"（`channel/` 在），不是"目录/文件存在"：运行中的 bot 家
+    （网关自建的 `state`、`logs` 与心跳）会先于本流程存在 —— 心跳必须落在
+    `<bot 家>/state/heartbeat`，验收里"全流程成功"的场景天然带着它；把"目录存在"
+    当占用会把"这只 bot 之前在跑"误判成冲突。真正的数据面是 `channel/`
+    （`.env`、`CLAUDE.md`、记忆），它在那里才说明这个位置是别人的 bot。
+    符号链接一律按占用处理：往一个软链后面写等于写到任意位置去。
+    """
+    if os.path.islink(str(home)):
+        return True
+    if os.path.exists(str(home)) and not os.path.isdir(str(home)):
+        return True          # 位置被一个文件占了，不是目录
+    return os.path.exists(os.path.join(str(home), "channel"))
 
 
 def _listening(port):
@@ -299,7 +344,12 @@ def _check_port(port, skip=None):
 
 
 def _persona(body):
-    """人设来源二选一，返回要写进 `CLAUDE.md` 的正文。"""
+    """人设来源二选一，返回要写进 `CLAUDE.md` 的正文。
+
+    模板选定时**按 id 归属读正文**（I6）：`<DSH_BOT_HOME>/bots/<id>/channel/CLAUDE.md`
+    存在就优先读它，否则读旧根 `<HUB_CHANNELS_DIR>/<id>/CLAUDE.md`；两处都读不到
+    （目录在、文件都不在）→ 空人设（空白模板语义），不是错误。
+    """
     tmpl, text = body.get("persona_template"), body.get("persona_text")
     has_tmpl = isinstance(tmpl, str) and bool(tmpl.strip())
     has_text = isinstance(text, str) and bool(text.strip())
@@ -312,36 +362,70 @@ def _persona(body):
     if tmpl not in {t["id"] for t in templates()}:
         # 只认扫出来的目录名，`../` 这类穿越串自然落不进集合里
         _bad("没有这个人设模板：%s" % tmpl[:64])
-    try:
-        with open(os.path.join(channels_dir(), tmpl, "CLAUDE.md"), encoding="utf-8") as f:
-            return f.read(MAX_PERSONA)
-    except OSError:
-        return ""            # 模板目录在但没有 CLAUDE.md（空白模板就是这样）→ 空人设，不是错误
+    home = config_sources.dsh_bot_dir(tmpl)
+    candidates = []
+    if home is not None:
+        candidates.append(os.path.join(str(home), "channel", "CLAUDE.md"))
+    candidates.append(os.path.join(channels_dir(), tmpl, "CLAUDE.md"))
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read(MAX_PERSONA)
+        except OSError:
+            continue
+    return ""            # 目录在但两处都没有 CLAUDE.md → 空人设，不是错误
 
 
 def _telegram_ids():
-    """既有各 bot 的 telegram id（A7）：`channels/<bot>/.env` 里 token 的 `:` 前数字段。
+    """既有各 bot 的 telegram id（A7）：两套根下各 bot 的 `.env` 里 token 的 `:` 前数字段。
 
+    新系统 bot 的 token 落在 `<bot 家>/channel/.env`（yml 的 `bot_channel_path` 优先，
+    缺失回落默认家目录），不扫它就漏掉"新旧两只同 token"那类静默丢消息的坑（R1）。
     读到的整串只在内存里过一遍正则，函数出去时只剩数字段 ——
     绝不进响应/日志/异常文本。`.env` 缺失或形状不符 → 跳过该 bot 继续，不报错。
     """
+    import config_loader
     out = {}
-    for bot in _registry().bots():
-        try:
-            with open(os.path.join(channels_dir(), bot["id"], ".env"),
-                      encoding="utf-8", errors="ignore") as f:
-                hit = ENV_TOKEN_RE.search(f.read(MAX_BODY))
-        except OSError:
+    for cfg in config_loader.list_enabled_bots(include_disabled=True,
+                                               dirs=config_sources.roots()):
+        bot_id = cfg.get("_bot_id")
+        if not bot_id:
             continue
-        if hit:
-            out[bot["id"]] = int(hit.group(1))
+        for path in _env_paths(cfg):
+            try:
+                with open(path, encoding="utf-8", errors="ignore") as f:
+                    hit = ENV_TOKEN_RE.search(f.read(MAX_BODY))
+            except OSError:
+                continue
+            if hit:
+                out[bot_id] = int(hit.group(1))
+                break
+    return out
+
+
+def _env_paths(cfg):
+    """一份配置可能对应的 `.env` 位置（旧根频道目录 + 新系统 bot 家的 channel）。"""
+    bot_id = cfg["_bot_id"]
+    paths = [os.path.join(channels_dir(), bot_id, ".env")]
+    raw = cfg.get("bot_channel_path")
+    if isinstance(raw, str) and raw.strip():
+        paths.append(os.path.join(os.path.expanduser(raw.strip()), ".env"))
+    home = config_sources.dsh_bot_dir(bot_id)
+    if home is not None:
+        paths.append(os.path.join(str(home), "channel", ".env"))
+    seen, out = set(), []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
     return out
 
 
 def _validate(body):
-    """A 段的纯校验部分（不含 getMe 与 token 比对），顺序照 §4.2 的表逐条来。
+    """A 段的纯校验部分（不含 getMe 与 token 比对），顺序照 §4.2/§6 的表逐条来。
 
-    **纯输入错优先于冲突错**：先把用户自己能改的挑干净，再报"跟别人撞了"。
+    **纯输入错（用户自己能改的）优先于环境与冲突错**：先把形状挑干净，再判
+    `dsh_root_off`（环境）、再看跟别人撞没撞。冲突判定里配置与家目录在前、端口在后。
     """
     if not isinstance(body, dict):
         raise HubError(400, "bad_body", "请求体必须是一个 JSON 对象")
@@ -349,10 +433,8 @@ def _validate(body):
     bot_id, port, chat_id = fields["bot_id"], fields["dispatcher_port"], fields["chat_id"]
     if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
         _bad("bot_id 只能是小写字母开头的 2-32 位小写字母/数字/下划线")
-    _check_free(bot_id)
     if not _is_int(port) or not 1024 <= port <= 65535:
         _bad("dispatcher_port 必须是 1024-65535 的整数")
-    _check_port(port)
     name = body.get("display_name")
     if (not isinstance(name, str) or not name.strip() or len(name) > MAX_DISPLAY_NAME
             or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in name)):
@@ -360,8 +442,15 @@ def _validate(body):
         _bad("display_name 必须是 1-64 字的字符串，且不含控制字符")
     if not _is_int(chat_id):
         _bad("chat_id 必须是整数")
+    persona = _persona(body)
+    # 环境错（用户自己改不了）：新系统配置根被关掉就落不了盘，这一页只建新系统的 bot
+    if config_sources.dsh_dir() is None:
+        raise HubError(409, "dsh_root_off",
+                       "新系统配置根被关掉了（HUB_CONFIGS_DSH_DIR=off），这一页只建新系统的 bot")
+    _check_free(bot_id)
+    _check_port(port)
     return {"bot_id": bot_id, "token": fields["telegram_token"], "port": port,
-            "chat_id": chat_id, "display_name": name, "persona": _persona(body)}
+            "chat_id": chat_id, "display_name": name, "persona": persona}
 
 
 def _check_token_free(bot_id, telegram_id):
@@ -398,27 +487,41 @@ def _rmdir(path):
         os.rmdir(path)
 
 
+#: 回滚清单条目类型（R8-3 的精确 unlink 清单）
+_MADE_FILE = 0      # yml 文件：直接 unlink
+_MADE_TREE = 1      # 频道树：删清单内的文件与目录，再 rmdir 树根
+_MADE_HOME = 2      # bot 家：只 rmdir（非空一律保留）
+
+
 def _rollback(made):
-    """按创建清单逆序精确删除。回滚过程里再抛异常会把真正的错因盖掉，所以全程吞。"""
-    for is_tree, path in reversed(made):
-        if not is_tree:
+    """按创建清单逆序精确删除。回滚过程里再抛异常会把真正的错因盖掉，所以全程吞。
+
+    三类条目见上面的常量：频道树删 `TREE_FILES`/`TREE_DIRS` 清单内的东西，
+    bot 家与其它目录一律只 rmdir（空的才删）—— 用户的 bot 家可能早就在那儿，
+    一次手滑就是别人的聊天记录没了（R8-3）。"""
+    for kind, path in reversed(made):
+        if kind == _MADE_FILE:
             _unlink(path)
-            continue
-        for rel in TREE_FILES:
-            _unlink(os.path.join(path, rel))
-        for rel in TREE_DIRS:
-            _rmdir(os.path.join(path, rel))
-        _rmdir(path)
+        elif kind == _MADE_HOME:
+            _rmdir(path)
+        else:
+            for rel in TREE_FILES:
+                _unlink(os.path.join(path, rel))
+            for rel in TREE_DIRS:
+                _rmdir(os.path.join(path, rel))
+            _rmdir(path)
 
 
-def _fix_modes(target):
+def _fix_modes(home):
     """F5：`shutil.move` 跨文件系统会走 copy 路径、权限取决于实现，
-    而 macOS 的 TMPDIR 在 `/var/folders/...`，与 `~/.claude/` 大概率不同挂载点 —— 就位后逐个复核。"""
-    os.chmod(target, 0o700)
+    而 macOS 的 TMPDIR 在 `/var/folders/...`，与 `~/.dsh-bot` 大概率不同挂载点 —— 就位后逐个复核。"""
+    channel = os.path.join(home, "channel")
+    os.chmod(home, 0o700)
+    os.chmod(channel, 0o700)
     for rel in TREE_DIRS:
-        os.chmod(os.path.join(target, rel), 0o700)
+        os.chmod(os.path.join(channel, rel), 0o700)
     for rel in TREE_FILES:
-        os.chmod(os.path.join(target, rel), 0o600)
+        os.chmod(os.path.join(channel, rel), 0o600)
 
 
 def _yaml_str(value):
@@ -437,8 +540,10 @@ def _channel_path_literal(target):
 
 def _new_namespace():
     """uuid4 + 全表去重。namespace 撞车 = 两个 bot 共用会话历史，所以去重是契约的一部分
-    （撞的概率是 0，这个 while 只是把契约写进代码里）。"""
-    used = {b["namespace_uuid"] for b in _registry().bots(include_disabled=True)}
+    （撞的概率是 0，这个 while 只是把契约写进代码里）。扫描范围是**两套根**：
+    新系统 bot 的 namespace 也要算进已用集合。"""
+    used = {b["namespace_uuid"] for b in _registry().bots(include_disabled=True,
+                                                          dirs=_config_dirs())}
     ns = str(uuid.uuid4())
     while ns in used:
         ns = str(uuid.uuid4())
@@ -459,40 +564,62 @@ def _render_yml(fields, target):
 
 
 def lay_down(fields):
-    """B 段：tmp 里建好整棵树 → 一次 `move` 就位 → 写 yml → 复查端口。
+    """B 段：tmp 里建好整棵树 → 一次 `move` 到 `<bot 家>` → 写 yml → 复查端口。
 
-    任一步失败：按精确清单逆序删干净，磁盘回到操作前（可断言 yml 不在、频道目录不在、
-    注册表查不到它），然后把异常原样抛给调用方定码。
+    落点全在新系统那套位置（§7）：配置进 `<dsh 配置根>/<bot>.yml`，频道树进
+    `<DSH_BOT_HOME>/bots/<bot>/channel/`；旧系统的两个根一个字节都不产生。
+
+    任一步失败：按精确清单逆序删干净，磁盘回到操作前（可断言 yml 不在、bot 家不在、
+    注册表查不到它），然后把异常原样抛给调用方定码。回滚只删清单内的东西，
+    非空目录一律保留 —— 用户的 bot 家可能早就在那儿，一次手滑就是别人的聊天记录没了。
     """
     bot_id = fields["bot_id"]
-    os.makedirs(channels_dir(), exist_ok=True)   # 首次部署父目录还不存在，move 会 500
-    target = os.path.join(channels_dir(), bot_id)
-    yml = os.path.join(configs_dir(), bot_id + ".yml")
-    made = []                                  # 精确回滚清单：(是否整棵树, 路径)，按创建顺序
+    home = str(config_sources.dsh_bot_dir(bot_id))
+    channel = os.path.join(home, "channel")
+    cfg_root = config_sources.dsh_dir()
+    if cfg_root is None:
+        raise HubError(409, "dsh_root_off", "新系统配置根被关掉了，落不了盘")
+    os.makedirs(str(cfg_root), exist_ok=True)
+    os.makedirs(os.path.dirname(home), exist_ok=True)   # <DSH_BOT_HOME>/bots
+    yml = os.path.join(str(cfg_root), bot_id + ".yml")
+    made = []                                  # 精确回滚清单：(类型, 路径)，按创建顺序
     tmp = tempfile.mkdtemp()                   # mkdtemp 本身就是 0700
     try:
         src = os.path.join(tmp, bot_id)
         os.mkdir(src, 0o700)
+        chan = os.path.join(src, "channel")
+        os.mkdir(chan, 0o700)
         for rel in TREE_DIRS:
-            os.mkdir(os.path.join(src, rel), 0o700)
+            os.mkdir(os.path.join(chan, rel), 0o700)
         # token 的唯一落点（F5）。yml 里一个字都没有它
-        _create_file(os.path.join(src, ".env"), "TELEGRAM_BOT_TOKEN=%s\n" % fields["token"])
-        _create_file(os.path.join(src, "access.json"),
+        _create_file(os.path.join(chan, ".env"), "TELEGRAM_BOT_TOKEN=%s\n" % fields["token"])
+        _create_file(os.path.join(chan, "access.json"),
                      json.dumps({"allowFrom": [fields["chat_id"]]}, ensure_ascii=False) + "\n")
-        _create_file(os.path.join(src, "CLAUDE.md"), fields["persona"])
-        _create_file(os.path.join(src, "memory", "MEMORY.md"), MEMORY_SEED)
-        shutil.move(src, target)
-        made.append((True, target))
-        _fix_modes(target)
-        _create_file(yml, _render_yml(fields, target))
-        made.append((False, yml))
+        _create_file(os.path.join(chan, "CLAUDE.md"), fields["persona"])
+        _create_file(os.path.join(chan, "memory", "MEMORY.md"), MEMORY_SEED)
+        if os.path.exists(home):
+            # 已有的 bot 家（网关自建过 state/logs 之类）→ 只把频道树补进去，
+            # 绝不用 move 整个 src（那会变成"搬进人家目录里"）
+            if os.path.exists(channel):
+                raise HubError(409, "bot_exists", "这个 bot 家已经有频道树了")
+            shutil.move(chan, channel)
+            made.append((_MADE_TREE, channel))
+        else:
+            # 一次 move 建出整个 bot 家（含 channel）：tmp 里全建好再就位，
+            # 中途失败时目标位置一个字节都没写过，回滚清单为空
+            shutil.move(src, home)
+            made.append((_MADE_HOME, home))
+            made.append((_MADE_TREE, channel))
+        _fix_modes(home)
+        _create_file(yml, _render_yml(fields, channel))
+        made.append((_MADE_FILE, yml))
         _check_port(fields["port"], skip=bot_id)   # R4：A 段那次 bind 试探到这里已经有窗口
     except BaseException:
         _rollback(made)
         raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)     # 只删自己 mkdtemp 出来的那个
-    return target
+    return channel
 
 
 # ---------------------------------------------------------------- C 段 · 注册 + 拉起（§4.2）
@@ -552,74 +679,52 @@ def _step(name, state, detail=None, **extra):
     return step
 
 
-def _plutil_ok(path):
-    """有 `plutil` 就 lint（install.sh 的第 3 步），没有就不拦 —— 它只在 macOS 上有。
-    工具本身跑不起来也不判 plist 坏：那是环境问题，不是文件问题。"""
-    exe = shutil.which("plutil")
-    if not exe:
-        return True
-    try:
-        return subprocess.run([exe, "-lint", path], stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=10).returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return True
+def _resolve_bun():
+    """bun 可执行文件：``HUB_BUN`` → PATH → ``~/.bun/bin/bun``；都找不到回 None。
 
-
-def _launchctl(label, plist, hint):
-    """先 `bootout` 再 `bootstrap`（幂等，照抄 install.sh）。SSH 里没有图形会话时
-    bootstrap 必拒 —— plist 已经写好了，把那条命令给用户，让他图形登录后自己补。"""
-    uid = os.getuid()
-    try:
-        subprocess.run(["launchctl", "bootout", "gui/%d/%s" % (uid, label)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=30, check=False)
-        code = subprocess.run(["launchctl", "bootstrap", "gui/%d" % uid, plist],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              timeout=30).returncode
-    except (OSError, subprocess.SubprocessError) as e:
-        return _step("register", "failed", type(e).__name__, manual_hint=hint)
-    if code != 0:
-        return _step("register", "failed", "launchctl_bootstrap_failed", manual_hint=hint)
-    return _step("register", "done")
-
-
-def _register_launchd(fields):
-    """macOS：渲染 self-initiate plist → lint → 就位 →（可选）launchctl。
-
-    同目录 `mkstemp` + `os.replace`：跨文件系统的 EXDEV 和半截文件都不可能出现，
-    目录不可写时也当场就是 PermissionError（正是我们要的 `failed`）。
+    面板 plist 的 PATH 实测没有 bun（所以不能只靠 ``shutil.which``）；
+    测试经 ``HUB_BUN`` 注入假件，绝不实调真 bun。
     """
-    label = "com.example.%s-self-initiate" % fields["bot_id"]
-    plist = os.path.join(launchagents_dir(), label + ".plist")
-    hint = "launchctl bootstrap gui/$UID %s" % plist
-    try:
-        with open(os.path.join(REPO_ROOT, "plist-templates", "self-initiate.plist.tmpl"),
-                  encoding="utf-8") as f:
-            text = f.read()
-    except OSError as e:
-        return _step("register", "skipped", type(e).__name__, manual_hint=hint)
-    text = (text.replace("{REPO_DIR}", REPO_ROOT)
-                .replace("{BOT_ID}", fields["bot_id"])
-                .replace("{CHAT_ID}", str(fields["chat_id"])))
-    tmp = None
-    try:
-        fd, tmp = tempfile.mkstemp(dir=launchagents_dir(), prefix="." + label, suffix=".tmp")
-        with os.fdopen(fd, "wb") as f:
-            f.write(text.encode("utf-8"))
-        if not _plutil_ok(tmp):
-            return _step("register", "failed", "plist_lint_failed", manual_hint=hint)
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, plist)
-        tmp = None
-    except OSError as e:
-        return _step("register", "failed", type(e).__name__, manual_hint=hint)
-    finally:
-        if tmp:
-            _unlink(tmp)
-    if os.environ.get("HUB_LAUNCHAGENTS_DIR"):
-        # §7：目录被注入到非默认值 = 测试态，不实调 launchctl（不许动机主的 gui domain）
-        return _step("register", "done", "skipped_launchctl")
-    return _launchctl(label, plist, hint)
+    env = os.environ.get("HUB_BUN")
+    if env:
+        return env if os.path.isfile(env) and os.access(env, os.X_OK) else None
+    found = shutil.which("bun")
+    if found:
+        return found
+    cand = os.path.expanduser("~/.bun/bin/bun")
+    return cand if os.path.isfile(cand) and os.access(cand, os.X_OK) else None
+
+
+def _register_dsh(fields):
+    """macOS：交给 `gateway/scripts/autostart.ts` 装网关单元与主动消息单元（§6 register）。
+
+    两条命令**短路**：install 非 0 即止（install-jobs 不跑）。子进程原始输出（含 launchd
+    报错原文）一个字不进 `detail`/`manual_hint`（S9）—— 只给机读码与固定命令文本。
+    PATH 前置 `~/.pyenv/shims`（目录存在时），让 autostart.ts 的 `Bun.which('python3')`
+    解析到 pyenv 那支，与既有 dsh bot 单元口径一致；shims 不在的机器自然回落。
+    """
+    yml = os.path.join(str(config_sources.dsh_dir()), fields["bot_id"] + ".yml")
+    bun = _resolve_bun()
+    hint = ("手动注册：%s %s install %s ； %s %s install-jobs %s"
+            % (bun or "bun", AUTOSTART_TS, yml, bun or "bun", AUTOSTART_TS, yml))
+    if bun is None:
+        return _step("register", "failed", "bun_missing", manual_hint=hint)
+    if not os.path.isfile(AUTOSTART_TS):
+        return _step("register", "failed", "autostart_missing", manual_hint=hint)
+    env = dict(os.environ)
+    shims = os.path.expanduser("~/.pyenv/shims")
+    if os.path.isdir(shims):
+        env["PATH"] = shims + os.pathsep + (env.get("PATH") or "")
+    for sub, code in (("install", "install_failed"), ("install-jobs", "install_jobs_failed")):
+        try:
+            rc = subprocess.run([bun, AUTOSTART_TS, sub, yml], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                env=env, timeout=INSTALL_TIMEOUT).returncode
+        except (OSError, subprocess.SubprocessError):
+            return _step("register", "failed", code, manual_hint=hint)
+        if rc != 0:
+            return _step("register", "failed", code, manual_hint=hint)
+    return _step("register", "done")
 
 
 def _register_task(fields):
@@ -641,63 +746,48 @@ def _register_task(fields):
 
 
 def register(fields):
-    """C 段第 4 步：注册**可选的** self-initiate 常驻单元。
+    """C 段第 4 步：注册常驻单元并把网关拉起来（§6 register 的分平台口径）。
 
-    dispatcher 本身不需要 per-bot 常驻（D3）：`restart-bots.sh` 遍历注册表，
-    新 bot 一落盘，既有的全局 autostart 下次触发就带上它。
+    darwin 交给 autostart.ts（它自己 bootout + bootstrap）；nt 保留既有 `_register_task`；
+    其余平台 `skipped` + 确切的手工命令走 207。
     """
     if sys.platform == "darwin":
-        return _register_launchd(fields)
+        return _register_dsh(fields)
     if os.name == "nt":
         return _register_task(fields)
-    # B3：非 macOS/Windows → `skipped` + 确切命令走 207。**不打 TODO 到 stdout** ——
-    # 门户是 web 进程，用户根本看不到，那等于"看起来做了"的静默跳过。
-    # install.sh 在这条路径上也是同一句提示（本仓库不提供 systemd 单元模板）。
     return _step("register", "skipped", "no_launchd",
-                 manual_hint="本机没有 launchd/计划任务；想让它主动开口，自己挂个定时器跑："
-                             "python3 %s/scripts/self_initiate.py %s %d"
-                             % (REPO_ROOT, fields["bot_id"], fields["chat_id"]))
+                 manual_hint="本机没有 launchd/计划任务，手动拉起：bun %s install <配置文件>"
+                             % AUTOSTART_TS)
 
 
-def _script_reads_registry():
-    """F4 自检：`grep -q bots_registry <脚本>`。**文件不存在 = 自检不通过**（§7）。"""
-    try:
-        with open(restart_script(), encoding="utf-8", errors="ignore") as f:
-            return "bots_registry" in f.read(1024 * 1024)
-    except OSError:
-        return False
+def wait_alive(bot_id):
+    """C 段第 7 步：等该 bot 满足 §5 的存活条件，上限 30 秒（§6；换芯见 PLAN §1.7）。
 
-
-def wait_alive(port, seconds=PROBE_SECONDS):
-    """F4：成功判定改探活，不看退出码。轮询 `POST /status`，最多 30 秒。
-
-    复用 `bots_client._probe_one`（同一套 `POST /status` + 绕开系统代理的 opener），
-    不另写一份探活 —— 两份探活迟早在超时/方法上分叉。
+    判活实现只有一处（``bot_launchd``），这里不另判一遍；上限取它的模块常量
+    （测试可改），不在这里再抄一个数。
     """
-    deadline = time.monotonic() + seconds
-    while True:
-        if bots_client._probe_one(port) is not None:
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(1)
+    from moments import bot_launchd
+    ok, reason, _pid, _age = bot_launchd.wait_alive(
+        bot_id, since_ms=time.time() * 1000, timeout=bot_launchd.CREATE_WAIT)
+    return ok, reason
 
 
-def restart(fields, jobs):
-    """C 段 5-7 步：脚本版本自检 → 触发重启 → 探活判成。"""
-    if not _script_reads_registry():
-        # 老副本硬编码 BOTS=(...)：它会"正常重启了别人、退出码 0"，据此回 201 就是撒谎
-        return _step("restart", "skipped", "restart_script_outdated", manual_hint=HINT_OUTDATED)
-    argv, available = bots_client.restart_plan()
-    if not available:
-        return _step("restart", "skipped", "restart_script_missing", manual_hint=HINT_OUTDATED)
-    acc = jobs.start(argv)                     # 复用一期 §6.2 的异步 job 与 HUB_RESTART_CMD 接缝
-    if acc.job_id is None:
-        return _step("restart", "failed", "restart_in_progress", manual_hint=HINT_RESTART)
-    if not wait_alive(fields["port"]):
-        return _step("restart", "failed", "probe_timeout", job_id=acc.job_id,
-                     manual_hint=HINT_RESTART)
-    return _step("restart", "done", job_id=acc.job_id)
+def restart(fields):
+    """C 段第 5 步：等它活起来（§6 restart）。该步自己等，不产生 job。
+
+    非 macOS 上没有机制会拉起新 bot（拍板 5）→ `skipped` + manual_hint，
+    不假装等 30 秒再报 failed（S7）。等不到为 failed，manual_hint 给确切命令与日志路径。
+    """
+    bot_id = fields["bot_id"]
+    home = str(config_sources.dsh_bot_dir(bot_id))
+    hint = ("手动拉起：launchctl kickstart -k gui/$UID/com.dsh-bot.%s ；日志 %s"
+            % (bot_id, os.path.join(home, "logs", "launchd.log")))
+    if sys.platform != "darwin":
+        return _step("restart", "skipped", "no_launchd", manual_hint=hint)
+    ok, reason = wait_alive(bot_id)
+    if ok:
+        return _step("restart", "done")
+    return _step("restart", "failed", reason or "not_alive", manual_hint=hint)
 
 
 # ---------------------------------------------------------------- 三段总装（§4.3）
@@ -706,15 +796,17 @@ def _respond(fields, probe, steps):
     """全成功 201；C 段有任一步没 done → `207 bot_created_partial` + 能自己补的确切命令。
 
     207 不删 B 段产物：文件已经是对的、bot 手动跑得起来，把它删掉等于用户白填一遍表单。
+    `restart_hint` 按 S4 分档：201 没有待补动作；207 的待补动作都属「让 bot 跑起来」面。
     """
     body = {"ok": True, "bot_id": fields["bot_id"], "username": probe.get("username"),
-            "steps": steps, "restart_hint": dict(RESTART_FLAGS)}
+            "steps": steps, "restart_hint": dict(RESTART_FLAGS_DONE)}
     stuck = [s for s in steps if s["state"] != "done"]
     if not stuck:
         return body, 201
     hints = [s["manual_hint"] for s in stuck if s.get("manual_hint")]
     body.update(ok=False, error="bot_created_partial",
-                manual_hint=" ；".join(hints) or HINT_RESTART)
+                manual_hint=" ；".join(hints) or HINT_MANUAL,
+                restart_hint=dict(RESTART_FLAGS))
     return body, 207
 
 
@@ -739,5 +831,5 @@ def create(body, jobs):
         raise HubError(500, "internal", type(e).__name__)
     steps.append(_step("files", "done"))
     steps.append(register(fields))
-    steps.append(restart(fields, jobs))
+    steps.append(restart(fields))
     return _respond(fields, probe, steps)
