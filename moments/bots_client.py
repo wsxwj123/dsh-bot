@@ -18,6 +18,7 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -33,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PROBE_TIMEOUT = 1.5       # §6.1 单次探活超时
 PROBE_BUDGET = 2.0        # §6.1 整体封顶：慢 bot 不许拖住门户
 PROBE_WORKERS = 8         # 并发封顶：bot 再多也不炸线程
-RESTART_TIMEOUT = 180.0   # §6.2 超时后强杀进程树
+RESTART_TIMEOUT = 180.0   # 覆盖命令路径的超时（超时后强杀进程树）
 TAIL_MAX = 2000           # §6.2 tail 取尾 2000 字
 JOBS_KEPT = 5             # §6.2 内存只留最近 5 条
 
@@ -42,6 +43,8 @@ JOBS_KEPT = 5             # §6.2 内存只留最近 5 条
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 Accepted = namedtuple("Accepted", "job_id started_at busy")
+#: ``restart_plan()`` 的返回（§5b）：能不能重启 / 不能为什么 / 覆盖命令的 argv。
+RestartPlan = namedtuple("RestartPlan", "available reason override")
 
 
 # ---------------------------------------------------------------- 名单与端口
@@ -295,56 +298,107 @@ def _row(entry, port, status):
     return row
 
 
-def probe_bots(entries):
+def _dsh_probe(bot_id):
+    """dsh 行的判活（§2 第 1–3 条，实现在 ``bot_launchd.row_state``）：心跳新鲜 → online；
+    否则 ``launchctl print`` 说 running → starting；否则 offline。dsh 行**不发本机 HTTP 探活**。"""
+    from moments import bot_launchd       # 延迟 import：与 bot_launchd 双向依赖，函数内解
+    state, pid = bot_launchd.row_state(bot_id)
+    return {"state": state, "pid": pid}
+
+
+def _dsh_row(entry, port, res):
+    """§2 的 dsh 行：``phase``/``queue_depth``/``in_flight`` 恒 null。
+
+    探不下去（2 秒预算内没拿到 ``print`` 结果 / 线程异常）按第 3 档 offline ——
+    拿不到 print 结论就是「没证据说它在跑」，不是 unknown。
+    """
+    res = res if isinstance(res, dict) else {}
+    return {"id": entry["id"], "display_name": entry["display_name"], "port": port,
+            "state": res.get("state") or "offline", "phase": None,
+            "pid": res.get("pid"), "queue_depth": None, "in_flight": None}
+
+
+def probe_bots(entries, sources=None):
     """并发探活，整体封顶 ``PROBE_BUDGET`` 秒（[R4D] I7：串行时 N 个离线 bot 要等 N×1.5 秒）。
 
     **端口取每个 bot 生效那份配置的 ``dispatcher_port``**（``_effective_configs``，
     与来源徽标、停用徽标同一份）。混跑期注册表按"新系统优先"合并，照它去探会把
     旧栈正在跑的 bot 探成离线，一行里三个标注各指一份文件。
 
+    行数据按 ``source`` 分派（§2）：``dsh`` 行走 ``bot_launchd`` 的判活（含必要时的一次
+    ``launchctl print``），与其余行走**同一个并行池**、同一个 2 秒预算 —— 不引入按行
+    串行的子进程；其余行（legacy、来源为空、``HUB_BOTS_FILE`` 注入）保持既有
+    ``POST /status`` 探活，行为一字不差。
+
+    ``sources`` 传 ``bot_sources()`` 的结果（不传就现取一次，口径相同）。
+
     自己吞掉全部探活异常 —— 抛出去会被路由层误判成 config_unreadable。
     """
+    src = bot_sources() if sources is None else sources
     eff = _effective_configs()
-    rows, targets = {}, []
+    rows, dsh_t, plain_t = {}, [], []
     for e in entries:
         port = bot_port(e["id"], eff.get(e["id"]))
         if port is None:
             rows[e["id"]] = _row(e, None, None)   # unknown：没端口可打，不发探活、不占预算
+        elif (src.get(e["id"]) or {}).get("source") == "dsh":
+            dsh_t.append((e, port))
         else:
-            targets.append((e, port))
-    if targets:
-        ex = ThreadPoolExecutor(max_workers=min(PROBE_WORKERS, len(targets)))
+            plain_t.append((e, port))
+    if dsh_t or plain_t:
+        ex = ThreadPoolExecutor(max_workers=min(PROBE_WORKERS, len(dsh_t) + len(plain_t)))
         try:
-            pairs = [(e, p, ex.submit(_probe_one, p)) for e, p in targets]
-            wait([f for _, _, f in pairs], timeout=PROBE_BUDGET)
-            for e, port, fut in pairs:
-                rows[e["id"]] = _row(e, port, _settled(fut))
+            todo = [(e, p, True, ex.submit(_dsh_probe, e["id"])) for e, p in dsh_t]
+            todo += [(e, p, False, ex.submit(_probe_one, p)) for e, p in plain_t]
+            wait([t[3] for t in todo], timeout=PROBE_BUDGET)
+            for e, port, is_dsh, fut in todo:
+                rows[e["id"]] = (_dsh_row if is_dsh else _row)(e, port, _settled(fut))
         finally:
             # 封顶到了就走人：join 慢线程等于没封顶（残留线程最多再挂 PROBE_TIMEOUT 秒）
             ex.shutdown(wait=False, cancel_futures=True)
     return [rows[e["id"]] for e in entries]
 
 
-# ---------------------------------------------------------------- 重启（§6.2）
+# ---------------------------------------------------------------- 重启（§3/§4/§4b）
 
 def restart_plan():
-    """``(argv, restart_available)`` —— 命令构造与可用性判定的**唯一**出处（[RA] 建议3）。
+    """能不能重启这一页的 bot，以及执行的计划 —— 判定的**唯一**出处（§5b）。
 
-    §6.0：设了 ``HUB_RESTART_CMD`` 就恒可用（不再 stat 脚本），
-    所以 ``409 restart_script_missing`` 只在未设该变量且脚本缺失时出现。
+    返回 ``RestartPlan(available, reason, override)``：
+
+    - ``HUB_RESTART_CMD`` 非空 → 恒可用（覆盖命令整次替换 launchd 计划），
+      ``override`` 是 ``shlex.split`` 的结果；
+    - 否则要求平台是 macOS 且新系统配置根在场（``config_sources.dsh_dir()`` 不是 None
+      且目录存在）—— 与 ``hub_visible`` 的放行口径同源（S1）：这一页没有新系统的 bot
+      就没有可重启的对象，非 macOS 上没有 launchd 可调。
     """
-    override = os.environ.get("HUB_RESTART_CMD")
-    if override:
-        return shlex.split(override), True
-    if os.name == "nt":
-        script = REPO_ROOT / "windows" / "restart-bots.ps1"
-        argv = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
-    else:
-        script = REPO_ROOT / "restart-bots.sh"
-        argv = ["bash", str(script)]
-    # 只判"存在且可读"：install.sh 是 `cp restart-bots.example.sh` 拷出来的（不带 +x），
-    # 而我们走 `bash <脚本>`，再要求 X_OK 会把装好的机器误报成脚本缺失。
-    return argv, script.is_file() and os.access(script, os.R_OK)
+    raw = (os.environ.get("HUB_RESTART_CMD") or "").strip()
+    if raw:
+        return RestartPlan(True, None, shlex.split(raw))
+    if sys.platform != "darwin":
+        return RestartPlan(False, "这台机器不是 macOS，没有 launchd 可以重启 bot", None)
+    if _dsh_root() is None:
+        return RestartPlan(False, "新系统配置根不在场（HUB_CONFIGS_DSH_DIR 被关掉或目录"
+                                  "不存在），这一页没有可管的 bot", None)
+    return RestartPlan(True, None, None)
+
+
+def command_runner(argv=None):
+    """覆盖命令路径的 job 执行体（§3 末段）：整次重启换成执行 ``HUB_RESTART_CMD``。
+
+    包一层既有 ``_run_command`` 保持退出码语义（``exit_code`` 如实带出）；
+    子进程环境按既有口径注入新系统配置根（``_restart_env``）。
+    ``argv`` 缺省现读 env；调用方传 ``restart_plan().override`` 时用的是同一份切分结果
+    （单一出处，两边不会在"读哪个 env"上分叉）。
+    """
+    if argv is None:
+        argv = shlex.split(os.environ.get("HUB_RESTART_CMD") or "")
+    argv = list(argv)
+
+    def runner():
+        return _run_command(argv, RESTART_TIMEOUT)
+
+    return runner
 
 
 def _decode(raw):
@@ -421,8 +475,13 @@ class RestartJobs:
         self._running = None
         self._keep = keep
 
-    def start(self, argv, timeout=RESTART_TIMEOUT):
-        """受理一次重启。
+    def start(self, runner, timeout=None):
+        """受理一次重启（§5b）。
+
+        ``runner`` 是**无参 callable**，返回 ``(state, exit_code, tail)``，
+        ``state ∈ {done, failed, timeout}``：覆盖命令路径包一层 ``_run_command``
+        （保持退出码语义），launchd 路径由 ``bot_launchd`` 提供（``exit_code`` 恒 None）。
+        ``timeout`` 保留参数位：超时已由 runner 各自承担，job 层不再二次计时。
 
         空闲 → ``Accepted(job_id, started_at, None)``；已有任务在跑 → ``Accepted(None, None, 那个 job_id)``。
         判定与登记在同一把锁里完成，两个请求同时按下也只会放行一个。
@@ -439,7 +498,7 @@ class RestartJobs:
                 self._jobs.popitem(last=False)      # 只留最近 keep 条，最新的那条永远在
             self._running = job_id
         try:
-            threading.Thread(target=self._run, args=(job_id, argv, timeout),
+            threading.Thread(target=self._run, args=(job_id, runner),
                              daemon=True, name="hub-restart").start()
         except (RuntimeError, OSError) as e:
             # BUG-27：线程起不来（进程线程数打满 / 内存不足）时互斥标记已经立起来了，
@@ -457,9 +516,9 @@ class RestartJobs:
             if self._running == job_id:
                 self._running = None
 
-    def _run(self, job_id, argv, timeout):
+    def _run(self, job_id, runner):
         try:
-            state, code, out = _run_command(argv, timeout)
+            state, code, out = runner()
             # 先整段脱敏再切尾：反过来会把 token 拦腰截成正则匹配不到的碎片（§6.2）
             tail = redact.scrub_text(out)[-TAIL_MAX:]
         except Exception as e:      # 线程里漏出异常 = 互斥标记永远清不掉，后面全 409
