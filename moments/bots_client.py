@@ -87,6 +87,22 @@ def bot_ports():
     return bots_registry.ports(dirs=_root_dirs())
 
 
+def _listed_configs():
+    """管理台名单与来源的**唯一取数口**：两套配置根都读、含停用的，每个名字一条（同名以新
+    系统那份为准）。``list_bots`` 与 ``bot_sources`` 都从这里取，所以两边永远是同一批 bot。
+
+    新系统配置根下**文件名不是合格 bot id** 的配置不算 bot，在这里就跳过（INTERFACE §0
+    第 7 条）：形状非法的，以及保留名 ``jiwen`` / ``director`` / ``voicecall``。列表、探活、
+    重启全部的范围、单只重启的名单、放行闸都从这两个出口取数，改这一处就都覆盖了。
+    旧系统配置根下的文件不受这条影响；``HUB_BOTS_FILE`` 注入的名单不经这里。
+    """
+    import config_loader          # 延迟 import：名单是请求期才要的，别拖慢模块导入
+    from moments import config_sources
+    return [c for c in config_loader.list_enabled_bots(include_disabled=True, dirs=_source_roots())
+            if c.get("_source") != config_sources.SOURCE_DSH
+            or config_sources.is_qualified_bot_id(c["_bot_id"])]
+
+
 def _entry(bot_id, display_name):
     """规范化一条名单项；id 缺失/不是字符串一律抛（路由层转 500 config_unreadable）。"""
     if not isinstance(bot_id, str) or not bot_id.strip():
@@ -111,10 +127,7 @@ def list_bots():
     """
     path = os.environ.get("HUB_BOTS_FILE")
     if not path:
-        import config_loader          # 延迟 import：名单是请求期才要的，别拖慢模块导入
-        return [_entry(c.get("_bot_id"), c.get("display_name"))
-                for c in config_loader.list_enabled_bots(include_disabled=True,
-                                                         dirs=_source_roots())]
+        return [_entry(c.get("_bot_id"), c.get("display_name")) for c in _listed_configs()]
     with open(path, encoding="utf-8") as f:
         raw = json.load(f)
     if not isinstance(raw, list):
@@ -160,11 +173,10 @@ def bot_sources():
     if os.environ.get("HUB_BOTS_FILE"):
         return {}
     try:
-        import config_loader
         from moments import config_sources
         eff = config_sources.effective_configs()
         out = {}
-        for c in config_loader.list_enabled_bots(include_disabled=True, dirs=_source_roots()):
+        for c in _listed_configs():
             cur = eff.get(c["_bot_id"]) or c
             out[c["_bot_id"]] = {
                 "source": cur.get("_source"),
