@@ -1003,8 +1003,14 @@ def bots_list():
     entries = bots_client.hub_visible(entries, src)
     on_page = {e["id"] for e in entries}
     plan = bots_client.restart_plan()
+    # 停用标注（§0 第 8 条）：新系统的行取 `enabled_of` —— 与启停方向、单只重启的停用判定是
+    # 同一个函数的结果，徽标说启用的就不会被重启全部停掉。兜底显示出来的其余行保持既有口径
+    # （`enabled_of` 对不是新系统的 bot 一律回否，不能拿来标注它们）。
+    dsh_rows = {b for b in on_page if (src.get(b) or {}).get("source") == "dsh"}
+    disabled = ({b for b in dsh_rows if not bot_launchd.enabled_of(b)}
+                | {b for b in bots_client.disabled_ids() if b in on_page - dsh_rows})
     return jsonify({"bots": bots_client.probe_bots(entries, src),
-                    "disabled": [b for b in bots_client.disabled_ids() if b in on_page],
+                    "disabled": sorted(disabled),
                     "restart_available": plan.available,
                     "restart_reason": plan.reason,
                     "sources": {k: v for k, v in src.items() if k in on_page},

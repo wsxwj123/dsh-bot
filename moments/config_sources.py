@@ -282,13 +282,19 @@ def find_path(bot_id):
         if not p.is_file():
             continue
         priority = p                      # 最后留下的是优先级最高的那份文件
-        if _is_enabled_file(p):
+        if is_enabled_file(p):
             running = p                   # 在跑的那份压过优先级：停它才停得掉
     return running or priority
 
 
-def _is_enabled_file(path):
-    """一份 yml 顶层 ``enabled`` 是不是启用的；读不了 / 不是映射一律当没启用。"""
+def is_enabled_file(path):
+    """一份 yml **自己**顶层写的 ``enabled`` 是不是启用的：按文件原文判，没写算启用，
+    不合并 ``life_config`` 指向的那份。读不了（不存在、解析不出）当没启用；
+    顶层不是映射的按空配置算（等于没写）。
+
+    「这只 bot 启用没有」的读法就是拿新系统配置根下那份 yml 问这个函数（§0 第 8 条，
+    见 ``bot_launchd.enabled_of``）；``find_path`` 判「哪份在跑」用的也是它。
+    """
     import yaml
     from bots_registry import is_enabled
     try:

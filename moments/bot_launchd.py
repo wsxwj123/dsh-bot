@@ -353,12 +353,19 @@ def wait_alive(bot_id, since_ms=None, timeout=None, seams=None):
 
 
 def enabled_of(bot_id):
-    """新系统这边**该不该跑**这只 bot（``enabled`` 的判定口径在 ``bots_registry.is_enabled``）。
+    """「这只 bot 启用没有」**唯一的读法**（§0 第 8 条），也就是新系统这边该不该跑它。
 
-    读的是新系统那份配置：这只生效的那份不是新系统的（没有这只，或生效的是旧系统那份），
+    三处取的都是这个函数的结果，不许各读各的：列表 ``disabled`` 里新系统行的标注、
+    重启全部与开关同步的启停方向、单只重启的 ``bot_disabled`` 判定。
+
+    分两步。先看来源：这只生效的那份不是新系统的（没有这只，或生效的是旧系统那份），
     一律回否 —— 新系统这边就不该跑它（§5b 第 4 条）。过放行闸进来的重启不受影响；它只在
     开关「新旧同名、停用之后生效的变成旧系统那份」时起作用：那次同步必须走停用方向，
     否则会把刚停的 bot 反向拉起，新旧两个进程同 token 双跑。
+
+    再看新系统配置根下那份 yml **自己**顶层写的 ``enabled``：按文件原文判，没写算启用。
+    不用上一步拿到的配置来判 —— 那是全系统共用的读法，合并过 ``life_config`` 指向的那份，
+    那份里写的 ``enabled: false`` 会把一只该跑的 bot 判成停用（重启全部时被 bootout）。
 
     每次调用现读、不缓存。会读配置文件，所以只许在处理请求的线程里调（§1a）：
     job 的方向由 ``one_runner`` / ``all_runner`` 在受理时读好，后台不再调它。
@@ -367,8 +374,8 @@ def enabled_of(bot_id):
     cfg = config_sources.effective_config(bot_id)
     if not cfg or cfg.get("_source") != config_sources.SOURCE_DSH:
         return False
-    from bots_registry import is_enabled
-    return bool(is_enabled(cfg))
+    d = config_sources.dsh_dir()
+    return d is not None and config_sources.is_enabled_file(d / ("%s.yml" % bot_id))
 
 
 # ---------------------------------------------------------------- 单只执行体（§4 / §4b）
