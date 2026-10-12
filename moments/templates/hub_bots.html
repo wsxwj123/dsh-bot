@@ -16,8 +16,8 @@
     <div class="muted">这一页只管新系统的 bot。跑在旧系统的那些不在这里出现，
       开关与重启都在旧管理台和桌面脚本里做。「开关」是配置里停没停用，
       dispatcher 那盏灯是进程此刻在不在，phase 是它托管的 worker，三层分开看。
-      新系统里停用的 bot 仍留在表里（灰一档），点「启用」把配置改回来；
-      它要真正跑起来还得重启这只 bot 的那一步，那一步现在还没接上。</div>
+      新系统里停用的 bot 仍留在表里（灰一档）。
+      点「启用」会把配置改回来，并只把这一只拉起来；点「停止」只停这一只。</div>
   </details>
 
   <div class="card">
@@ -170,13 +170,16 @@ async function loadBots() {
   hubSay(empty, (r.body.bots || []).length ? '' : '一个 bot 都还没有');
 }
 
-// 写开关只改配置文件，真正生效靠随后那次重启（重启脚本按注册表拉起，
-// 停用的 bot 已不在名单里）。所以写完直接走同一个重启入口 —— 光改文件不重启，
-// 用户会看见"点了停止它还在回消息"，那跟没做一样。二次确认里把代价说清楚。
+// 开关只动这一只（INTERFACE §13a）。后端写完配置就自己起一个只同步这一只的任务
+// （启用则拉起，停用则停下），页面不再另发重启全部 —— 那会把别的 bot 一起打断，
+// 还会撞上后端自己起的那个任务。这里只做三件事：确认、发请求、把响应里的 sync
+// 交给 showSync 显示。确认框只说这一只的代价。
 async function setEnabled(botId, enabled, btn) {
   const what = enabled ? '启用' : '停止';
-  if (!confirm(what + ' ' + botId + '？改完会立即重启新系统的全部 bot 让它生效，'
-               + '正在处理的对话会被打断。')) { return; }
+  const ask = enabled
+    ? ('启用 ' + botId + '？只启动这一只，别的 bot 不受影响。')
+    : ('停止 ' + botId + '？只停这一只，别的 bot 不受影响；它正在处理的对话会被打断。');
+  if (!confirm(ask)) { return; }
   btn.disabled = true;
   const r = await hubApi('/hub/api/bots/' + encodeURIComponent(botId) + '/enabled',
                          {method: 'POST', body: JSON.stringify({enabled: enabled})});
@@ -186,30 +189,58 @@ async function setEnabled(botId, enabled, btn) {
                                                 || ('HTTP ' + r.status)));
     return;
   }
-  hubSay($('restart-msg'), '已' + what + ' ' + botId + '，正在重启使其生效…');
   loadBots();
-  startRestart();          // 复用「重启全部 bot」那条既有链路（202 + job 轮询）
+  showSync(botId, enabled, r.body && r.body.sync);
+}
+
+// 开关成功后的唯一显示入口（INTERFACE §13a）：按 sync.state 分三路，各说各的。
+// 只有 started 那一路接着轮询那一个任务；busy 与 skipped 不再发任何请求。
+function showSync(botId, enabled, sync) {
+  const head = botId + ' 的配置已改成' + (enabled ? '启用' : '停用');
+  const state = sync && sync.state;
+  if (state === 'started' && sync.job_id) {
+    hubSay($('restart-msg'), head + '，正在同步这一只…');
+    pollJob(sync.job_id, botId);
+  } else if (state === 'busy') {
+    hubSay($('restart-msg'), head + '，但这一只还没同步：有别的重启任务正在跑。'
+                             + '等它结束后点「重启全部 bot」补上。');
+  } else if (state === 'skipped') {
+    hubSay($('restart-msg'), head + '，但没有自动同步：这台机器不是 macOS，'
+                             + '管理台没法替你启停它，请手动处理。');
+  } else {
+    // 响应里没有 sync，或是页面不认识的状态：给一句兜底，别让用户点完什么都看不到
+    hubSay($('restart-msg'), head + '，同步结果未知，请刷新看状态。');
+  }
 }
 
 // §6.2 是异步的：POST 拿 job_id，再轮询 GET .../restart/<job_id> 看四态。
-async function pollJob(jobId) {
+// label 只有开关同步会带（那只 bot 的 id）：带了就用「同步」这一套说法，终态接 tail 的
+// 最后一个非空行；不带（重启全部、行内重启）时文案一字不变。
+async function pollJob(jobId, label) {
   const r = await hubApi('/hub/api/bots/restart/' + encodeURIComponent(jobId));
   if (r.status !== 200) { hubSay($('restart-msg'), '任务状态读不到了'); return; }
   const s = r.body.state;
   if (s === 'running') {
-    hubSay($('restart-msg'), '重启中…');
-    setTimeout(() => pollJob(jobId), 2000);
+    hubSay($('restart-msg'), label ? ('正在同步 ' + label + '…') : '重启中…');
+    setTimeout(() => pollJob(jobId, label), 2000);
     return;
   }
-  hubSay($('restart-msg'), '重启结束：' + s +
-        (r.body.exit_code === null || r.body.exit_code === undefined
-         ? '' : '（退出码 ' + r.body.exit_code + '）'));
+  if (label) {
+    const word = {done: '同步完成', failed: '同步失败', timeout: '同步超时'}[s]
+                 || ('同步结束（' + s + '）');
+    const last = String(r.body.tail || '').split('\n').map((ln) => ln.trim())
+                                          .filter(Boolean).pop();
+    hubSay($('restart-msg'), last ? (word + '：' + last) : word);
+  } else {
+    hubSay($('restart-msg'), '重启结束：' + s +
+          (r.body.exit_code === null || r.body.exit_code === undefined
+           ? '' : '（退出码 ' + r.body.exit_code + '）'));
+  }
   $('restart-all').disabled = false;
   loadBots();
 }
 
-// 重启入口只有这一个（「重启全部 bot」按钮和停用/启用之后都走它）。
-// 停用真正生效靠的就是这一下：重启脚本按注册表拉起，停用的 bot 不在名单里，起不来。
+// 「重启全部 bot」按钮的入口：让新系统的每一只回到配置说的样子。
 // 范围只覆盖新系统的 bot：命令的配置根由管理台限定（见 bots_client._restart_env），
 // 旧系统的那些不归这一下管。
 async function startRestart() {
