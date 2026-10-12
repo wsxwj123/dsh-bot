@@ -193,6 +193,10 @@ class FakeLaunchctl:
         self._dump()
         return self
 
+    def set_timer_unit(self, bot, **kw):
+        """这只 bot 的主动消息定时单元 `com.dsh-bot.self-initiate.<bot>` 的状态（§5c）。"""
+        return self.set_unit("self-initiate.%s" % bot, **kw)
+
     def set_pid(self, pid):
         return self._set(pid=pid)
 
@@ -214,6 +218,10 @@ class FakeLaunchctl:
 
     def set_bootstrap_fail(self, flag=True):
         return self._set(bootstrap_fail=bool(flag))
+
+    def set_bootout_fail(self, *labels):
+        """让 bootout 报一个不在容错范围内的错（退出 5）。不给 label 是全部单元，给了只对这些。"""
+        return self._set(bootout_fail=list(labels) if labels else True)
 
     def hold_first(self, cmd, max_wait=8.0):
         """让 `cmd` 这个子命令的第一次调用先不返回，等测试放行。返回句柄。
@@ -249,6 +257,10 @@ class FakeLaunchctl:
 
     def calls_of(self, cmd):
         return [c for c in self.calls() if c.get("cmd") == cmd]
+
+    def actions(self):
+        """去掉只读的 print 之后，按先后列出每次调用的完整参数（§5c 断言动作顺序用）。"""
+        return [list(c.get("argv") or []) for c in self.calls() if c.get("cmd") != "print"]
 
     def state_of(self, bot):
         self._reload()

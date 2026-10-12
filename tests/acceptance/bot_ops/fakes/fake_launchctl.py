@@ -12,6 +12,8 @@ conftest 生成的 shim 以
   delay         {子命令: 秒} —— 用来构造 LAUNCHCTL_TIMEOUT 场景
   kickstart_missing   true 时 kickstart 一律报「Could not find service」退出 3
   bootstrap_fail      true 时 bootstrap 退出 1
+  bootout_fail        true 时 bootout 一律报一个不在容错范围内的错（退出 5）；给的是 label
+                      列表时只对这些 label 这样（INTERFACE §5c「第 1 或第 2 步失败」）
   print_text    直接指定 print 的原文（用来构造解析边界）
   hold          {"cmd": 子命令, "reached": 文件, "release": 文件, "max_wait": 秒}
                 —— 该子命令的**第一次**调用先不返回：到达时建出 reached 文件，然后等
@@ -159,6 +161,9 @@ def main():
         _emit("", "", 0)
 
     if cmd == "bootout":
+        fail = cfg.get("bootout_fail")
+        if fail is True or (isinstance(fail, list) and label in fail):
+            _emit("", "Boot-out failed: 5: Input/output error\n", 5)
         if st.get("installed"):
             st["installed"] = False
             st["running"] = False
