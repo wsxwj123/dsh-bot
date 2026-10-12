@@ -31,6 +31,9 @@ def _bot(sandbox, bot_id="xiaoyu", *, display_name="旧名", channel_path=None,
     返回的 `channel` 恒为默认回落路径 <dsh_home>/bots/<id>/channel，与显式给出的
     channel_path **彻底分开**（后者只写进 yml）——默认路径是「实现若忽略显式配置
     会去读的地方」，判「显式给了就用显式的」要靠两个不同目录，不能是同一个。
+
+    第 7 稿（§10「落点校验」）：channel_path 要给这只 bot 家目录里面的位置；给到家目录
+    之外是 409 `bad_channel_path` 的场景，归 test_edit_channel_dir.py。
     """
     fields = dict(yml_extra)
     if not no_display_name:
@@ -191,9 +194,16 @@ def test_GET_channelDir空串时也回落新系统家目录(web_client, sandbox)
     assert r.get_json()["persona"] == "空串也走回落"
 
 
-def test_GET_channelDir显式给出时用它(web_client, sandbox):
-    ch = sandbox.tmp / "custom-channel"
+def test_GET_channelDir显式给出且落在这只bot的家目录里_用它(web_client, sandbox):
+    """第 7 稿同步（§10「落点校验」）：显式写的频道目录必须落在这只 bot 自己的家目录里。
+
+    原先这条把显式目录放在家目录之外（tmp 下的 custom-channel）并期待 200；第 7 稿起那是
+    409 `bad_channel_path`（见 test_edit_channel_dir.py）。「显式给了就用显式的」这个判断
+    本身没变，所以把显式目录挪进家目录里的一个非默认位置，照旧与默认位置分开量。
+    """
+    ch = sandbox.dsh_home / "bots" / "xiaoyu" / "custom-channel"
     b = _bot(sandbox, channel_path=ch)
+    assert ch != b.channel, "显式目录要与默认位置分开，才量得出用的是哪一个"
     _persona(ch, "显式路径里的人设")
     _persona(b.channel, "不该读这里")
     r = _get(web_client, "xiaoyu")
