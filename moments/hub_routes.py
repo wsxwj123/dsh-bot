@@ -1524,6 +1524,34 @@ def _bt_sync(bot_id):
 
 
 # ======================================================================
+# 第 8b 段 · bot 二次编辑（/hub/api/bots/<id>/edit；INTERFACE §10）
+#
+# 改名 / 换人设 / 换音色三样，只对新系统的 bot 开放。本段只做「翻码 + 组响应」，
+# 校验、四口写入与失败逆序恢复全在 `hub_addbot.edit_read/edit_save`。
+# 与建 bot / 开关共用同一把锁：三处都在写 `configs/<bot>.yml`，同时进来会互相覆盖。
+# ======================================================================
+
+
+@hub_bp.get("/hub/api/bots/<bot_id>/edit")
+@_api
+def bots_edit_read(bot_id):
+    """§10a：读当前值（填弹窗）。坏 access.json / 缺人设都回空串，不在这里报错。"""
+    return jsonify(hub_addbot.edit_read(bot_id))
+
+
+@hub_bp.post("/hub/api/bots/<bot_id>/edit")
+@_api
+def bots_edit_save(bot_id):
+    """§10b：保存。读旧 → 写四口（yml → access.json → CLAUDE.md → 朋友圈库）→ 失败逆序恢复。
+
+    本端点不产生 launchctl 调用、不发网络请求、不产生 job：人设由网关侧 mtime 轮询发现。
+    """
+    with hub_addbot.hold_addbot_lock():
+        body, code = hub_addbot.edit_save(bot_id, request.get_json(silent=True))
+    return jsonify(body), code
+
+
+# ======================================================================
 # 第 9 段 · 新系统（dsh-bot 网关）bot 的模型切换（/hub/dsh-model）
 #
 # 新系统的 bot 不走 cliproxy，模型由网关管：这里只是转发到该 bot 网关的本机接口
