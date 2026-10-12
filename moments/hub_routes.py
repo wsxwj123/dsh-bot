@@ -1060,10 +1060,11 @@ def bots_restart_one(bot_id):
     if not bot_launchd.enabled_of(bot_id):
         return jsonify({"error": "bot_disabled",
                         "detail": "这只 bot 现在是停用状态，先启用再重启（或直接用开关）"}), 409
-    # 执行体与 §4b 的单只同步是同一份（方向按执行时生效配置的 enabled；这里必然启用）；
+    # 执行体与 §4b 的单只同步是同一份。方向刚判过、必然启用，直接交给工厂，不再读一次配置；
+    # 接缝也在这一刻（处理请求的线程里、回 202 之前）定下，后台不再读环境（§1a）。
     # 覆盖命令路径整段换成执行该命令，命令串本身不拼 bot 参数。
     runner = (bots_client.command_runner(plan.override) if plan.override
-              else bot_launchd.one_runner(bot_id))
+              else bot_launchd.one_runner(bot_id, True))
     acc = _jobs().start(runner)
     if acc.busy:
         return jsonify({"error": "restart_in_progress", "job_id": acc.busy}), 409
@@ -1517,6 +1518,9 @@ def _bt_sync(bot_id):
     走到这里的 bot 都已过放行闸（没过的在写盘之前就 404 了），所以 `skipped` 只剩
     `no_launchd` 一档。同名、这次停用之后生效的变成旧系统那份的，不跳过：方向由
     `bot_launchd.enabled_of` 判成停用，对新系统的单元 bootout。
+
+    runner 在这里构造，也就是写盘之后、回 200 之前、处理请求的线程里：同步方向与后台要用
+    的接缝都在这一刻定下，后台线程不再读配置与环境（§1a）。
     """
     plan = bots_client.restart_plan()
     if sys.platform != "darwin" and not plan.override:
