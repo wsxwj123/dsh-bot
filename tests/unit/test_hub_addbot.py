@@ -301,10 +301,13 @@ def test_人设模板走目录白名单_穿越串落不进去(_seams):
         assert e.value.error == "bad_field"
 
 
-def test_人设正文超64KiB_413(_seams):
+def test_人设正文超过65536个字符_413(_seams):
+    """第 8 稿：上限按字符数。此前按 UTF-8 字节数算，65536 个汉字（196608 字节）就被拒。"""
     with pytest.raises(HubError) as e:
-        ab._validate(fields(persona_text="人" * (64 * 1024)))
-    assert (e.value.status, e.value.error) == (413, "payload_too_large")
+        ab._validate(fields(persona_text="人" * 65537))
+    assert (e.value.status, e.value.error, e.value.detail) == \
+        (413, "payload_too_large", "人设正文超过 65536 个字符")
+    assert ab._validate(fields(persona_text="人" * 65536))["persona"] == "人" * 65536
 
 
 @pytest.mark.parametrize("name", [None, 123, "名" * 65, "小\x00雨", "小\n雨", "   "])

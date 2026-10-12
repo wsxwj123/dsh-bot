@@ -339,3 +339,151 @@ def test_落盘_配置文件写到一半失败_不留空配置_同名可以再�
     monkeypatch.setattr(ab, "_create_file", real)
     ab.lay_down(_fields())
     assert yaml.safe_load((_seams / "dsh-configs" / (BOT + ".yml")).read_text(encoding="utf-8"))["id"] == BOT
+
+
+# ============================================================ 人设正文：两项检查，新建与编辑同一把尺
+
+TOO_LONG = "人设正文超过 65536 个字符"
+BROKEN = "人设正文里有残缺的字符（多半是半个表情符号），删掉它再保存"
+TPL_TOO_LONG = "这个人设模板超过 65536 个字符，换一个或直接贴正文"
+TPL_NOT_UTF8 = "这个人设模板不是合法的 UTF-8 文本，换一个或直接贴正文"
+
+
+def test_人设_上限按字符数_65536个四字节的表情放行_再多一个就413():
+    text = "\U0001F600" * 65536                      # 262144 字节，按字节数算早就超了
+    assert ab._persona_text(text) == text
+    assert _rejected(ab._persona_text, text + "a") == (413, "payload_too_large", TOO_LONG)
+
+
+@pytest.mark.parametrize("lone", ["\ud800", "\udbff", "\udc00", "\udfff"])
+def test_人设_有落单的代理_400与固定文案(lone):
+    assert _rejected(ab._persona_text, "前半句" + lone + "后半句") == (400, "bad_field", BROKEN)
+
+
+def test_人设_又超长又有落单的代理_先答残缺的字符():
+    """§10b 的判定顺序：字段形状的 400 先于 413。"""
+    assert _rejected(ab._persona_text, "\ud83d" + "字" * 65537)[:2] == (400, "bad_field")
+
+
+def test_人设_两项检查与两句文案各只有一份():
+    src = open(ab.__file__, encoding="utf-8").read()
+    assert src.count(TOO_LONG) == 1 and src.count(BROKEN) == 1
+    assert src.count("> MAX_PERSONA") == 1, "量长度的地方只该有一处"
+    assert ".encode(\"utf-8\")) > " not in src, "还有按字节数量长度的写法"
+    assert "64 KiB" not in src.replace("64 KiB 截断", ""), "按字节数算的旧上限文案还留着"
+
+
+def _body(**over):
+    body = {"bot_id": BOT, "telegram_token": "123456789:test-AAaaBBbbCCccDDddEEeeFFggHHhh11",
+            "dispatcher_port": 17971, "chat_id": 1, "display_name": "小雨", "persona_text": "正文"}
+    body.update(over)
+    return body
+
+
+def _template(root, raw, name="tplbot"):
+    d = root / name
+    d.mkdir(parents=True)
+    (d / "CLAUDE.md").write_bytes(raw)
+    return name
+
+
+def _from_template(name):
+    body = _body(persona_template=name)
+    del body["persona_text"]
+    return body
+
+
+def test_新建_直接给的正文经同一把尺(_seams):
+    assert _rejected(ab._validate, _body(persona_text="字" * 65537)) == (413, "payload_too_large", TOO_LONG)
+    assert _rejected(ab._validate, _body(persona_text="半个\ud83d表情")) == (400, "bad_field", BROKEN)
+    assert ab._validate(_body(persona_text="字" * 21846))["persona"] == "字" * 21846   # 65538 字节
+
+
+def test_新建_模板恰好65536个字符_一个字不少(_seams):
+    text = "字" * 65535 + "尾"
+    name = _template(_seams / "channels", text.encode("utf-8"))
+    assert ab._validate(_from_template(name))["persona"] == text
+
+
+def test_新建_模板多一个字符_413_不再悄悄截断(_seams):
+    name = _template(_seams / "channels", ("字" * 65536 + "尾").encode("utf-8"))
+    assert _rejected(ab._validate, _from_template(name)) == (413, "payload_too_large", TPL_TOO_LONG)
+
+
+def test_新建_新系统来源的模板同一把尺(_seams):
+    home = _seams / "dsh-home" / "bots" / "tplbot" / "channel"
+    home.mkdir(parents=True)
+    (home / "CLAUDE.md").write_bytes(("字" * 65537).encode("utf-8"))
+    assert _rejected(ab._validate, _from_template("tplbot")) == (413, "payload_too_large", TPL_TOO_LONG)
+
+
+@pytest.mark.parametrize("raw", [b"\xff\xfe\x00not utf8 \x80", "好".encode("utf-8")[:2], b"ok\x80"])
+def test_新建_模板不是合法UTF8_400_不再冒成500(_seams, raw):
+    name = _template(_seams / "channels", raw)
+    assert _rejected(ab._validate, _from_template(name)) == (400, "bad_field", TPL_NOT_UTF8)
+
+
+def test_新建_模板很大_只读到够判超限为止(_seams, monkeypatch):
+    """不把一个巨大的文件整个读进内存：最多读上限加一个字符。"""
+    name = _template(_seams / "channels", b"a" * (4 * 1024 * 1024))
+    asked = []
+    real_open = open
+
+    class _Spy:
+        def __init__(self, f):
+            self._f = f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self._f.close()
+            return False
+
+        def read(self, n=-1):
+            asked.append(n)
+            return self._f.read(n)
+
+    def spy_open(path, *a, **k):
+        f = real_open(path, *a, **k)
+        return _Spy(f) if str(path).endswith(os.path.join(name, "CLAUDE.md")) else f
+    monkeypatch.setattr("builtins.open", spy_open)
+    assert _rejected(ab._validate, _from_template(name))[0] == 413
+    assert asked == [65537], asked
+
+
+def test_新建_模板的换行照旧按文本读_与以前相同(_seams):
+    """对照：没超限的模板读出来的内容与改之前一样（CRLF 读成 LF）。"""
+    name = _template(_seams / "channels", "第一行\r\n第二行\n".encode("utf-8"))
+    assert ab._validate(_from_template(name))["persona"] == "第一行\n第二行\n"
+
+
+def test_新建_模板目录在文件不在_仍是空人设(_seams):
+    (_seams / "channels" / "emptytpl").mkdir()
+    assert ab._validate(_from_template("emptytpl"))["persona"] == ""
+
+
+def test_编辑_人设按字符数_21846个汉字放行_65537个字符413(editable):
+    _yml, ch, _saved = editable
+    text = "中" * 21846                                  # 65538 字节
+    body, code = ab.edit_save(BOT, {"persona": text})
+    assert code == 200 and (ch / "CLAUDE.md").read_bytes() == text.encode("utf-8")
+    assert _rejected(ab.edit_save, BOT, {"persona": "a" * 65537}) == (413, "payload_too_large", TOO_LONG)
+
+
+def test_编辑_人设有落单的代理_400_人设文件不动(editable):
+    _yml, ch, _saved = editable
+    (ch / "CLAUDE.md").write_text("旧人设", encoding="utf-8")
+    assert _rejected(ab.edit_save, BOT, {"persona": "半个\ud83d表情"}) == (400, "bad_field", BROKEN)
+    assert (ch / "CLAUDE.md").read_text(encoding="utf-8") == "旧人设"
+
+
+def test_编辑_判序_残缺的字符先于音色的错_音色的错先于超长(editable):
+    """§10b：三个字段的形状错（400）全部先于 413。"""
+    assert _rejected(ab.edit_save, BOT, {"persona": "半个\ud83d", "fish_voice_id": "bad.dot"})[2] == BROKEN
+    assert _rejected(ab.edit_save, BOT, {"persona": "a" * 65537, "fish_voice_id": "bad.dot"})[2] == \
+        "音色 id 只能是字母、数字、下划线或连字符"
+
+
+def test_编辑_判序_超长先于没有这只bot(editable):
+    assert _rejected(ab.edit_save, "ghostbot", {"persona": "a" * 65537})[0] == 413
