@@ -1,0 +1,87 @@
+{# bot 二次编辑弹窗（INTERFACE §10）：bot 状态页与供应商与模型页共用一份。
+   两个页面的脚本各自定义了 $（getElementById），所以本片段必须**在页面脚本之后** include。
+   保存成功后调页面自己定义的 onBotEdited()（有就调，没有就算了）。 #}
+<dialog id="editDialog">
+  <div class="card" style="margin:0;min-width:min(560px,92vw)">
+    <h2 style="margin:0 0 4px">编辑 bot</h2>
+    <div class="muted" id="edit-who"></div>
+    <label for="edit-name">显示名</label>
+    <input id="edit-name" autocomplete="off" spellcheck="false" placeholder="1-64 字，不含控制字符">
+    <label for="edit-persona">人设正文（最多 64 KiB）</label>
+    <textarea id="edit-persona" rows="10"
+      style="width:100%;padding:9px 11px;font-size:14px;font-family:var(--font-body);
+             color:var(--ink);background:transparent;border:1px solid var(--hairline-strong);
+             border-radius:8px"></textarea>
+    <div id="voice-box">
+      <label for="edit-voice">音色 id（留空 = 这只 bot 不发语音）</label>
+      <input id="edit-voice" autocomplete="off" spellcheck="false"
+             placeholder="字母、数字、下划线或连字符，最长 64">
+    </div>
+    <div class="muted" id="edit-msg" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end">
+      <button class="btn ghost" type="button" id="edit-cancel">取消</button>
+      <button class="btn" type="button" id="edit-save">保存</button>
+    </div>
+  </div>
+</dialog>
+<script>
+let editCtx = null;                 // {botId, btn}：btn 是打开弹窗的那枚行内按钮
+
+// 打开：先把三格清空显示「读取中…」，GET 回来再填。读失败就把原因留在消息位
+// （保存按钮照旧能点，但提交后同样会被后端拒，所以不给"假装成功"的余地）。
+async function openEdit(botId, btn) {
+  const dlg = $('editDialog');
+  editCtx = {botId: botId, btn: btn || null};
+  if (btn) btn.disabled = true;
+  $('edit-who').textContent = botId;
+  $('edit-name').value = '';
+  $('edit-persona').value = '';
+  $('edit-voice').value = '';
+  $('edit-msg').textContent = '读取中…';
+  dlg.showModal();
+  const r = await hubApi('/hub/api/bots/' + encodeURIComponent(botId) + '/edit');
+  if (!dlg.open || !editCtx) return;          // 读回来之前用户已经关掉了
+  if (r.status !== 200) {
+    $('edit-msg').textContent = (r.body && (r.body.detail || r.body.error))
+                                || ('读取失败（' + r.status + '）');
+    return;
+  }
+  const b = r.body || {};
+  $('edit-name').value = b.display_name || '';
+  $('edit-persona').value = b.persona || '';
+  $('edit-voice').value = b.fish_voice_id || '';
+  $('edit-msg').textContent = '';
+}
+
+function closeEdit() {
+  const dlg = $('editDialog');
+  if (dlg.open) dlg.close();
+  if (editCtx && editCtx.btn) editCtx.btn.disabled = false;
+  editCtx = null;
+}
+
+// 三个键一次提交（后端按「给了哪个键改哪个」处理）；成功后重拉本页。
+async function saveEdit() {
+  if (!editCtx) return;
+  const btn = $('edit-save');
+  btn.disabled = true;
+  $('edit-msg').textContent = '保存中…';
+  const body = {display_name: $('edit-name').value, persona: $('edit-persona').value,
+                fish_voice_id: $('edit-voice').value};
+  const r = await hubApi('/hub/api/bots/' + encodeURIComponent(editCtx.botId) + '/edit',
+                         {method: 'POST', body: JSON.stringify(body)});
+  btn.disabled = false;
+  if (r.status === 200) {
+    closeEdit();
+    if (typeof onBotEdited === 'function') onBotEdited();
+    return;
+  }
+  $('edit-msg').textContent = (r.body && (r.body.detail || r.body.error || r.body.text))
+                              || ('保存失败（' + r.status + '）');
+}
+
+$('edit-save').onclick = saveEdit;
+$('edit-cancel').onclick = closeEdit;
+$('editDialog').addEventListener('cancel', (e) => { e.preventDefault(); closeEdit(); });
+$('editDialog').addEventListener('click', (e) => { if (e.target === $('editDialog')) closeEdit(); });
+</script>
