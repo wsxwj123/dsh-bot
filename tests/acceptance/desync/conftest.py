@@ -4,13 +4,16 @@
 - 会话前后被动记录生产状态（tmux tg-* 会话数、17801-17804 是否在听，用 lsof 只读，不连接）；不一致 → 整批判失败。
 """
 import atexit
+import importlib
 import ipaddress
 import os
 import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +23,9 @@ os.environ["CLAUDEBOTLIFE_TEST"] = "1"
 os.environ["CLAUDEBOTLIFE_TEST_ROOT"] = _ROOT
 os.makedirs(os.path.join(_ROOT, "home"), exist_ok=True)
 os.environ["HOME"] = os.path.join(_ROOT, "home")
+# 兜底：db.DB_PATH 是导入期读 BOTLIFE_STATE_DB 定死的；任何早于夹具的 import
+# （收集期等）都不许落到仓库根的 state.db。逐用例再收紧到 tmp_path，见 _botlife_state_db。
+os.environ["BOTLIFE_STATE_DB"] = os.path.join(_ROOT, "state.db")
 
 _TMUX = shutil.which("tmux")
 _LSOF = shutil.which("lsof")
@@ -122,3 +128,25 @@ def _production_guard():
     after = _prod_state()
     shutil.rmtree(_ROOT, ignore_errors=True)
     assert before == after, f"生产状态在测试期间改变: before={before} after={after}"
+
+
+@pytest.fixture(autouse=True)
+def _botlife_state_db(tmp_path, monkeypatch):
+    """朋友圈库钉在用例 tmp：`db.DB_PATH` 是导入期读 `BOTLIFE_STATE_DB` 定死的。
+
+    不钉住就会往仓库根的 state.db 写东西（发生过一次）。db 若已被前一条用例
+    导入，模块级 DB_PATH 停在旧值，必须 reload 让它跟着 env 走，并当场断言它
+    真在 tmp。子进程继承 os.environ，setenv 同样盖住 subprocess 里的 db 调用。
+    """
+    want = (tmp_path / "state.db").resolve()
+    monkeypatch.setenv("BOTLIFE_STATE_DB", str(want))
+    mod = sys.modules.get("db")
+    if mod is None:
+        import db as mod                          # import 期读 env，落当前 tmp
+    else:
+        mod = importlib.reload(mod)
+    got = Path(mod.DB_PATH).resolve()
+    assert got == want, (
+        "朋友圈库没钉在 tmp：DB_PATH=%s（应 %s）—— db.DB_PATH 是导入期定死的，"
+        "不跟着 env 重载就会写到仓库根的 state.db" % (got, want))
+    return mod

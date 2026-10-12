@@ -26,7 +26,12 @@ def _url(bot_id):
 
 def _bot(sandbox, bot_id="xiaoyu", *, display_name="旧名", channel_path=None,
          no_display_name=False, **yml_extra):
-    """造一只 dsh bot。channel_path=None 不写 bot_channel_path（走回落路径）。"""
+    """造一只 dsh bot。channel_path=None 不写 bot_channel_path（走回落路径）。
+
+    返回的 `channel` 恒为默认回落路径 <dsh_home>/bots/<id>/channel，与显式给出的
+    channel_path **彻底分开**（后者只写进 yml）——默认路径是「实现若忽略显式配置
+    会去读的地方」，判「显式给了就用显式的」要靠两个不同目录，不能是同一个。
+    """
     fields = dict(yml_extra)
     if not no_display_name:
         fields["display_name"] = display_name
@@ -34,8 +39,10 @@ def _bot(sandbox, bot_id="xiaoyu", *, display_name="旧名", channel_path=None,
         fields["bot_channel_path"] = str(channel_path)
     fields.setdefault("dispatcher_port", 17951)
     yml = u.write_bot_yml(sandbox.dsh_cfg, bot_id, **fields)
-    ch = Path(channel_path) if channel_path is not None else sandbox.dsh_home / "bots" / bot_id / "channel"
+    ch = sandbox.dsh_home / "bots" / bot_id / "channel"
     ch.mkdir(parents=True, exist_ok=True)
+    if channel_path is not None:
+        Path(channel_path).mkdir(parents=True, exist_ok=True)
     return SimpleNamespace(yml=yml, channel=ch)
 
 
