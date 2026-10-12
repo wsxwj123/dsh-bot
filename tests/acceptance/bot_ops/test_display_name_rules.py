@@ -177,9 +177,15 @@ def _roots(sandbox):
 
 
 @pytest.fixture
-def creating(sandbox, bun, telegram, launchctl, as_darwin, monkeypatch):
-    """新建流程要的假件全部在位：假 bun、假 launchctl、假 Telegram。探活上限收到 1 秒。"""
-    u.tighten_constant(monkeypatch, value=30, new=1.0)
+def creating(request, sandbox, bun, telegram, launchctl, as_darwin, monkeypatch):
+    """新建流程要的假件全部在位：假 bun、假 launchctl、假 Telegram。
+
+    探活上限（§1：30 秒，测试可改）只对「应当被拒」的用例收到 1 秒，红用例不用陪着等满。
+    要它建成的用例（取用了 heartbeat 的那些）不收，在约定的原值下跑，理由同
+    test_create_text_rules.py 的 fakes 夹具。
+    """
+    if "heartbeat" not in request.fixturenames:
+        u.tighten_constant(monkeypatch, value=30, new=1.0)
     telegram.mode = "ok"
     launchctl.set_default(installed=True, running=True, pid=4242)
     return type("Fakes", (), {"bun": bun, "telegram": telegram, "launchctl": launchctl})
