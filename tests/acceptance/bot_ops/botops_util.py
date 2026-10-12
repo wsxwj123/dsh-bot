@@ -4,6 +4,7 @@
 只放"怎么表达场景"的辅助：写造物、读状态、收缩超时常量、轮询 job。
 不含任何对被测实现的引用（除 tighten_constant 需要按契约去找超时常量）。
 """
+import contextlib
 import json
 import socket
 import stat as _stat
@@ -286,3 +287,23 @@ def tighten_constant(monkeypatch, *, name=None, value=None, new=0.5):
     for mod, attr in hits:
         monkeypatch.setattr(mod, attr, new)
     return hits
+
+
+@contextlib.contextmanager
+def tightened(*, name=None, value=None, new=0.5):
+    """只在 `with` 块里把超时常量改小，出块立刻放回原值（不等到用例结束）。
+
+    给「先让某个动作超时或等不到，再看后面的动作照常完成」的用例用：要它超时的那一段写在
+    块里，期望正常完成的那一段写在块外，后者就在契约给的正常余量下跑（§1：单次 launchctl
+    调用 10 秒、重启等待 45 秒、新建探活 30 秒）。
+
+    为什么不能一收到底：每条用例的假件都是新建的可执行文件，macOS 上它第一次被执行要多花
+    约 0.35 秒（实测 40 次中位 0.35、最大 0.49，机器忙时更长），之后每次约 0.02 秒。半秒、
+    一秒这样的上限罩在「期望正常完成」的动作上，余量就只剩这一点，机器一忙就偶发失败。
+
+    块里起的后台任务要在块里等到终态（wait_job / finish_sync）：超时常量是模块常量，后台
+    线程用到时才读（§1a 不管它），出块之后它读到的就是放回之后的值了。
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        tighten_constant(mp, name=name, value=value, new=new)
+        yield
