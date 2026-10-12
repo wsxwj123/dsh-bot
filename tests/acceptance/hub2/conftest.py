@@ -4,7 +4,7 @@
 只依据 `.devflow/BRIEF-hub2.md` 与 `INTERFACE-hub2.md` 编写，不读实现代码。
 实现未落地时本目录整体红 —— 那是红基线，不是夹具坏了。
 
-硬隔离（§7 测试接缝 + BRIEF 敏感面）：
+硬隔离（§1 测试接缝 + BRIEF 敏感面）：
 1. `HUB_CONFIGS_DIR` 指 tmp；autouse 二次断言它不等于仓库 `configs/`。
 2. `HUB_TELEGRAM_API_BASE` autouse 强制指向 127.0.0.1（未设或指向真实域名 → 该用例直接 fail），
    任何用例都不可能打到 api.telegram.org。
@@ -13,15 +13,22 @@
    `HOME` 仍钉在 tmp，但**它不再是接缝、只是防炸垫**：实现若无视 `HUB_CHANNELS_DIR`，
    产物会落进 fakehome 而不是用户真实 `~/.claude/channels/`（那里跑着生产 bot），
    用例照样红在「产物不在 `HUB_CHANNELS_DIR` 下」这条断言上。
-5. **`HUB_RESTART_SCRIPT` 默认指向一个不存在的 tmp 路径**（§13 A2 新增接缝）：
-   C 段第 5 步自检恒不通过 → 不关心重启的用例结果确定（207），且绝不去读仓库根/用户的工作副本。
-   需要具体脚本的用例用 `restart_script` 夹具造一份，再经 `apif(HUB_RESTART_SCRIPT=...)` 注入。
-6. 不监听生产端口、不起真 bot、不调 launchctl；假 token 形如 `123456789:test-...`。
+5. **新契约的落点与判活面另有两个接缝，autouse 钉在 tmp**：`HUB_CONFIGS_DSH_DIR`（`<bot>.yml`
+   的目标根）与 `DSH_BOT_HOME`（`bots/<bot>/...` 的家目录）。不钉住就等于拿真机 `~/.dsh-bot`
+   去建 bot、去读写跑着的生产 bot 的家 —— `_no_touch_real` 逐个反向断言。
+6. **两个执行接缝 autouse 指毒丸**：`HUB_BUN` / `HUB_LAUNCHCTL`（§1）。谁真去跑 autostart.ts、
+   谁真调 launchctl，谁当场非 0，测试进程绝不碰 gui domain 与真实 `~/Library/LaunchAgents`。
+   要「活条件齐」的用例自己经 `fake_bun` / `fake_launchctl` / `alive_bot` 三件套注入。
+7. **`HUB_RESTART_SCRIPT` 已退役（§1 末行）**：实现与测试都不再读它，夹具也不再提供替身。
+8. 不监听生产端口、不起真 bot、不调 launchctl；假 token 形如 `123456789:test-...`。
 """
 import importlib
+import json
 import os
 import socket
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -36,6 +43,7 @@ REAL_HOME = Path(os.path.expanduser("~"))          # 在 monkeypatch HOME 之前
 REAL_CONFIGS = REPO_ROOT / "configs"
 REAL_CHANNELS = REAL_HOME / ".claude" / "channels"
 REAL_SETTINGS = REAL_HOME / ".claude" / "settings.json"
+REAL_DSH = REAL_HOME / ".dsh-bot"                  # 新系统家目录（跑着生产 bot）
 
 FAKE_TOKEN = "123456789:test-AAaaBBbbCCccDDddEEeeFFggHHhh11"
 FAKE_TOKEN_2 = "123456780:test-ZZzzYYyyXXxxWWwwVVvvUUuuTTss22"
@@ -117,10 +125,13 @@ def telegram():
 
 
 @pytest.fixture(autouse=True)
-def _isolate(tmp_path, monkeypatch, configs_dir, launchagents_dir, channels_dir):
-    """autouse：任何用例都不许继承外部真实口令/家目录/配置目录。"""
+def _isolate(tmp_path, monkeypatch, configs_dir, launchagents_dir, channels_dir,
+             dsh_home, dsh_configs_dir, poison):
+    """autouse：任何用例都不许继承外部真实口令/家目录/配置目录，也不许碰到真机的
+    新系统家目录与那两个执行接缝（见模块 docstring 5/6/7）。"""
     for k in ("HUB_ACCESS_PASSWORD", "HUB_ADMIN_PASSWORD", "HUB_RESTART_CMD",
-              "MOMENTS_WEB_PORT", "ACCESS_PASSWORD", "CLIPROXY_MGMT_KEY"):
+              "MOMENTS_WEB_PORT", "ACCESS_PASSWORD", "CLIPROXY_MGMT_KEY",
+              "HUB_RESTART_SCRIPT"):
         monkeypatch.delenv(k, raising=False)
     fake_home = tmp_path / "fakehome"
     (fake_home / ".claude" / "channels").mkdir(parents=True, exist_ok=True)
@@ -133,8 +144,12 @@ def _isolate(tmp_path, monkeypatch, configs_dir, launchagents_dir, channels_dir)
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(configs_dir))
     monkeypatch.setenv("HUB_LAUNCHAGENTS_DIR", str(launchagents_dir))
     monkeypatch.setenv("HUB_CHANNELS_DIR", str(channels_dir))          # §13 A2
-    # §13 A2：默认指向不存在的文件 = C 段自检必不通过；要具体脚本的用例自己注入
-    monkeypatch.setenv("HUB_RESTART_SCRIPT", str(tmp_path / "no-such-restart-bots.sh"))
+    # 新契约的落点与判活面（§1）：不钉住 = 拿真机 ~/.dsh-bot 建 bot
+    monkeypatch.setenv("DSH_BOT_HOME", str(dsh_home))
+    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(dsh_configs_dir))
+    # 两个执行接缝默认毒丸：真要跑 autostart.ts / 真调 launchctl 的路径当场非 0
+    monkeypatch.setenv("HUB_BUN", str(poison / "bun"))
+    monkeypatch.setenv("HUB_LAUNCHCTL", str(poison / "launchctl"))
     # §7：未设 base 即 fail 该用例。默认指一个没人监听的回环端口（= network 分型）。
     monkeypatch.setenv("HUB_TELEGRAM_API_BASE", f"http://127.0.0.1:{free_port()}")
     base = os.environ.get("HUB_TELEGRAM_API_BASE", "")
@@ -155,17 +170,22 @@ def _names(d):
 @pytest.fixture(autouse=True)
 def _no_touch_real():
     """反向断言：跑完任何用例后，真实 configs/、真实 ~/.claude/channels、
-    真实 settings.json、真实 LaunchAgents 必须一字未动（接缝漏了就在这里炸）。"""
+    真实 settings.json、真实 LaunchAgents、真实 ~/.dsh-bot 必须一字未动
+    （接缝漏了就在这里炸）。"""
     real_la = REAL_HOME / "Library" / "LaunchAgents"
     before = (_snapshot(REAL_CONFIGS), _names(REAL_CHANNELS), _snapshot(real_la),
-              REAL_SETTINGS.stat().st_mtime_ns if REAL_SETTINGS.exists() else None)
+              REAL_SETTINGS.stat().st_mtime_ns if REAL_SETTINGS.exists() else None,
+              _names(REAL_DSH / "bots"), _snapshot(REAL_DSH / "configs"))
     yield
     after = (_snapshot(REAL_CONFIGS), _names(REAL_CHANNELS), _snapshot(real_la),
-             REAL_SETTINGS.stat().st_mtime_ns if REAL_SETTINGS.exists() else None)
+             REAL_SETTINGS.stat().st_mtime_ns if REAL_SETTINGS.exists() else None,
+             _names(REAL_DSH / "bots"), _snapshot(REAL_DSH / "configs"))
     assert before[0] == after[0], "用例改动了仓库真实 configs/"
     assert before[1] == after[1], "用例在真实 ~/.claude/channels/ 下增删了条目"
     assert before[2] == after[2], "用例改动了真实 ~/Library/LaunchAgents/"
     assert before[3] == after[3], "用例改动了真实 ~/.claude/settings.json"
+    assert before[4] == after[4], "用例在真实 ~/.dsh-bot/bots/ 下增删了条目（新系统的家目录）"
+    assert before[5] == after[5], "用例改动了真实 ~/.dsh-bot/configs/（那里是跑着的 bot）"
 
 
 @pytest.fixture
@@ -239,58 +259,11 @@ def apif(make_client):
 
 @pytest.fixture(autouse=True)
 def _safe_restart_cmd(monkeypatch, _isolate):
-    """默认把重启接缝钉在 no-op 上 —— 不设就会去跑真的 restart-bots.sh。"""
+    """默认把三个重启触发口的覆盖命令钉在 no-op 上（`HUB_RESTART_CMD`）——
+    不设的话真机会去调 launchd。它不参与新建流程的 restart 步（§6：那步只看 §5 判活）。
+
+    原来那句注释里的 restart-bots.sh 已退役（§1 末行），这里只留覆盖命令这一层。"""
     monkeypatch.setenv("HUB_RESTART_CMD", "/usr/bin/true")
-
-
-_MINI_BOT = '''\
-import json, sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-class H(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-    def log_message(self, *a): pass
-    def do_POST(self):
-        raw = json.dumps({"phase": "ready", "pid": 4242, "queue_depth": 0}).encode()
-        self.send_response(200 if self.path.split("?")[0] == "/status" else 404)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers(); self.wfile.write(raw)
-    def do_GET(self):
-        self.send_response(405); self.send_header("Content-Length", "0"); self.end_headers()
-ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
-'''
-
-
-@pytest.fixture
-def bot_launcher(tmp_path):
-    """(port) -> 一条 `HUB_RESTART_CMD` 用的命令：跑完立刻退 0，后台留下一个
-    在该端口应答 `POST /status` 的迷你 bot —— 用来喂 §4.2 C 段第 7 步的探活。
-    端口写死在脚本里，所以不依赖"门户怎么给重启命令传参"这个 INTERFACE 没写的细节。"""
-    import signal
-    srv = tmp_path / "mini_bot.py"
-    srv.write_text(_MINI_BOT, encoding="utf-8")
-    pidfile = tmp_path / "mini_bot.pids"
-    spawned = []
-
-    def _cmd(port):
-        launcher = tmp_path / f"launch_{port}.py"
-        launcher.write_text(
-            "import subprocess, sys\n"
-            f"p = subprocess.Popen([sys.executable, {str(srv)!r}, {str(port)!r}],\n"
-            "                     start_new_session=True)\n"
-            f"open({str(pidfile)!r}, 'a').write(str(p.pid) + '\\n')\n",
-            encoding="utf-8")
-        return f"{sys.executable} {launcher}"
-
-    yield _cmd
-    if pidfile.exists():
-        for line in pidfile.read_text().split():
-            try:
-                os.kill(int(line), signal.SIGKILL)
-            except (ProcessLookupError, ValueError):
-                pass
-    for p in spawned:
-        p.kill()
 
 
 @pytest.fixture
@@ -388,29 +361,165 @@ def port2():
     return free_port()
 
 
-_NEW_SCRIPT = """#!/bin/sh
-# 新版工作副本：读注册表（F4 自检 grep 的就是这个词）
-out="$(python3 -m bots_registry --format=sh)" || { echo "bots_registry failed" >&2; exit 1; }
-[ -n "$out" ] || { echo "no bots" >&2; exit 1; }
-"""
-_OLD_SCRIPT = """#!/bin/sh
-# 老用户的工作副本：硬编码 bot 列表（F4 要靠自检发现它）
-BOTS=("chenlulu:17801")
-"""
+# ---------------------------------------------------------------- 新系统那套面的夹具
+# 新建 bot 落新系统（§6/§7）：配置进 `HUB_CONFIGS_DSH_DIR`、频道树进
+# `<DSH_BOT_HOME>/bots/<bot>/channel`；判活看心跳与 launchd（§5）。
+# 四个夹具按「隔离 → 执行替身 → 活证据」分工，用例只拿自己要的那几件。
+
+@pytest.fixture
+def dsh_home(tmp_path):
+    """§1 `DSH_BOT_HOME`：新系统家目录（与 `chat_history`、网关同名同义）。"""
+    d = tmp_path / "dsh-home"
+    d.mkdir()
+    assert d.resolve() != REAL_DSH.resolve(), "DSH_BOT_HOME 指到了真实 ~/.dsh-bot"
+    return d
 
 
 @pytest.fixture
-def restart_script(tmp_path):
-    """`(kind) -> 夹具脚本路径`，喂给 §7 `HUB_RESTART_SCRIPT`（§13 A2 新增接缝）。
+def dsh_configs_dir(tmp_path):
+    """§1 `HUB_CONFIGS_DSH_DIR`：新系统配置根，新建 bot 的 `<bot>.yml` 落这里。"""
+    d = tmp_path / "dsh-configs"
+    d.mkdir()
+    return d
 
-    该接缝**只**决定 §4.2 C 段第 5 步 `grep -q bots_registry <路径>` 读哪个文件，
-    与「执行什么来重启」的 `HUB_RESTART_CMD` 分工写死、互不覆盖。
-    用例必须经 `apif(HUB_RESTART_SCRIPT=str(path))` 注入（env 要在门户加载前就位），
-    **不再往仓库根摆工作副本，也就没有"本机已有同名文件"的 skip 分支**。
-    """
-    def _make(kind="new"):
-        p = tmp_path / f"restart-bots-{kind}.sh"
-        p.write_text(_NEW_SCRIPT if kind == "new" else _OLD_SCRIPT, encoding="utf-8")
+
+@pytest.fixture
+def poison(tmp_path):
+    """两个执行接缝的毒丸（§1 `HUB_BUN` / `HUB_LAUNCHCTL`）：谁真去跑 autostart.ts、
+    谁真调 launchctl，谁当场非 0 —— 测试绝不碰真实 LaunchAgents 与 gui domain。"""
+    d = tmp_path / "poison"
+    d.mkdir()
+    for name in ("bun", "launchctl"):
+        p = d / name
+        p.write_text(f"#!/bin/sh\necho 'poison {name} called' >&2\nexit 97\n", encoding="utf-8")
         p.chmod(0o755)
-        return p
+    return d
+
+
+class _FakeBun:
+    """假 bun 的一份实例：`path` 喂给 `HUB_BUN`，`calls` 是已发生的调用记录。"""
+
+    def __init__(self, path, log):
+        self.path = Path(path)
+        self._log = Path(log)
+
+    @property
+    def calls(self):
+        """[{"argv": [脚本, 子命令, ...], "path": 子进程的 PATH}]，按发生顺序。
+
+        `argv` 不含可执行文件本身（它是 shell 的 `$0`），第一项是 autostart.ts 的路径。
+        """
+        out = []
+        for line in self._log.read_text(encoding="utf-8").splitlines():
+            argv, _, env_path = line.partition("\t")
+            out.append({"argv": argv.split(), "path": env_path})
+        return out
+
+
+#: §5 的活证据里那个 pid：假 launchd 报的与心跳写的必须是同一个（I3）。
+ALIVE_PID = 4242
+
+
+def _sh_quote(path):
+    """单引号包裹路径（夹具里的路径没有单引号，够用）。"""
+    return "'" + str(path).replace("'", "'\\''") + "'"
+
+
+@pytest.fixture
+def fake_bun(tmp_path):
+    """`(fail_on=None) -> _FakeBun`：假 bun（§1 `HUB_BUN`），绝不真跑 autostart.ts。
+
+    `fail_on` ∈ {None, "install", "install-jobs"}：该条子命令退非 0，用来构造 §6 的
+    短路与分型。每次调用把 argv 与子进程 PATH 记进一份 log（同一 `fail_on` 复用同一份）。
+    """
+    made = {}
+
+    def _make(fail_on=None):
+        if fail_on not in made:
+            tag = fail_on or "ok"
+            exe = tmp_path / f"fake-bun-{tag}"
+            log = tmp_path / f"bun-calls-{tag}.jsonl"
+            log.write_text("", encoding="utf-8")
+            exe.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\t%s\\n' \"$*\" \"$PATH\" >> {_sh_quote(log)}\n"
+                # $1 是 autostart.ts 的路径，$2 才是子命令（install / install-jobs）
+                f"if [ \"$2\" = \"{fail_on or '__never__'}\" ]; then\n"
+                "  echo '⚠️ fake bun 的原始输出（不该进响应）'\n"
+                "  exit 7\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8")
+            exe.chmod(0o755)
+            made[fail_on] = _FakeBun(exe, log)
+        return made[fail_on]
     return _make
+
+
+@pytest.fixture
+def fake_launchctl(tmp_path):
+    """`(kind="running") -> 假 launchctl 的可执行文件路径`（§1 `HUB_LAUNCHCTL`）。
+
+    running：`print` 报 `state = running` + `pid`（与 `alive_bot` 写的心跳一致），退 0
+    ——§5 第 4 条的证据；stopped：`print` 非 0 退出、什么都不报（按「没在运行」处理）。
+    """
+    made = {}
+    bodies = {
+        "running": ("#!/bin/sh\n"
+                    "if [ \"$1\" = \"print\" ]; then\n"
+                    "  printf '\\tgui/501/com.dsh-bot.x = {\\n'\n"
+                    "  printf '\\tstate = running\\n'\n"
+                    "  printf '\\tpid = " + str(ALIVE_PID) + "\\n'\n"
+                    "  printf '}\\n'\n"
+                    "fi\n"
+                    "exit 0\n"),
+        "stopped": ("#!/bin/sh\n"
+                    "if [ \"$1\" = \"print\" ]; then\n"
+                    "  echo 'Could not find service in domain for user gui: 501' >&2\n"
+                    "  exit 113\n"
+                    "fi\n"
+                    "exit 0\n"),
+    }
+
+    def _make(kind="running"):
+        if kind not in made:
+            p = tmp_path / f"fake-launchctl-{kind}"
+            p.write_text(bodies[kind], encoding="utf-8")
+            p.chmod(0o755)
+            made[kind] = p
+        return made[kind]
+    return _make
+
+
+@pytest.fixture
+def alive_bot(dsh_home):
+    """`(bot_id) -> None`：让这只 bot「活」—— 后台线程持续写 §5 第 1 条要的心跳，
+    `pid` = 假 launchd print 报的那个，`at` 每 0.2 秒刷新（永远新鲜，§5 第 3 条）。
+
+    只在 `<bot 家>` 出现之后才写：A 段把「家目录已存在」判成占用（409），
+    测试替面板建目录会把好用例判死；等它出现也顺带保证 `at` 不早于动作开始时刻（§5 第 2 条）。
+    """
+    stops = []
+
+    def _start(bot_id):
+        home = Path(dsh_home) / "bots" / bot_id
+        state = home / "state"
+        stop = threading.Event()
+
+        def loop():
+            while not stop.is_set():
+                if home.is_dir():
+                    state.mkdir(exist_ok=True)
+                    (state / "heartbeat").write_text(
+                        json.dumps({"at": int(time.time() * 1000), "pid": ALIVE_PID}),
+                        encoding="utf-8")
+                stop.wait(0.2)
+
+        t = threading.Thread(target=loop, daemon=True)
+        t.start()
+        stops.append((stop, t))
+
+    yield _start
+    for stop, t in stops:
+        stop.set()
+        t.join(timeout=5)

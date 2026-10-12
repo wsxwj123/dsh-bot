@@ -190,22 +190,49 @@ def test_重启端点不接受GET(make_client, tmp_path):
     assert body.get("error") in ("not_found", "method_not_allowed")
 
 
-def test_restart_available按可读判定而不是可执行位(make_client, tmp_path):
-    """㉝：install 是 `cp` 出来的 644，调用方式是 `bash <脚本>`，只需读权限。
+def test_restart_available按新系统根在场判定(make_client, tmp_path):
+    """㉝（本批换的口径）：`restart_available` 与「哪个脚本存在/可读/可执行」再无关系 ——
+    旧判据（重启脚本可读 → true）已随 `HUB_RESTART_SCRIPT` 一起退役。
 
-    判 `X_OK` 会在全新安装的机器上恒报 false，把好按钮灰掉。
-    两种世界里期望都是确定的：脚本可读 → true；脚本不在 → false。
+    新判据只有两条（§2）：①设了覆盖命令 `HUB_RESTART_CMD` → 恒真；
+    ②平台是 macOS 且新系统配置根 `dsh_dir()` 在场。三格里期望都是确定的，
     **全程只 GET，不触发任何重启。**
     """
-    import os
-    from conftest import REPO_ROOT
-    script = REPO_ROOT / "restart-bots.sh"
-    readable = script.is_file() and os.access(script, os.R_OK)
-    a = _Api(make_client(HUB_BOTS_FILE=_bots_file(tmp_path, []))[0])
+    import sys
+
+    bots_file = _bots_file(tmp_path, [])
+    missing = tmp_path / "no-such-dsh-configs"      # 根不在场：目录真的不存在
+
+    # ② 没有覆盖命令、根不在场 → false，且给一句人话
+    a = _Api(make_client(HUB_BOTS_FILE=bots_file, HUB_RESTART_CMD=None,
+                         HUB_CONFIGS_DSH_DIR=str(missing))[0])
     code, body = a.get("/hub/api/bots")
     assert code == 200, body
-    assert body["restart_available"] is readable, (
-        "脚本可读=%s 却报 restart_available=%s（可读即可，别判 X_OK）"
-        % (readable, body["restart_available"]))
-    if readable:
-        assert 0o111 & os.stat(script).st_mode or True   # 有没有执行位都不影响结论
+    assert body["restart_available"] is False, body
+    assert body["restart_reason"], "为 false 时必须给人话原因"
+    if sys.platform == "darwin":
+        assert ("新系统" in body["restart_reason"] or "旧系统" in body["restart_reason"]), \
+            "根不在场那句要人能看懂（含「新系统/旧系统」）：%s" % body["restart_reason"]
+    else:
+        assert "macOS" in body["restart_reason"], body["restart_reason"]
+
+    # ② 没有覆盖命令、根在场 → true，理由字段为 null
+    dsh = tmp_path / "dsh-configs"
+    dsh.mkdir()
+    b = _Api(make_client(HUB_BOTS_FILE=bots_file, HUB_RESTART_CMD=None,
+                         HUB_CONFIGS_DSH_DIR=str(dsh))[0])
+    code, body = b.get("/hub/api/bots")
+    assert code == 200, body
+    if sys.platform == "darwin":
+        assert body["restart_available"] is True, body
+        assert body["restart_reason"] is None, body
+    else:
+        assert body["restart_available"] is False, "非 macOS 不做 launchd，给不了重启"
+        assert "macOS" in body["restart_reason"], body["restart_reason"]
+
+    # ① 设了覆盖命令 → 恒真，哪怕新系统根不在场
+    c = _Api(make_client(HUB_BOTS_FILE=bots_file, HUB_RESTART_CMD="/usr/bin/true",
+                         HUB_CONFIGS_DSH_DIR=str(missing))[0])
+    code, body = c.get("/hub/api/bots")
+    assert code == 200, body
+    assert body["restart_available"] is True, body
