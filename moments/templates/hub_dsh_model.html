@@ -14,6 +14,14 @@
 
   <div class="card" id="banner" hidden><div id="banner-text" class="muted"></div></div>
 
+  {# 页签只切 hidden（§13 的硬约束）：两个 pane 的元素与文案全部留在初始 HTML 里，
+     切换只改 class，不重建 DOM、不删元素。 #}
+  <div class="row" style="margin-bottom:12px">
+    <button class="btn mini" type="button" id="tab-model">bot 模型</button>
+    <button class="btn mini ghost" type="button" id="tab-providers">供应商</button>
+  </div>
+
+  <div id="pane-model">
   <div class="card">
     <div class="row" style="justify-content:space-between">
       <h2 style="margin:0">bot 用什么模型</h2>
@@ -26,7 +34,9 @@
     </table>
     <div class="empty" id="empty" hidden>没有在跑的新系统 bot。</div>
   </div>
+  </div>
 
+  <div id="pane-providers" hidden>
   <div class="card" style="margin-top:14px">
     <div class="row" style="justify-content:space-between">
       <h2 style="margin:0">供应商</h2>
@@ -64,21 +74,60 @@
     <div class="empty" id="pempty" hidden>还没有供应商。</div>
   </div>
 
-  <div class="card" style="margin-top:14px">
-    <h2>说明</h2>
+  {# 原「说明」卡：只把外壳换成折叠组，文案一个字不动（§13：只重组不删元素与文案）。 #}
+  <details class="card" style="margin-top:14px">
+    <summary>说明</summary>
     <div class="muted">自建供应商写着网关的 providers.json，改完几秒生效，正在用它的聊天下一条消息换段。加供应商要填密钥，密钥只收不显，列表上只看得到「已配密钥 / 缺密钥」。删除后密钥 10 分钟才从凭据文件删掉，要彻底作废请到供应商后台操作。内置与配置文件来源只读，要改就改网关那边的配置。</div>
+  </details>
   </div>
 </div>
 
 <template id="tpl-prov-acts">
   <button class="btn mini" type="button" data-act="refresh">刷新模型列表</button>
+  <button class="btn mini" type="button" data-act="test"
+          title="向上游发一次最小请求验证（会有极少量消耗）">测试连接</button>
   <button class="btn mini ghost" type="button" data-act="manage">管理</button>
   <button class="btn mini ghost" type="button" data-act="edit">编辑</button>
   <button class="btn mini danger" type="button" data-act="del">删除</button>
 </template>
 
+{# 模型勾选弹窗（§11d）：刷新模型列表 → 只拉不写 → 这里勾选 → 确定时按勾选落盘。 #}
+<dialog id="pickDialog">
+  <div class="card" style="margin:0;min-width:min(560px,92vw)">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0" id="pickTitle">挑要保留的模型</h2>
+      <span class="muted" id="pickCount">已选中 0 个</span>
+    </div>
+    <label for="pickSearch">搜索</label>
+    <input id="pickSearch" placeholder="模型 id 子串，大小写不敏感" autocomplete="off" spellcheck="false">
+    <div class="row" style="margin-top:8px">
+      <button class="btn mini ghost" type="button" id="pickAll">全选</button>
+      <button class="btn mini ghost" type="button" id="pickNone">全不选</button>
+      <span class="muted">两个都只作用于当前筛选可见的行</span>
+    </div>
+    <div id="pickList" style="max-height:46vh;overflow:auto;margin-top:8px"></div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end">
+      <button class="btn ghost" type="button" id="pickCancel">取消</button>
+      <button class="btn" type="button" id="pickConfirm">确定</button>
+    </div>
+  </div>
+</dialog>
+
+<template id="pickRowTpl">
+  <div class="row" data-row style="justify-content:space-between;padding:3px 0">
+    <label class="row" style="flex:1;gap:8px;margin:0">
+      <input type="checkbox" data-pick style="width:auto">
+      <span class="mono" data-id></span>
+    </label>
+    <span class="pill" data-tag hidden></span>
+    <span class="muted" data-ctx></span>
+  </div>
+</template>
+
 <style>
 .ppanel td{background:var(--soft-bg);border-radius:8px;}
+/* 页签与弹窗筛选都只切这一个类（§13：页签只切 hidden） */
+.hidden{display:none !important;}
 @media (max-width:430px){
   .stack thead{display:none;}
   .stack tr{display:block;padding:6px 0;border-bottom:1px solid var(--hairline);}
@@ -201,7 +250,14 @@ function renderBots(list) {
       showMsg(b.name + '：' + ((s.body && (s.body.text || s.body.detail)) || ('失败（' + s.status + '）')));
       if (s.status === 200) load();
     };
-    tr.appendChild(td('', btn));
+    // 操作列：编辑（改名 / 人设 / 音色，弹窗与 bot 状态页共用一份）+ 换模型
+    const act = el('div', null, 'row');
+    const editBtn = el('button', '编辑', 'btn mini ghost');
+    editBtn.type = 'button';
+    editBtn.onclick = () => openEdit(b.id, editBtn);
+    act.appendChild(editBtn);
+    act.appendChild(btn);
+    tr.appendChild(td('', act));
     tbody.appendChild(tr);
   }
 }
@@ -294,20 +350,120 @@ function provActs(p) {
   box.appendChild($('tpl-prov-acts').content.cloneNode(true));
   const q = (a) => box.querySelector('[data-act="' + a + '"]');
   q('refresh').onclick = () => refreshProvider(p, q('refresh'));
+  q('test').onclick = () => testProvider(p, q('test'));
   q('manage').onclick = () => togglePanel(p);
   q('edit').onclick = () => openForm('modify', p);
   q('del').onclick = () => removeProvider(p);
   return box;
 }
 
+// 「刷新模型列表」是两步（§11d）：先只拉不写（preview），拿到候选再弹窗勾选。
+// 拉取失败**不开弹窗**，照旧把错误显示在消息区；成功分支把行内按钮一直禁用着，
+// 由弹窗关闭时恢复（弹窗打开期间不许重复拉取）。
+let pickBtn = null;                 // 触发这次弹窗的行内按钮
 async function refreshProvider(p, btn) {
   btn.disabled = true;
-  const s = await hubApi('/hub/api/dsh-model/provider/' + encodeURIComponent(p.name) + '/refresh',
+  const s = await hubApi('/hub/api/dsh-model/provider/' + encodeURIComponent(p.name) + '/preview',
                          {method: 'POST', body: JSON.stringify({})});
+  if (s.status === 200 && s.body && s.body.ok) {
+    pickBtn = btn;
+    openPick(p, s.body.models || []);
+    return;
+  }
   btn.disabled = false;
   persistMsg(p.name + '：' + ((s.body && (s.body.text || s.body.detail || s.body.error)) || ('失败（' + s.status + '）')));
-  if (s.status === 200) load();
 }
+
+// §12c：测试连接。真发一次最小对话请求（网关侧），成功失败都走 persistMsg，
+// 不弹确认、不重拉列表；测试期间按钮禁用、文案「测试中…」。
+async function testProvider(p, btn) {
+  const before = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '测试中…';
+  const s = await hubApi('/hub/api/dsh-model/provider/' + encodeURIComponent(p.name) + '/test',
+                         {method: 'POST', body: JSON.stringify({})});
+  btn.disabled = false;
+  btn.textContent = before;
+  persistMsg(p.name + '：' + ((s.body && (s.body.text || s.body.detail || s.body.error)) || ('失败（' + s.status + '）')));
+}
+
+// ── 勾选弹窗（§11d）────────────────────────────────────
+// 默认勾选、标记都来自网关算好的行（default_checked / manual / in_list / in_fetched），
+// 页面不算规则。搜索只切行的 hidden 类，不重建元素 —— 勾选状态挂在元素上，过滤不丢。
+let pickCtx = null;                 // {p, rows: [{id, el, box}]}
+const openPick = function (p, models) {
+  const list = $('pickList');
+  list.textContent = '';
+  $('pickTitle').textContent = '挑要保留的模型：' + p.name;
+  $('pickSearch').value = '';
+  pickCtx = {p: p, rows: []};
+  const tpl = $('pickRowTpl');
+  for (const m of models) {
+    const node = tpl.content.cloneNode(true);
+    const row = node.querySelector('[data-row]');
+    const box = node.querySelector('[data-pick]');
+    box.checked = !!m.default_checked;
+    box.addEventListener('change', paintPickCount);
+    node.querySelector('[data-id]').textContent = m.id;
+    const tag = node.querySelector('[data-tag]');
+    if (m.manual) { tag.textContent = '手动'; tag.hidden = false; }
+    else if (m.in_list && !m.in_fetched) { tag.textContent = '上游没有'; tag.hidden = false; }
+    else if (m.in_fetched && !m.in_list) { tag.textContent = '新'; tag.hidden = false; }
+    const ctx = node.querySelector('[data-ctx]');
+    if (m.contextWindow != null) ctx.textContent = '上下文 ' + m.contextWindow;
+    list.appendChild(node);
+    pickCtx.rows.push({id: m.id, el: row, box: box});
+  }
+  paintPickCount();
+  $('pickDialog').showModal();
+};
+
+function paintPickCount() {
+  const n = pickCtx ? pickCtx.rows.filter((r) => r.box.checked).length : 0;
+  $('pickCount').textContent = '已选中 ' + n + ' 个';
+}
+
+function pickVisible(checked) {
+  if (!pickCtx) return;
+  for (const r of pickCtx.rows) {
+    if (r.el.classList.contains('hidden')) continue;   // 只作用于当前可见行
+    r.box.checked = checked;
+  }
+  paintPickCount();
+}
+
+function closePick() {
+  const dlg = $('pickDialog');
+  if (dlg.open) dlg.close();
+  if (pickBtn) { pickBtn.disabled = false; pickBtn = null; }
+  pickCtx = null;
+}
+
+async function confirmPick() {
+  if (!pickCtx) return;
+  const p = pickCtx.p;
+  const ids = pickCtx.rows.filter((r) => r.box.checked).map((r) => r.id);   // 含被过滤隐藏的
+  closePick();
+  persistMsg(p.name + '：正在按勾选落盘…');
+  const s = await hubApi('/hub/api/dsh-model/provider/' + encodeURIComponent(p.name) + '/refresh',
+                         {method: 'POST', body: JSON.stringify({only: ids})});
+  const t = (s.body && (s.body.text || s.body.detail || s.body.error)) || ('失败（' + s.status + '）');
+  await load();                       // 非 200 也重拉：结果以列表为准（与 504 的既有口径一致）
+  persistMsg(p.name + '：' + t);
+}
+$('pickAll').onclick = () => pickVisible(true);
+$('pickNone').onclick = () => pickVisible(false);
+$('pickConfirm').onclick = confirmPick;
+$('pickCancel').onclick = closePick;
+$('pickDialog').addEventListener('cancel', (e) => { e.preventDefault(); closePick(); });
+$('pickDialog').addEventListener('click', (e) => { if (e.target === $('pickDialog')) closePick(); });
+$('pickSearch').addEventListener('input', () => {
+  const q = $('pickSearch').value.trim().toLowerCase();
+  if (!pickCtx) return;
+  for (const r of pickCtx.rows) {
+    r.el.classList.toggle('hidden', !!q && r.id.toLowerCase().indexOf(q) < 0);
+  }
+});
 
 async function removeProvider(p) {
   if (!confirm('删除供应商「' + p.name + '」？会同时删除它的密钥，10 分钟后从凭据文件删掉。')) return;
@@ -518,6 +674,19 @@ async function submitForm(e) {
 function showMsg(t) { msg.textContent = t; }
 function persistMsg(t) { pmsg.textContent = t; }
 
+// ── 页签（§13）：只切 hidden 类，两个 pane 的元素与文案全在初始 HTML 里 ──
+function switchTab(name) {
+  const model = name !== 'providers';
+  $('pane-model').classList.toggle('hidden', !model);
+  $('pane-providers').classList.toggle('hidden', model);
+  $('tab-model').className = 'btn mini' + (model ? '' : ' ghost');
+  $('tab-providers').className = 'btn mini' + (model ? ' ghost' : '');
+}
+$('tab-model').onclick = () => switchTab('model');
+$('tab-providers').onclick = () => switchTab('providers');
+// 编辑弹窗（共享片段）保存成功后重拉本文，好让名字跟着变
+function onBotEdited() { load(); }
+
 $('add-open').onclick = () => openForm('create', null);
 $('refresh').onclick = load;
 $('prefresh').onclick = load;
@@ -531,5 +700,7 @@ $('f-cancel').onclick = () => {
 $('pform').addEventListener('submit', submitForm);
 load();
 </script>
+{# 编辑弹窗与 bot 状态页共用一份；放在页面脚本之后 include —— 片段里的脚本用页面的 $ #}
+{% include "_edit_bot.html" %}
 </body>
 </html>
