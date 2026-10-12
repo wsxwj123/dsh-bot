@@ -42,6 +42,19 @@ _OFF_VALUES = {"off", "-", "none", "0", "false", "no"}
 #: **整串匹配**：结尾是 ``\Z`` 不是 ``$``。``$`` 在字符串末尾那个换行之前也算匹配，
 #: ``"jiwen\n"`` 配 ``.match()`` 会过；``\Z`` 只认字符串真正的末尾，调用处照旧用 ``.match``。
 BOT_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}\Z")
+#: 保留名：``com.dsh-bot.`` 前缀下**不属于 bot** 的单元名（§0 第 7 条）。全仓库只有这一份
+#: （``hub_addbot.RESERVED_UNIT_NAMES`` 是它的引用）。拿这些名字当 bot，动的是那个真单元。
+RESERVED_UNIT_NAMES = ("jiwen", "director", "voicecall")
+
+
+def is_qualified_bot_id(bot_id):
+    """**合格的 bot id**（§0 第 7 条）= 形状合法（整串匹配）并且不是保留名。
+
+    判定只有这一处，新建流程、放行闸、名单出口、单元名拼装四处引用同一份（§5b 第 5 条）。
+    新系统配置根下文件名不合格的配置不算 bot；拼 launchd 单元名的地方拿到不合格的 id 不拼。
+    """
+    return (isinstance(bot_id, str) and BOT_ID_RE.match(bot_id) is not None
+            and bot_id not in RESERVED_UNIT_NAMES)
 
 
 def legacy_dir() -> Path:

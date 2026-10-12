@@ -80,7 +80,8 @@ TREE_FILES = (".env", "access.json", "CLAUDE.md", os.path.join("memory", "MEMORY
 TREE_DIRS = ("memory",)
 #: I5：`com.dsh-bot.` 前缀下形状可达的非 bot 单元名。建一只叫这些名字的 bot 会在
 #: register 时 bootout 掉真单元并覆盖其 plist —— 直接拒绝（依据见 PLAN §2.3）。
-RESERVED_UNIT_NAMES = ("jiwen", "director", "voicecall")
+#: 表只有一份，定义在 `config_sources`（§5b 第 5 条），这里是引用。
+RESERVED_UNIT_NAMES = config_sources.RESERVED_UNIT_NAMES
 #: register 两条子进程的超时（bun 装 launchd 单元是秒级的事）
 INSTALL_TIMEOUT = 60
 AUTOSTART_TS = os.path.join(REPO_ROOT, "gateway", "scripts", "autostart.ts")
@@ -969,8 +970,8 @@ def _edit_target(bot_id):
     """**放行闸**（INTERFACE §0 第 2 条）：开关与编辑共用这一份，不许再写第二份判定。
 
     过闸 = `bots_client.bot_sources()` 给出这只、且它生效的那份配置来自新系统（dsh）。
-    旧系统的 bot、来源读不出的、`HUB_BOTS_FILE` 注入名单的、压根没这只的 —— 一律 404
-    `bot_not_found`、同一句 detail；调用方据此**不写盘、不起进程、不登记 job**。
+    旧系统的 bot、来源读不出的、`HUB_BOTS_FILE` 注入名单的、压根没这只的、id 是保留名的
+    —— 一律 404 `bot_not_found`、同一句 detail；调用方据此**不写盘、不起进程、不登记 job**。
 
     返回这只生效的那份配置，来源必为 dsh。判定与取配置是两次读：中间文件若被改、
     第二次拿到的不是新系统那份，按不过闸算 —— 否则编辑会把人设写进旧系统那只的频道目录。
@@ -984,7 +985,9 @@ def _edit_target(bot_id):
     """
     if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
         raise HubError(400, "bad_bot_id", "bot id 形状非法")
-    if os.environ.get("HUB_BOTS_FILE"):
+    # 保留名不是 bot（§0 第 7 条）：新系统配置根下就算有一份它的配置也不过闸，
+    # 判在这里，下面的「坏文件」补充口对它同样到不了。
+    if bot_id in RESERVED_UNIT_NAMES or os.environ.get("HUB_BOTS_FILE"):
         raise HubError(404, "bot_not_found", GATE_404_DETAIL)
     source = (bots_client.bot_sources().get(bot_id) or {}).get("source")
     if source == config_sources.SOURCE_DSH:
