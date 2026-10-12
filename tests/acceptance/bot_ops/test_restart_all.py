@@ -116,13 +116,15 @@ def test_重启全部_bootout报No_such_process也算成功(
 
 
 def test_重启全部_launchctl调用超时_该只失败且互斥照常释放(
-        client, sandbox, heartbeat, launchctl, as_darwin, monkeypatch):
+        client, sandbox, heartbeat, launchctl, as_darwin):
     u.dsh_bot(sandbox.dsh_cfg, "xiaoyu")
     launchctl.set_delay("kickstart", 3.0)
     heartbeat.tick("xiaoyu", pid=4242)
-    u.tighten_constant(monkeypatch, name="LAUNCHCTL_TIMEOUT", new=0.5)
-    body = _post_accepted(client)
-    st = u.wait_job(client, body["job_id"], timeout=15.0)
+    # 半秒的超时只罩住要它超时的第一次重启，出了块就放回契约的原值（§1：10 秒）。
+    # 这条守的是「超时之后互斥照常释放」，不是「第二次重启在半秒超时下也跑得完」。
+    with u.tightened(name="LAUNCHCTL_TIMEOUT", new=0.5):
+        body = _post_accepted(client)
+        st = u.wait_job(client, body["job_id"], timeout=15.0)
     assert st["state"] == "failed", st
     assert "超时" in st["tail"], st["tail"]
     # 互斥照常释放：撤掉延时，下一次重启还能受理并跑完
