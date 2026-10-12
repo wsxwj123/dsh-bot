@@ -16,6 +16,7 @@ A 只读校验（失败零副作用）→ B 落盘（可回滚）→ C 注册常
    `moments/bot_launchd.py`，本模块只等它判）。
 """
 import contextlib
+import datetime
 import json
 import os
 import re
@@ -1043,6 +1044,15 @@ _EDIT_BAD_ACCESS = "access.json 读不出内容（不存在或解析失败），
 #: 落点校验命中时的那一句（§10，逐字）
 BAD_CHANNEL_PATH_DETAIL = ("频道目录不在这只 bot 的新系统家目录里（bot_channel_path 或软链指到了外面），"
                            "这一页不读也不改它")
+#: 人设文件读得出字节、但不是合法 UTF-8 时读接口的那一句（§10a，逐字）
+_EDIT_BAD_PERSONA = "人设文件不是合法的 UTF-8 文本，这一页读不了它；先把文件修好再来编辑"
+#: 人设备份（§10「人设备份」）：与人设同一个目录，名字是 `CLAUDE.md.bak.<时间戳>`，最多留 5 份。
+#: 时间戳的形状与 `hub_config.make_backup` 同一套（年月日-时分秒，同秒重名加 `-01` 到 `-99`）；
+#: 正则在这里另写一条是因为本文件的形状正则一律以 `\Z` 结尾 —— 那边那条是 `$`，
+#: 名字末尾多一个换行的文件也会被它认成备份，清理时就可能删错。
+PERSONA_BAK_PREFIX = "CLAUDE.md.bak."
+PERSONA_BAK_KEEP = 5
+PERSONA_BAK_ID_RE = re.compile(r"^\d{8}-\d{6}(?:-\d{2})?\Z")
 #: `_edit_open` 交回的东西：闸交回的配置、yml 路径、yml 原文、节点树、yml 自己的错（或 None）、
 #: 频道目录的真实路径
 _Edit = namedtuple("_Edit", "cfg yml_path text root yml_err channel")
@@ -1218,8 +1228,9 @@ def edit_read(bot_id):
     """GET /hub/api/bots/<bot_id>/edit（§10a）：读当前值，供弹窗回填。
 
     判定顺序：404 → 频道目录落点（409 `bad_channel_path`）→ yml 解析不出（409）或读不出
-    （500）→ 读人设与白名单。落点没过之前不碰频道目录下的任何文件。坏 access.json、
-    缺人设文件都回空串 —— 保存时才拦（§10b 的 409 条件是"要写那个字段"）。
+    （500）→ 读人设与白名单（读不出 500）→ 人设不是合法 UTF-8（409 `bad_persona`）。
+    落点没过之前不碰频道目录下的任何文件。坏 access.json、缺人设文件都回空串 ——
+    保存时才拦（§10b 的 409 条件是"要写那个字段"）。
     """
     ed = _edit_open(bot_id)                     # 404 → bad_channel_path
     if ed.yml_err:
@@ -1234,8 +1245,9 @@ def edit_read(bot_id):
     else:
         try:
             persona = persona_raw.decode("utf-8")
-        except UnicodeDecodeError as err:
-            raise HubError(500, "config_unreadable", type(err).__name__)
+        except UnicodeDecodeError:
+            # 读得出字节、只是不是文本：不是「读不了文件」的 500，给一句人话让用户去修文件
+            raise HubError(409, "bad_persona", _EDIT_BAD_PERSONA)
     return {"bot_id": bot_id, "display_name": _top_str(ed.root, "display_name"),
             "persona": persona, "fish_voice_id": _voice_of(access_raw)}
 
@@ -1252,6 +1264,50 @@ def _edit_voice(value):
     if not FISH_VOICE_RE.match(voice):
         _bad("音色 id 只能是字母、数字、下划线或连字符")
     return voice
+
+
+def _backup_persona(md_path, old_bytes):
+    """改写人设之前留一份（§10「人设备份」），返回备份文件的路径。**建备份只有这一个入口。**
+
+    人设是长文本，被错的内容盖掉之后没处找回。备份放在人设旁边，名字是
+    `CLAUDE.md.bak.<本地时间的年月日-时分秒>`，内容是改写前那份的字节，权限恒 0600
+    （不跟着原文件放宽）。命名与同秒冲突的处理照 `hub_config.make_backup` 那一套：
+    `O_EXCL` 建文件，同一秒里已经有同名的就依次取 `-01` 到 `-99`，绝不盖掉已有的备份。
+    建不成（目录不可写、名字用尽）照抛，调用方据此不动人设。
+    """
+    base = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    for bid in [base] + ["%s-%02d" % (base, i) for i in range(1, 100)]:
+        target = os.path.join(os.path.dirname(md_path), PERSONA_BAK_PREFIX + bid)
+        try:
+            _create_file(target, old_bytes)     # 没写完它自己删，不会留下半截备份
+        except FileExistsError:
+            continue
+        return target
+    raise FileExistsError("同一秒内的备份名已用尽")
+
+
+def _drop_backup(path):
+    """失败恢复时把这次请求建的备份删掉（§10b 第 5 条）：「这次没有改动任何文件」要名副其实。
+    已经不在了不算错；别的删不掉照抛，由 `_restore_writes` 记成「部分文件已改动」。"""
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+
+
+def _prune_persona_backups(channel):
+    """人设备份最多留 `PERSONA_BAK_KEEP` 份：**写盘成功之后**按文件名里的时间戳删最老的。
+
+    只认名字形状对得上的（前缀加合规的时间戳），目录里别的东西一概不碰 —— 手工留的
+    `CLAUDE.md.bak`、`CLAUDE.md.bak.manual` 不算备份，不占名额也不会被删。清理失败不
+    影响这次保存（人设已经写好了），所以全程吞掉。
+    """
+    try:
+        names = sorted(n for n in os.listdir(channel)
+                       if n.startswith(PERSONA_BAK_PREFIX)
+                       and PERSONA_BAK_ID_RE.match(n[len(PERSONA_BAK_PREFIX):]))
+    except OSError:
+        return
+    for name in names[:-PERSONA_BAK_KEEP] if len(names) > PERSONA_BAK_KEEP else []:
+        _unlink(os.path.join(channel, name))
 
 
 def _restore_writes(undo):
@@ -1293,7 +1349,11 @@ def edit_save(bot_id, body):
     """POST /hub/api/bots/<bot_id>/edit（§10b）：校验 → 读旧 → 写四口 → 失败逆序恢复。
 
     返回 `(响应体, 状态码)`；一切失败以 HubError 抛出，判序照契约的表先命中先回。
-    「不改某个字段」的表达是**不给这个键**：给了就必须是字符串，null 也是 400。
+    「不改某个字段」的表达是**不给这个键**：给了就必须是字符串，null 也是 400；没给的键
+    对应的那一口一个字节都不动。空的人设正文不接受（要清空人设得去改文件）。
+
+    人设被改写之前先留一份备份（`_backup_persona`），写盘成功之后清理到 5 份；后面哪一步
+    失败，恢复时把这次建的备份一并删掉。
     """
     if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
         raise HubError(400, "bad_bot_id", "bot id 形状非法")
@@ -1309,6 +1369,9 @@ def edit_save(bot_id, body):
         persona = body["persona"]
         if not isinstance(persona, str):
             _bad("persona 必须是字符串")
+        if not persona.strip():
+            # 此前「空串 = 写出 0 字节的人设」：页面读取失败后把空的人设框交上来，人设就没了
+            _bad("人设正文不能为空；不想改人设就不要带 persona 这个键")
         _persona_encodable(persona)
     voice = _edit_voice(body["fish_voice_id"]) if "fish_voice_id" in body else None
     if persona is not None:
@@ -1321,6 +1384,7 @@ def edit_save(bot_id, body):
 
     # 读旧内容：409 / 500 全在这一步，全部过了才动第一个字节
     plan = []                                   # [(路径, 新字节, 旧字节或 None)]，按写入顺序
+    backup_of = None                            # (人设路径, 旧字节)：这次要不要先留人设备份
     if name is not None:
         if ed.yml_err:                          # 要写名字才用得着这份 yml：读不出 500、解析不出 409
             raise ed.yml_err
@@ -1355,11 +1419,19 @@ def edit_save(bot_id, body):
             old_md = _read_bytes(md_path, missing_ok=True)
         except OSError as e:
             raise HubError(500, "config_unreadable", type(e).__name__)
-        plan.append((md_path, persona.encode("utf-8"), old_md))
+        new_md = persona.encode("utf-8")
+        plan.append((md_path, new_md, old_md))
+        # 人设备份：原来有这个文件、新内容与旧内容的字节不一样才留；没有文件或内容没变都不留
+        if old_md is not None and old_md != new_md:
+            backup_of = (md_path, old_md)
 
-    # 写入：顺序固定 yml → access.json → CLAUDE.md → 朋友圈库
+    # 写入：先留人设备份，再按固定顺序 yml → access.json → CLAUDE.md → 朋友圈库。
+    # 备份排在第一个字节之前：它没建成时什么都还没动，直接按「没有改动任何文件」回 500。
     undo = []                                   # 逆序恢复清单（无参 callable）
     try:
+        if backup_of:
+            bak = _backup_persona(*backup_of)
+            undo.append(lambda p=bak: _drop_backup(p))
         for path, new_bytes, old_bytes in plan:
             _atomic_bytes(path, new_bytes)
             undo.append(lambda p=path, b=old_bytes: (_unlink(p) if b is None
@@ -1369,6 +1441,8 @@ def edit_save(bot_id, body):
     except Exception as err:                    # noqa: BLE001 下面按契约翻成 500
         partial = _restore_writes(undo)
         raise HubError(500, "config_write_failed", _write_detail(err, partial))
+    if backup_of:
+        _prune_persona_backups(channel)         # 写盘成功之后才清理，留最近 5 份
     return {"ok": True,
             "saved": {"display_name": name is not None, "persona": persona is not None,
                       "fish_voice_id": voice is not None},
