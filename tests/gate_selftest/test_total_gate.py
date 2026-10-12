@@ -404,23 +404,25 @@ def test_子进程_夹具收尾阶段碰了接缝_整场不为零并报出来():
     assert "launchctl print gui/501/com.dsh-bot.probe-teardown" in out
 
 
-STALE_TEXT = "多半是前面某条用例留下的后台线程"
+STALE_TEXT = "前面某条用例留下的后台线程"
+FORWARD_TEXT = "本目录的默认假件不答这个子命令"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="探针里的假件是 sh 脚本")
-def test_子进程_假件已就位毒丸却被调用_失败信息点明多半是前面用例的后台线程():
+def test_子进程_假件已就位毒丸却被调用_失败信息列出假件转交与后台线程两种可能():
     code, out = run_probe("probe_stale_thread_call.py")
     assert code == 1, out
     assert tally(out) == {"failed": 1}
     assert HIT_TEXT in out
     assert STALE_TEXT in out
+    assert FORWARD_TEXT in out
     assert "HUB_LAUNCHCTL 已经被本目录的夹具换成了别的值" in out
     assert "launchctl print gui/501/com.dsh-bot.probe-stale" in out
 
 
 def test_子进程_没换假件的用例碰闸_不出现后台线程那段提示():
     _, out = run_probe("probe_calls_launchctl.py")
-    assert STALE_TEXT not in out
+    assert STALE_TEXT not in out and FORWARD_TEXT not in out
     assert "把 HUB_LAUNCHCTL / HUB_BUN 换成假件" in out
 
 
