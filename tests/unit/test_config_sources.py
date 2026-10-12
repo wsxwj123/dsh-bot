@@ -220,7 +220,11 @@ def test_接口在注入名单模式下不猜来源(tmp_path, monkeypatch, clien
 
 # ------------------------------------------------------------ 停用开关落点 / dsh-model 页
 
-def test_停用开关写它自己所在的那份配置(roots):
+def test_停用开关只写新系统那份_旧系统的bot入口404(roots):
+    """接口约定第 6 稿 §4b：写入口只对新系统的 bot 开放，旧系统那份一个字节不写。
+
+    第 5 稿这里的预期是「旧系统 bot：还是写旧那份」，那条约定作废。
+    """
     from moments import hub_addbot
     from moments.provider_model import HubError
     _write(roots[0], "bot2")
@@ -228,11 +232,13 @@ def test_停用开关写它自己所在的那份配置(roots):
     hub_addbot.set_enabled("bot5", False)      # 新系统 bot：写新系统那份
     assert "enabled: false" in (roots[1] / "bot5.yml").read_text(encoding="utf-8")
     assert (roots[0] / "bot2.yml").read_text(encoding="utf-8") == "id: bot2\n"
-    hub_addbot.set_enabled("bot2", False)      # 旧系统 bot：还是写旧那份
-    assert "enabled: false" in (roots[0] / "bot2.yml").read_text(encoding="utf-8")
-    with pytest.raises(HubError) as e:         # 都没有 → 404，行为同改动前
+    with pytest.raises(HubError) as e:         # 旧系统 bot：进门就拒
+        hub_addbot.set_enabled("bot2", False)
+    assert (e.value.status, e.value.error) == (404, "bot_not_found")
+    assert (roots[0] / "bot2.yml").read_text(encoding="utf-8") == "id: bot2\n"
+    with pytest.raises(HubError) as e:         # 都没有 → 同一个 404
         hub_addbot.set_enabled("ghost", False)
-    assert e.value.error == "bot_not_found"
+    assert (e.value.status, e.value.error) == (404, "bot_not_found")
 
 
 def test_同名时开关只动生效的新系统那份(roots):

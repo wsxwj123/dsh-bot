@@ -98,11 +98,6 @@ def channels_dir():
     return os.environ.get("HUB_CHANNELS_DIR") or os.path.expanduser("~/.claude/channels")
 
 
-def configs_dir():
-    """配置根与注册表同源（`HUB_CONFIGS_DIR` 在 bots_registry 里已解析），不另起一张表。"""
-    return str(_registry().configs_dir())
-
-
 def _config_dirs():
     """新旧两套配置根（顺序 = 覆盖优先级）。注册表按"同名以新系统为准"合并。"""
     return [str(d) for _source, d in config_sources.roots()]
@@ -697,16 +692,16 @@ def lay_down(fields):
 # ---------------------------------------------------------------- 停用开关
 
 def set_enabled(bot_id, enabled):
-    """把该 bot 配置文件里的顶层 `enabled` 改成布尔值，返回改完的值。
+    """把该 bot **新系统配置根下那份** yml 的顶层 `enabled` 改成布尔值，返回改完的值。
 
     停用的唯一标记就是这个字段（`bots_registry.is_enabled` 判它），所以这里也是**唯一**
     的写入口。四条硬约束：
 
-    - **写"这个 bot 生效的那份"配置**：混跑期两套配置都读（新旧系统），在跑的那份优先，
-      没有在跑的就写优先级最高那份（启用一个停着的 bot 等于让它在新系统里跑起来）。
-      盯着文件名写会出两种错：旧栈正在跑的 bot 点停止落在新系统那份上，既停不掉它、
-      又在那边留一处没人看的改动；而对一个"只有旧系统那份在跑"的 bot 点停止，
-      写的必须正是旧系统那份。
+    - **先过放行闸，只写新系统那份**（INTERFACE §0 第 2 条 / §4b）：第一步就是
+      `_edit_target`，旧系统的 bot、来源读不出的、名单注入的、不存在的一律 404，
+      走不到读写文件那一步。写的恒是新系统配置根下的 `<bot_id>.yml`（`_dsh_yml` 直接
+      拼出）；旧系统配置根下的文件一个字节不动，同名时也不动 —— 那边的 bot 归另一套
+      系统、由别人维护。
     - **绝不 dump YAML**：走 `hub_config.set_scalar` 的行级编辑，注释/锚点/键序/块标量
       逐字节保真（§2.4 那条可 grep 的红线，bot 的 yml 里全是人设正文，dump 一次就毁）。
     - **原子写**：复用 `hub_config.atomic_write`，半截文件不可能出现 —— bot 的 yml 写坏了
@@ -717,17 +712,13 @@ def set_enabled(bot_id, enabled):
     `enabled` 键不存在时走 `set_scalar` 的插入分支（按父块缩进插在块首）。
     """
     from moments import hub_config          # 延迟 import：只有这一个函数要它
-    if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
-        raise HubError(400, "bad_bot_id", "bot id 形状非法")
-    # 两套根里按覆盖规则找：命中新系统那份就写新系统那份；都没有 → 默认根下的路径
-    # （读文件时 FileNotFoundError → 404，与改动前一致）。
-    found = config_sources.find_path(bot_id)
-    path = str(found) if found is not None else os.path.join(configs_dir(), bot_id + ".yml")
+    _edit_target(bot_id)                    # 400 / 404 都由放行闸给；归属先于任何文件读写判完
+    path = _dsh_yml(bot_id)
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
-    except FileNotFoundError:
-        raise HubError(404, "bot_not_found", "没有叫 %s 的 bot" % bot_id)
+    except FileNotFoundError:               # 过闸之后文件被挪走：同一句 404，不换地方找
+        raise HubError(404, "bot_not_found", GATE_404_DETAIL)
     except OSError as e:
         # 只报类型名：异常消息带路径（§0.2 同款口径）
         raise HubError(500, "config_unreadable", type(e).__name__)
@@ -924,7 +915,9 @@ def create(body, jobs):
 _EDIT_FIELDS = ("display_name", "persona", "fish_voice_id")
 _EDIT_TEXT = ("已保存。名字与音色立即生效；人设会被在跑的 bot 在几秒内检测到，"
               "空闲时自动换上。")
-_EDIT_404 = "没有这个新系统的 bot（这一页只管新系统的 bot）"
+#: 放行闸的 404 只有这一句（§4b 第 3 格 / §10）：开关、编辑、单只重启逐字相同，
+#: 旧系统的 bot 与不存在的 bot 不区分。
+GATE_404_DETAIL = "没有这个新系统的 bot（这一页只管新系统的 bot）"
 _EDIT_BAD_ACCESS = "access.json 读不出内容（不存在或解析失败），先修好"
 
 
@@ -966,30 +959,53 @@ def _read_bytes(path, missing_ok=False):
 
 
 def _edit_target(bot_id):
-    """编辑端点的放行闸（§10）：只对新系统的 bot 开放，返回它生效的那份配置。
+    """**放行闸**（INTERFACE §0 第 2 条）：开关与编辑共用这一份，不许再写第二份判定。
 
-    放行条件 = `bot_sources()` 说这只生效的那份配置来自 dsh；legacy、`HUB_BOTS_FILE`
-    注入名单、压根没这只 —— 一律 404 `bot_not_found`，与单只重启同款口径。
+    过闸 = `bots_client.bot_sources()` 给出这只、且它生效的那份配置来自新系统（dsh）。
+    旧系统的 bot、来源读不出的、`HUB_BOTS_FILE` 注入名单的、压根没这只的 —— 一律 404
+    `bot_not_found`、同一句 detail；调用方据此**不写盘、不起进程、不登记 job**。
 
-    只有一种情况越过 `bot_sources()`：**新系统配置根下确实有这只的 yml、但那份文件
-    解析不出来**（`bot_sources()` 会跳过坏配置，直接判死会让契约里的 409 `bad_yaml`
-    永远不可达）。这时放它过去，让读文件那一步报 409/500，用户才知道要修什么。
-    返回值可能为 None（坏配置算不出生效配置），channelDir 与朋友圈身份各自有回落。
+    返回这只生效的那份配置，来源必为 dsh。判定与取配置是两次读：中间文件若被改、
+    第二次拿到的不是新系统那份，按不过闸算 —— 否则编辑会把人设写进旧系统那只的频道目录。
+
+    只有一个补充口越过 `bot_sources()`：新系统配置根下有这只的 yml、来源却判不出来
+    （`bot_sources()` 会跳过坏配置，直接判死会让契约里的 409 `bad_yaml` / 500
+    `config_unreadable` 永远不可达），**并且旧系统配置根下没有同名的东西**。这时放它走到
+    读文件那一步、返回 None（channelDir 与朋友圈身份各自有回落）：这只 bot 只在新系统
+    那边有文件，怎么走都碰不到旧系统。旧系统那边有同名的不走这个口 —— 归属判不出来，
+    宁可 404。
     """
     if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
         raise HubError(400, "bad_bot_id", "bot id 形状非法")
     if os.environ.get("HUB_BOTS_FILE"):
-        raise HubError(404, "bot_not_found", _EDIT_404)
-    info = bots_client.bot_sources().get(bot_id) or {}
-    source = info.get("source")
+        raise HubError(404, "bot_not_found", GATE_404_DETAIL)
+    source = (bots_client.bot_sources().get(bot_id) or {}).get("source")
     if source == config_sources.SOURCE_DSH:
-        return config_sources.effective_config(bot_id)
-    if source:
-        raise HubError(404, "bot_not_found", _EDIT_404)      # 来源判得出来，但不是新系统
+        cfg = config_sources.effective_config(bot_id)
+        if cfg and cfg.get("_source") == config_sources.SOURCE_DSH:
+            return cfg
+    elif not source:
+        name = bot_id + ".yml"
+        d = config_sources.dsh_dir()
+        # lexists 而不是 isfile：旧系统那边同名的哪怕是目录、断掉的软链，也算「有同名」
+        if (d is not None and os.path.isfile(os.path.join(str(d), name))
+                and not os.path.lexists(os.path.join(str(config_sources.legacy_dir()), name))):
+            return None
+    raise HubError(404, "bot_not_found", GATE_404_DETAIL)
+
+
+def _dsh_yml(bot_id):
+    """过闸之后要读写的那份 yml：恒为新系统配置根下的 `<bot_id>.yml`（§0 第 2 条）。
+
+    直接由新系统配置根拼出，不经 `config_sources.find_path` —— 那个定位是「在跑的那份
+    优先」，会回落到旧系统那份。配置根此刻被关掉、或那里没有这个文件，一律 404：
+    宁可拒绝，也不换个地方找。
+    """
     d = config_sources.dsh_dir()
-    if d is not None and os.path.isfile(os.path.join(str(d), bot_id + ".yml")):
-        return config_sources.effective_config(bot_id)       # 坏配置：通常是 None
-    raise HubError(404, "bot_not_found", _EDIT_404)
+    path = os.path.join(str(d), bot_id + ".yml") if d is not None else None
+    if path is None or not os.path.isfile(path):
+        raise HubError(404, "bot_not_found", GATE_404_DETAIL)
+    return path
 
 
 def _channel_dir(cfg, bot_id):
@@ -1037,12 +1053,10 @@ def edit_read(bot_id):
     缺人设文件都回空串 —— 保存时才拦（§10b 的 409 条件是"要写那个字段"）。
     """
     cfg = _edit_target(bot_id)
-    yml_path = config_sources.find_path(bot_id)
-    if yml_path is None:
-        raise HubError(404, "bot_not_found", _EDIT_404)
+    yml_path = _dsh_yml(bot_id)
     channel = _channel_dir(cfg, bot_id)
     try:
-        text = _read_bytes(str(yml_path)).decode("utf-8")
+        text = _read_bytes(yml_path).decode("utf-8")
         persona_raw = _read_bytes(os.path.join(channel, "CLAUDE.md"), missing_ok=True)
         access_raw = _read_bytes(os.path.join(channel, "access.json"), missing_ok=True)
     except OSError as e:
@@ -1147,16 +1161,14 @@ def edit_save(bot_id, body):
         raise HubError(413, "payload_too_large", "人设正文超过 64 KiB")
 
     cfg = _edit_target(bot_id)                  # 404
-    yml_path = config_sources.find_path(bot_id)
-    if yml_path is None:
-        raise HubError(404, "bot_not_found", _EDIT_404)
+    yml_path = _dsh_yml(bot_id)
     channel = _channel_dir(cfg, bot_id)
 
     # 读旧内容：409 / 500 全在这一步，全部过了才动第一个字节
     plan = []                                   # [(路径, 新字节, 旧字节或 None)]，按写入顺序
     if name is not None:
         try:
-            text = _read_bytes(str(yml_path)).decode("utf-8")
+            text = _read_bytes(yml_path).decode("utf-8")
         except OSError as e:
             raise HubError(500, "config_unreadable", type(e).__name__)
         except UnicodeDecodeError as e:
@@ -1168,7 +1180,7 @@ def edit_save(bot_id, body):
             raise HubError(409, "bad_yaml",
                            hub_config.yaml_error_detail(e, "%s.yml 解析失败" % bot_id))
         new_text = hub_config.set_scalar(text, root, "display_name", name, "str")
-        plan.append((str(yml_path), new_text.encode("utf-8"), text.encode("utf-8")))
+        plan.append((yml_path, new_text.encode("utf-8"), text.encode("utf-8")))
 
     if voice is not None:
         acc_path = os.path.join(channel, "access.json")

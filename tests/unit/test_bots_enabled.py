@@ -3,6 +3,10 @@
 
 判定层只碰 tmp_path 下的假 configs（`HUB_CONFIGS_DIR` / `config_loader.CONFIGS_DIR`
 两个接缝），绝不读仓库真 configs/。
+
+写开关端点那一节：接口约定第 6 稿起开关只对新系统的 bot 开放，所以 `client` 夹具把同一个
+假目录改当新系统配置根（`HUB_CONFIGS_DSH_DIR`），旧系统配置根是个空目录。旧系统的 bot
+进门就拒那一面在 tests/unit/test_bot_gate.py。
 """
 import json
 import os
@@ -143,6 +147,15 @@ def client(cfgdir, monkeypatch):
     from moments.hub_routes import hub_bp
     monkeypatch.setenv("HUB_CHANNELS_DIR", str(cfgdir.parent / "channels"))
     monkeypatch.setenv("HUB_TELEGRAM_API_BASE", "http://127.0.0.1:9")
+    # 接口约定第 6 稿：开关只对**新系统**的 bot 开放，写的恒是新系统配置根下那份。
+    # 这一节的 bot 都造在 cfgdir 里，所以把它当新系统配置根，旧系统配置根换成一个空目录。
+    legacy = cfgdir.parent / "configs-legacy"
+    legacy.mkdir()
+    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(cfgdir))
+    monkeypatch.setenv("HUB_CONFIGS_DIR", str(legacy))
+    # 平台钉成非 macOS：写盘之后的同步走 skipped/no_launchd，不起后台任务、不碰 launchctl。
+    # 这一节量的是写盘（保真、幂等、原子），同步那一段由 tests/acceptance/bot_ops 覆盖。
+    monkeypatch.setattr(sys, "platform", "linux")
     app = Flask(__name__)
     app.register_blueprint(hub_bp)
     app.config["TESTING"] = True
@@ -172,21 +185,27 @@ def read_yml(cfgdir, bot_id):
     return (cfgdir / (bot_id + ".yml")).read_text(encoding="utf-8")
 
 
+def _registry_bots(cfgdir):
+    """注册表在 cfgdir 这个根里认出的 bot（端点用例里它是新系统配置根，不再是默认根）。"""
+    return bots_registry.bots(dirs=[str(cfgdir)])
+
+
 def test_停用写进yml且被注册表认出来(client, cfgdir):
     put_yml(cfgdir, "chenlulu", RICH_YML)
     r = client.post("/hub/api/bots/chenlulu/enabled", json={"enabled": False})
     assert r.status_code == 200, r.get_json()
     assert r.get_json()["enabled"] is False
-    assert bots_registry.bots() == []
-    assert bots_registry.disabled_ids() == {"chenlulu"}
+    assert r.get_json()["sync"] == {"state": "skipped", "reason": "no_launchd"}
+    assert _registry_bots(cfgdir) == []
+    assert bots_registry.disabled_ids(dirs=[str(cfgdir)]) == {"chenlulu"}
 
 
 def test_启用回来(client, cfgdir):
     put_yml(cfgdir, "chenlulu", RICH_YML + "enabled: false\n")
-    assert bots_registry.bots() == []
+    assert _registry_bots(cfgdir) == []
     r = client.post("/hub/api/bots/chenlulu/enabled", json={"enabled": True})
     assert r.status_code == 200
-    assert [b["id"] for b in bots_registry.bots()] == ["chenlulu"]
+    assert [b["id"] for b in _registry_bots(cfgdir)] == ["chenlulu"]
 
 
 def test_写入保真_注释锚点块标量键序一字不动(client, cfgdir):
