@@ -27,27 +27,39 @@ NOT_RUNNING = "\tstate = not running\n"
 RUNNING_NO_PID = "\tstate = running\n"
 
 
+@pytest.fixture(scope="module")
+def fakes(tmp_path_factory):
+    """假 launchctl 与假 bun，整个模块只造一次（新建的可执行文件头一回被执行，系统会多查
+    几百毫秒，每条用例各造一份就白等几十次）。记录文件与 print 的回答由环境变量指到各用例
+    自己的 tmp 目录。返回 (假 launchctl, 假 bun) 的路径。"""
+    d = tmp_path_factory.mktemp("row-fakes")
+    exe, bun = d / "launchctl", d / "bun"
+    exe.write_text(
+        "#!/bin/sh\n"
+        "echo \"$@\" >> \"$FAKE_LAUNCHCTL_LOG\"\n"
+        "[ \"$1\" = print ] || exit 97\n"
+        "[ -f \"$FAKE_LAUNCHCTL_PRINT\" ] || { echo 'Could not find service' >&2; exit 113; }\n"
+        "cat \"$FAKE_LAUNCHCTL_PRINT\"\n", encoding="utf-8")
+    # 假 bun：谁调它都拒绝并留痕（本文件没有该调它的路径）
+    bun.write_text("#!/bin/sh\necho \"$@\" >> \"$FAKE_BUN_LOG\"\nexit 97\n", encoding="utf-8")
+    exe.chmod(0o755)
+    bun.chmod(0o755)
+    return str(exe), str(bun)
+
+
 @pytest.fixture
-def w(tmp_path, monkeypatch):
+def w(tmp_path, monkeypatch, fakes):
     fake_dir = tmp_path / "fake"
     fake_dir.mkdir()
     answer, log = fake_dir / "print.txt", fake_dir / "calls.log"
-    exe = fake_dir / "launchctl"
-    exe.write_text(
-        "#!/bin/sh\n"
-        "echo \"$@\" >> '%(log)s'\n"
-        "[ \"$1\" = print ] || exit 97\n"
-        "[ -f '%(ans)s' ] || { echo 'Could not find service' >&2; exit 113; }\n"
-        "cat '%(ans)s'\n" % {"log": log, "ans": answer}, encoding="utf-8")
-    exe.chmod(0o755)
-    bun = fake_dir / "bun"              # 假 bun 也在位：谁调它都拒绝并留痕（本文件没有该调它的路径）
-    bun.write_text("#!/bin/sh\necho \"$@\" >> '%s'\nexit 97\n" % (fake_dir / "bun.log"), encoding="utf-8")
-    bun.chmod(0o755)
-    monkeypatch.setenv("HUB_BUN", str(bun))
+    monkeypatch.setenv("FAKE_LAUNCHCTL_LOG", str(log))
+    monkeypatch.setenv("FAKE_LAUNCHCTL_PRINT", str(answer))
+    monkeypatch.setenv("FAKE_BUN_LOG", str(fake_dir / "bun.log"))
+    monkeypatch.setenv("HUB_BUN", fakes[1])
     home, dsh, legacy = tmp_path / "dsh-home", tmp_path / "configs-dsh", tmp_path / "configs-legacy"
     for d in (home, dsh, legacy):
         d.mkdir()
-    monkeypatch.setenv("HUB_LAUNCHCTL", str(exe))
+    monkeypatch.setenv("HUB_LAUNCHCTL", fakes[0])
     monkeypatch.setenv("DSH_BOT_HOME", str(home))
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(dsh))
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(legacy))
