@@ -90,13 +90,17 @@ def test_活动对象没有term字段_不炸_按在校处理():
     assert hang_situation._term_label(Bare()) == ""
 
 
-def _run(*args):
+def _run(*args, env=None):
     return subprocess.run([sys.executable, SCRIPT, *args],
-                          cwd=ROOT, capture_output=True, text=True, timeout=60)
+                          cwd=ROOT, capture_output=True, text=True, timeout=60, env=env)
 
 
 def test_命令行跑真配置_吐一行合法JSON且三个键齐全():
-    r = _run("chenlulu")
+    # 这条用例的本意就是读仓库里的示例配置。tests/conftest.py 的总闸把 HUB_CONFIGS_DIR
+    # 改道到了空的临时目录，子进程继承之后读不到 chenlulu。这里只在**这一个子进程**的
+    # 环境里显式指回仓库的 configs/，本进程的环境与总闸的改道都不动。
+    env = dict(os.environ, HUB_CONFIGS_DIR=os.path.join(ROOT, "configs"))
+    r = _run("chenlulu", env=env)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert set(out) == {"name", "state", "interruptible", "term_label"}
