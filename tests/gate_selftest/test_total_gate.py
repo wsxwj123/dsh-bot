@@ -571,3 +571,122 @@ def test_子进程_从tests目录启动_总闸已加载():
     code, out = run_probe("probe_clean.py", cwd=TESTS_DIR)
     assert code == 0, out
     assert "测试总闸：已生效" in out
+
+
+# ------------------------------------------------------------------ 从子目录里面启动
+
+REFUSE_TEXT = "测试总闸（tests/conftest.py）没有加载，拒绝运行"
+HOWTO_TEXT = "请从仓库根或 tests/ 目录启动"
+
+
+def _subdirs_with_conftest():
+    """tests/ 下所有带 conftest.py 的子目录（不含 tests/ 自己）。以后新加的目录自动纳入。"""
+    return sorted(p.parent for p in TESTS_DIR.rglob("conftest.py")
+                  if p.parent != TESTS_DIR and "__pycache__" not in p.parts)
+
+
+SUBDIRS = _subdirs_with_conftest()
+
+
+def _rel(d):
+    return d.relative_to(REPO_ROOT).as_posix()
+
+
+@pytest.fixture
+def run_inside(total_gate, tmp_path):
+    """在某个目录**里面**起一个新的 pytest 进程，返回 (退出码, 输出, 毒丸记录)。
+
+    这批用例验的是「总闸没加载时被拒绝」，子进程里本来就没有总闸。两道保险，防的是自检
+    万一失效：
+    - 子进程环境里的两个执行接缝预先指到 tmp 里的毒丸，目录接缝指到 tmp 里的空目录。
+      没有总闸时没人会改它们，所以即便真有用例跑起来，碰到的也只是毒丸与空目录；
+    - 调用方点名真实的测试目录时一律带 --collect-only，只收集不执行。
+    """
+    rec = tmp_path / "inside-poison.rec"
+    rec.write_bytes(b"")
+
+    def _run(cwd, *args):
+        env = dict(os.environ)
+        for key in ("HUB_RESTART_CMD", SNAPSHOT_OVERRIDE, "PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
+            env.pop(key, None)
+        for name, seam in (("launchctl", "HUB_LAUNCHCTL"), ("bun", "HUB_BUN")):
+            env[seam] = total_gate.write_poison(str(tmp_path / "inside-poison"), name, str(rec))
+        for seam in DIR_SEAMS:
+            d = tmp_path / "inside-seams" / seam
+            d.mkdir(parents=True, exist_ok=True)
+            env[seam] = str(d)
+        env[TELEGRAM_SEAM] = total_gate.refusing_telegram_base
+        env["PYTHONIOENCODING"] = "utf-8"
+        cmd = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider"] + list(args)
+        r = subprocess.run(cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=180)
+        return r.returncode, r.stdout.decode("utf-8", "replace"), total_gate.read_records(str(rec))
+
+    return _run
+
+
+def test_带conftest的子目录_发现逻辑没漏掉已知的那几个():
+    """下面那条参数化用例靠自动发现；发现逻辑要是坏了返回空，它会悄悄变成 0 条。"""
+    found = {_rel(d) for d in SUBDIRS}
+    known = {"tests/acceptance/bot_ops", "tests/acceptance/desync", "tests/acceptance/hub2",
+             "tests/acceptance/hub_ui", "tests/acceptance/provider_hub",
+             "tests/acceptance/provider_wizard", "tests/birthday_grade", "tests/hang_situation",
+             "tests/imagegen_params", "tests/school_calendar", "tests/unit"}
+    assert known <= found, "没发现这些目录的 conftest.py：%s" % sorted(known - found)
+
+
+@pytest.mark.parametrize("subdir", SUBDIRS, ids=_rel)
+def test_子进程_在子目录里面启动_被拒绝且提示从哪儿启动(run_inside, subdir):
+    code, out, poison_calls = run_inside(subdir, "--collect-only", "-q")
+    assert "测试总闸：已生效" not in out, "前提不成立：总闸在这个子进程里加载了\n" + out
+    assert code != 0, "在 %s 里面启动没有被拒绝：\n%s" % (_rel(subdir), out)
+    assert REFUSE_TEXT in out, out
+    assert HOWTO_TEXT in out, out
+    assert "python3 -m pytest %s" % _rel(subdir) in out, "提示里没给出这个目录的正确启动命令：\n" + out
+    assert "::test_" not in out, "被拒绝了却还是收集到了用例：\n" + out
+    assert poison_calls == [], poison_calls
+
+
+def test_子进程_在tests_acceptance里点名子目录启动_同样被拒绝(run_inside):
+    """总闸注释里举的那个例子：cd tests/acceptance && pytest hub_ui。"""
+    code, out, poison_calls = run_inside(TESTS_DIR / "acceptance", "hub_ui", "--collect-only", "-q")
+    assert "测试总闸：已生效" not in out, out
+    assert code != 0, out
+    assert REFUSE_TEXT in out and HOWTO_TEXT in out, out
+    assert "::test_" not in out, out
+    assert poison_calls == [], poison_calls
+
+
+def test_子进程_自检拒绝时_真跑也一条用例都不执行(run_inside, tmp_path):
+    """上面两条只收集不执行。这条不带 --collect-only，证明拒绝发生在任何用例执行之前。
+
+    为了「万一没拒绝」也无害，不拿真实的测试目录来试：在 tmp 里另起一个迷你目录，
+    conftest.py 原样照抄 tests/school_calendar 的那份（同一段自检），用例只写一个标记文件。
+    """
+    mini = tmp_path / "mini"
+    mini.mkdir()
+    conftest_text = (TESTS_DIR / "school_calendar" / "conftest.py").read_text(encoding="utf-8")
+    (mini / "conftest.py").write_text(conftest_text, encoding="utf-8")
+    marker = tmp_path / "case-ran.marker"
+    (mini / "test_mini.py").write_text(
+        "def test_写标记():\n    open(%r, 'w').write('ran')\n" % str(marker), encoding="utf-8")
+    code, out, poison_calls = run_inside(mini, "-q")
+    assert code != 0, out
+    assert REFUSE_TEXT in out and HOWTO_TEXT in out, out
+    assert not marker.exists(), "自检报了错，用例却还是执行了"
+    assert "passed" not in out, out
+    assert poison_calls == [], poison_calls
+
+
+def test_子进程_从仓库根点名子目录_自检放行():
+    code, out = run_probe("../../school_calendar", "--collect-only", "-q", cwd=REPO_ROOT)
+    assert code == 0, out
+    assert REFUSE_TEXT not in out, out
+    assert "::test_" in out, "没收集到用例：\n" + out
+
+
+def test_子进程_从tests目录点名子目录_自检放行():
+    code, out = run_probe("../../birthday_grade", "--collect-only", "-q", cwd=TESTS_DIR)
+    assert code == 0, out
+    assert REFUSE_TEXT not in out, out
+    assert "::test_" in out, "没收集到用例：\n" + out

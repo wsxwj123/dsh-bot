@@ -40,7 +40,8 @@ HOME，假 HOME 拦不住它；plist 文件删掉以后 launchd 也不会自己�
 - 直接用真 bun 跑真安装脚本的用例，毒丸拦不住脚本内部的 launchctl 调用。
 - pytest 只加载「启动目录及其下」的 conftest：在 `tests/` 的某个子目录**里面**启动 pytest
   （例如 `cd tests/acceptance && pytest hub_ui`）时本文件不会被加载。请从仓库根或 `tests/`
-  启动。
+  启动。带 `conftest.py` 的子目录各自在开头有一段自检（`_require_total_gate`）：本文件没
+  加载就拒绝运行并提示正确的启动方式。没有 `conftest.py` 的子目录没有这道自检。
 - 用例留下的后台线程（例如重启 job）拖到夹具撤掉假件之后才去调接缝的，照样打到毒丸，但归因
   不准：落在下一条用例期间就记到它头上（失败信息会点明多半不是它调的），落在两条用例之间
   就让整场失败。根子在那条没等后台任务结束就收尾的用例。
@@ -60,6 +61,7 @@ import pytest
 
 # 进程内唯一的一份状态挂在 sys 上：pytest 在导入每个不是包的 conftest 前会把
 # sys.modules['conftest'] 删掉，本模块万一被二次导入，也不能再造一套毒丸与记录文件。
+# 各子目录 conftest.py 开头的自检认的就是这个名字与里面的 pid，改名要一起改。
 _STATE_ATTR = "_dsh_bot_test_gate"
 
 POISON_EXIT = 97
