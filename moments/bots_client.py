@@ -315,15 +315,16 @@ def _row(entry, port, status):
     return row
 
 
-def _dsh_probe(bot_id, seams=None):
-    """dsh 行的判活（§2 第 1–3 条，实现在 ``bot_launchd.row_state``）：心跳新鲜 → online；
-    否则 ``launchctl print`` 说 running → starting；否则 offline。dsh 行**不发本机 HTTP 探活**。
+def _dsh_probe(bot_id, seams=None, disabled=False):
+    """dsh 行的判活（§2，实现在 ``bot_launchd.row_state``）：心跳新鲜 → online；
+    否则 ``launchctl print`` 说 running → starting；否则 offline。停用的行（``disabled``）
+    先问 print，它说没在跑就直接 offline。dsh 行**不发本机 HTTP 探活**。
 
-    ``seams`` 是 ``probe_bots`` 在处理请求的线程里解析好的接缝（§1a）：探活线程只用它，
-    自己不读环境 —— 超出预算的线程会在响应之后才收尾。
+    ``seams`` 与 ``disabled`` 都是 ``probe_bots`` 在处理请求的线程里定好的（§1a）：探活
+    线程只用它们，自己不读环境、不读配置 —— 超出预算的线程会在响应之后才收尾。
     """
     from moments import bot_launchd       # 延迟 import：与 bot_launchd 双向依赖，函数内解
-    state, pid = bot_launchd.row_state(bot_id, seams)
+    state, pid = bot_launchd.row_state(bot_id, seams, disabled)
     return {"state": state, "pid": pid}
 
 
@@ -339,7 +340,7 @@ def _dsh_row(entry, port, res):
             "pid": res.get("pid"), "queue_depth": None, "in_flight": None}
 
 
-def probe_bots(entries, sources=None):
+def probe_bots(entries, sources=None, disabled=None):
     """并发探活，整体封顶 ``PROBE_BUDGET`` 秒（[R4D] I7：串行时 N 个离线 bot 要等 N×1.5 秒）。
 
     **端口取每个 bot 生效那份配置的 ``dispatcher_port``**（``_effective_configs``，
@@ -352,6 +353,11 @@ def probe_bots(entries, sources=None):
     ``POST /status`` 探活，行为一字不差。
 
     ``sources`` 传 ``bot_sources()`` 的结果（不传就现取一次，口径相同）。
+
+    ``disabled`` 是停用的 bot id 的集合，只对 ``dsh`` 行起作用（§2 状态规则第 2 步：停用
+    的行先问 launchd，它说没在跑就是离线，不凭还没过期的心跳说它在线）。列表端点把它已经
+    算好的那份传进来；不传就在这里按同一个读法（``bot_launchd.enabled_of``，§0 第 8 条）
+    对 dsh 行现读一次。多出来的那次 print 走的仍是下面这个并行池与 2 秒预算。
 
     自己吞掉全部探活异常 —— 抛出去会被路由层误判成 config_unreadable。
     """
@@ -373,9 +379,19 @@ def probe_bots(entries, sources=None):
             # 再交给各探活线程 —— 超预算的线程拖到响应之后，也不会回头去读环境。
             from moments import bot_launchd   # 延迟 import：理由同 _dsh_probe
             seams = bot_launchd.resolve_seams()
+            if disabled is None:
+                # 读配置同样只许在这里（处理请求的线程）做，探活线程拿到的是读好的结论。
+                # 读不出来就按「都启用」探（与没有这一步时相同），不让它把列表拖成 500。
+                try:
+                    disabled = {e["id"] for e, _p in dsh_t
+                                if not bot_launchd.enabled_of(e["id"])}
+                except Exception:               # noqa: BLE001  探活这一层不往外抛
+                    disabled = ()
+        off = disabled or ()
         ex = ThreadPoolExecutor(max_workers=min(PROBE_WORKERS, len(dsh_t) + len(plain_t)))
         try:
-            todo = [(e, p, True, ex.submit(_dsh_probe, e["id"], seams)) for e, p in dsh_t]
+            todo = [(e, p, True, ex.submit(_dsh_probe, e["id"], seams, e["id"] in off))
+                    for e, p in dsh_t]
             todo += [(e, p, False, ex.submit(_probe_one, p)) for e, p in plain_t]
             wait([t[3] for t in todo], timeout=PROBE_BUDGET)
             for e, port, is_dsh, fut in todo:

@@ -282,17 +282,28 @@ def fresh_heartbeat(bot_id, now_ms=None, seams=None):
     return hb
 
 
-def row_state(bot_id, seams=None):
+def row_state(bot_id, seams=None, disabled=False):
     """状态列的一行判定（§2）：``(state, pid)``，state ∈ online / starting / offline。
 
     心跳新鲜 → online（pid 取心跳）；否则 ``print`` 说 running → starting（pid 取
     launchd 的）；再否则 offline。**不做 pid 一致性检查** —— 那是判活等待的事（§5 第 5 条），
     状态列只用第 2、3 条。
+
+    ``disabled``：这只是停用的（调用方按 ``enabled_of`` 读好传进来，这里不读配置）。停用的
+    行**先问一次 print**：它说没在运行（找不到服务，或状态不是 running）就直接 offline，
+    心跳再新鲜也不看 —— 刚停掉的 bot 心跳还没过期，不这样它会顶着「已停用」再显示最长
+    15 秒的在线。它说在运行就接着照常往下判（配置说停、进程却还在，如实显示），那次 print
+    的结果往下复用，不问第二遍。启用的行不变：心跳新鲜时一次 launchctl 都不调。
     """
+    printed = None
+    if disabled:
+        printed = print_state(bot_id, seams)
+        if printed[0] != "running":
+            return "offline", None
     hb = fresh_heartbeat(bot_id, seams=seams)
     if hb is not None:
         return "online", hb["pid"]
-    state, pid = print_state(bot_id, seams)
+    state, pid = printed if printed is not None else print_state(bot_id, seams)
     if state == "running" and pid is not None:
         return "starting", pid
     return "offline", None

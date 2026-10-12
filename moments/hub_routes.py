@@ -1009,7 +1009,8 @@ def bots_list():
     dsh_rows = {b for b in on_page if (src.get(b) or {}).get("source") == "dsh"}
     disabled = ({b for b in dsh_rows if not bot_launchd.enabled_of(b)}
                 | {b for b in bots_client.disabled_ids() if b in on_page - dsh_rows})
-    return jsonify({"bots": bots_client.probe_bots(entries, src),
+    # 探活要知道哪几行是停用的（§2 状态规则第 2 步）：交的就是上面这一份，不让它另读一遍。
+    return jsonify({"bots": bots_client.probe_bots(entries, src, disabled),
                     "disabled": sorted(disabled),
                     "restart_available": plan.available,
                     "restart_reason": plan.reason,
