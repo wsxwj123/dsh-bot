@@ -395,13 +395,20 @@ def command_runner(argv=None):
     子进程环境按既有口径注入新系统配置根（``_restart_env``）。
     ``argv`` 缺省现读 env；调用方传 ``restart_plan().override`` 时用的是同一份切分结果
     （单一出处，两边不会在"读哪个 env"上分叉）。
+
+    **在处理请求的线程里调**（§1a）：命令串与子进程的环境都在这里定下，返回的闭包只拿着
+    它们执行，后台不再读环境。环境 = ``_restart_env()`` 给的那份；它回空（新系统根不在场，
+    照常继承）时取此刻进程环境的一份拷贝 —— 内容与原先相同，只是取的时间点提前到受理时。
     """
     if argv is None:
         argv = shlex.split(os.environ.get("HUB_RESTART_CMD") or "")
     argv = list(argv)
+    env = _restart_env()
+    if env is None:
+        env = dict(os.environ)
 
     def runner():
-        return _run_command(argv, RESTART_TIMEOUT)
+        return _run_command(argv, RESTART_TIMEOUT, env)
 
     return runner
 
@@ -438,19 +445,28 @@ def _restart_env():
     return env
 
 
-def _run_command(argv, timeout):
+#: ``_run_command`` 的 ``env`` 没给时的占位。不用 None：None 交给子进程的意思是「原样继承」，
+#: 「没给」与「给了但是空的」必须分得开。
+_ENV_UNSET = object()
+
+
+def _run_command(argv, timeout, env=_ENV_UNSET):
     """跑一次重启命令，返回 ``(state, exit_code, 合并输出)``。这里不脱敏，交调用方统一处理。
 
     - stdout/stderr 合并采集：脚本的报错在 stderr，只收 stdout 等于什么都看不到。
     - ``stdin=DEVNULL``：脚本万一读 stdin 会永远挂着，把互斥锁一起卡死。
     - ``start_new_session``：独立进程组，超时才有整树可杀。
+    - ``env``：子进程看到的全部环境变量。``command_runner`` 在受理时算好传进来（§1a），
+      给什么用什么（空表就是空环境）；没给才现算（``_restart_env()``，原来的行为）。
     """
     if not argv:
         return "failed", None, "重启命令为空"
+    if env is _ENV_UNSET:
+        env = _restart_env()
     try:
         proc = subprocess.Popen(argv, cwd=str(REPO_ROOT), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                env=_restart_env(),
+                                env=env,
                                 start_new_session=(os.name != "nt"))
     except OSError as e:
         # 不回显命令串：它含路径与参数，属配置值（§7 末行同理）
