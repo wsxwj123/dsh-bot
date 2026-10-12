@@ -7,7 +7,7 @@ import { join } from 'path'
 import { Logger } from '../../src/log'
 import { ProviderService } from '../../src/providers/service'
 import { DEFAULT_CONTEXT, parseProviders, setCredentialRef } from '../../src/providers/store'
-import type { FetchedModel, FetchModelsRequest, FetchModelsResult } from '../../src/providers/models'
+import type { FetchedModel, FetchModelsRequest, FetchModelsResult, ProbeModelFn, ProbeModelRequest } from '../../src/providers/models'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pvc-')); dirs.push(d); return d }
@@ -22,17 +22,19 @@ class CapLog extends Logger {
 }
 
 type FetchPlan = (req: FetchModelsRequest) => FetchModelsResult
-function svc(root: string, plan: FetchPlan, o: { now?: () => number; keyGraceMs?: number; onChanged?: () => void } = {}) {
+function svc(root: string, plan: FetchPlan, o: { now?: () => number; keyGraceMs?: number; onChanged?: () => void; probe?: ProbeModelFn } = {}) {
   const log = new CapLog()
   const calls: FetchModelsRequest[] = []
+  const probeCalls: ProbeModelRequest[] = []
   const s = new ProviderService({
     root, credentialsPath: credPathOf(root), log,
     fetchModels: async (req) => { calls.push(req); return plan(req) },
+    probeModel: async (req) => { probeCalls.push(req); return o.probe ? o.probe(req) : { ok: true } },
     now: o.now, lockWaitMs: 2000, keyGraceMs: o.keyGraceMs ?? 600_000,
     configRouteKeys: () => ['MYROUTE_KEY'],
     onChanged: o.onChanged,
   })
-  return { s, log, calls }
+  return { s, log, calls, probeCalls }
 }
 const okModels = (list: FetchedModel[], baseURL: string): FetchModelsResult => ({ ok: true, models: list, truncated: false, baseURL, v1Added: false })
 const read = (root: string) => parseProviders(readFileSync(providersPathOf(root), 'utf8'))
@@ -152,6 +154,141 @@ test('删除：providers.json 移除、凭据键登记待删；到点后 process
   expect(creds(root)).not.toContain('PROVIDER_P1_KEY')
   snap = read(root)
   expect(snap.pendingKeyRemovals).toEqual([])
+})
+
+// ─── INTERFACE-新系统bot运维 §11a/§11b/§12a：preview、refresh 的 only、testConn ───
+
+/** 预置一份 [a（owner 手填 5000）、b、manual c] 的自建与凭据 */
+function seedPreview(root: string) {
+  writeFileSync(providersPathOf(root), JSON.stringify({ version: 1, providers: { myproxy: {
+    route: { api: 'openai-completions', baseURL: 'https://p.example.com/v1', apiKeyEnv: 'PROVIDER_MYPROXY_KEY', models: [{ id: 'a', contextWindow: 5000 }, { id: 'b', contextWindow: 131072 }, { id: 'c', contextWindow: 1048576 }] },
+    meta: { createdAt: 1, updatedAt: 1, epoch: 1, keyRev: 1, guessedContext: ['b', 'c'], ownerContext: ['a'], manualModels: ['c'], lastRefresh: null },
+  } }, pendingKeyRemovals: [] }))
+  setCredentialRef(credPathOf(root), 'PROVIDER_MYPROXY_KEY', 'test-key-7abcdefghij')
+}
+const previewFetched = () => okModels([{ id: 'a', contextWindow: 8000 }, { id: 'b', contextWindow: null }, { id: 'd', contextWindow: null }], 'https://p.example.com/v1')
+
+test('preview（§11a）：先拉到的（上游顺序）后仅本地的（列表顺序）；行恒 6 键；count 只数拉到的；default_checked = in_fetched or manual；只读', async () => {
+  const root = tmp()
+  seedPreview(root)
+  const { s, calls } = svc(root, previewFetched)
+  const before = readFileSync(providersPathOf(root), 'utf8')
+  const r = await s.preview('MYPROXY')
+  expect(r.status).toBe('ok')
+  if (r.status !== 'ok') return
+  expect(r.name).toBe('myproxy')
+  expect(r.count).toBe(3)
+  expect(r.models).toEqual([
+    { id: 'a', contextWindow: 8000, in_list: true, in_fetched: true, manual: false, default_checked: true },
+    { id: 'b', contextWindow: null, in_list: true, in_fetched: true, manual: false, default_checked: true },
+    { id: 'd', contextWindow: null, in_list: false, in_fetched: true, manual: false, default_checked: true },
+    { id: 'c', contextWindow: 1048576, in_list: true, in_fetched: false, manual: true, default_checked: true },
+  ])
+  expect(calls.length).toBe(1)
+  expect(readFileSync(providersPathOf(root), 'utf8'), 'preview 只读：providers.json 逐字节不变').toBe(before)
+})
+
+test('preview：拉到 0 个（empty）也是 200，models 只含仅本地的行；缺密钥不发请求；不存在 not_found', async () => {
+  const root = tmp()
+  seedPreview(root)
+  const { s: s0 } = svc(root, () => ({ ok: false, reason: 'empty', status: null }))
+  const r = await s0.preview('myproxy')
+  expect(r.status).toBe('ok')
+  if (r.status !== 'ok') return
+  expect(r.count).toBe(0)
+  expect(r.models.map(m => m.id)).toEqual(['a', 'b', 'c'])
+  expect(r.models.map(m => m.default_checked)).toEqual([false, false, true])
+
+  const { s: s1, calls } = svc(root, previewFetched)
+  setCredentialRef(credPathOf(root), 'PROVIDER_MYPROXY_KEY', null)
+  expect((await s1.preview('myproxy')).status).toBe('key_missing')
+  expect(calls.length).toBe(0)
+  expect((await s1.preview('nosuch')).status).toBe('not_found')
+})
+
+test('refresh 带 only（§11b）：落盘 =（拉到的 ∩ only）∪（列表 ∩ only）；勾上但上游没有的粘进 manualModels；owner 手填的保留', async () => {
+  const root = tmp()
+  seedPreview(root)
+  const { s } = svc(root, previewFetched)
+  const r = await s.refresh('myproxy', ['a', 'd', 'c'])
+  expect(r.status).toBe('ok')
+  if (r.status !== 'ok') return
+  expect(r).toMatchObject({ count: 3, added: 1, removed: ['b'], keptManual: 1, selected: 3, bySelection: true })
+  const e = read(root).valid.myproxy!
+  expect(e.route.models.map(m => m.id)).toEqual(['a', 'd', 'c'])
+  expect(e.meta.manualModels).toEqual(['c'])
+  expect(e.route.models.find(m => m.id === 'a')!.contextWindow).toBe(5000)
+})
+
+test('refresh 带 only：未知 id 静默忽略、旧 manual 被弃选即移除；only: [] 清空列表与 manual', async () => {
+  const root = tmp()
+  seedPreview(root)
+  const { s } = svc(root, previewFetched)
+  const r = await s.refresh('myproxy', ['a', 'zzz-never-seen'])
+  expect(r.status).toBe('ok')
+  expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['a'])
+  expect(read(root).valid.myproxy!.meta.manualModels).toEqual([])
+
+  const root2 = tmp()
+  seedPreview(root2)
+  const { s: s2 } = svc(root2, previewFetched)
+  const r2 = await s2.refresh('myproxy', [])
+  expect(r2.status).toBe('ok')
+  if (r2.status !== 'ok') return
+  expect(r2).toMatchObject({ selected: 0, keptManual: 0, removed: ['a', 'b', 'c'] })
+  expect(read(root2).valid.myproxy!.route.models).toEqual([])
+  expect(read(root2).valid.myproxy!.meta.manualModels).toEqual([])
+})
+
+test('refresh 不带 only：响应加 selected、removed 仍是数组、manual 不动（既有行为不退化）', async () => {
+  const root = tmp()
+  seedPreview(root)
+  const { s } = svc(root, previewFetched)
+  const r = await s.refresh('myproxy')
+  expect(r.status).toBe('ok')
+  if (r.status !== 'ok') return
+  expect(r).toMatchObject({ count: 3, added: 1, keptManual: 1, selected: 4, bySelection: false })
+  expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['a', 'b', 'd', 'c'])
+})
+
+test('testConn（§12a）：用列表第一个模型发请求；成功记 provider.tested；请求里带凭据密钥、响应不含', async () => {
+  const root = tmp()
+  seedPreview(root)
+  const seen: ProbeModelRequest[] = []
+  const { s, log, probeCalls } = svc(root, () => okModels([], 'https://p.example.com/v1'), { probe: async (req) => { seen.push(req); return { ok: true } } })
+  const r = await s.testConn('myproxy')
+  expect(r.status).toBe('ok')
+  if (r.status !== 'ok') return
+  expect(r.model).toBe('a')
+  expect(Number.isInteger(r.latencyMs)).toBe(true)
+  expect(seen[0]).toEqual({ api: 'openai-completions', baseURL: 'https://p.example.com/v1', model: 'a', key: 'test-key-7abcdefghij' })
+  expect(probeCalls.length).toBe(1)
+  expect(log.events).toContainEqual({ event: 'provider.tested', name: 'myproxy' })
+  expect(JSON.stringify(r)).not.toContain('test-key-7abcdefghij')
+})
+
+test('testConn：列表为空 no_models（不发请求）；失败记 provider.test_failed 带 reason/status', async () => {
+  const root = tmp()
+  writeFileSync(providersPathOf(root), JSON.stringify({ version: 1, providers: { p1: {
+    route: { api: 'openai-completions', baseURL: 'https://p.example.com/v1', apiKeyEnv: 'PROVIDER_P1_KEY', models: [] },
+    meta: { createdAt: 1, updatedAt: 1, epoch: 1, keyRev: 1, guessedContext: [], ownerContext: [], manualModels: [], lastRefresh: null },
+  } }, pendingKeyRemovals: [] }))
+  setCredentialRef(credPathOf(root), 'PROVIDER_P1_KEY', 'test-key-7abcdefghij')
+  const { s, log, probeCalls } = svc(root, () => okModels([], 'https://p.example.com/v1'), { probe: async () => ({ ok: false, reason: 'unauthorized', status: 401 }) })
+  expect((await s.testConn('p1')).status).toBe('no_models')
+  expect(probeCalls.length).toBe(0)
+
+  writeFileSync(providersPathOf(root), JSON.stringify({ version: 1, providers: { p1: {
+    route: { api: 'openai-completions', baseURL: 'https://p.example.com/v1', apiKeyEnv: 'PROVIDER_P1_KEY', models: [{ id: 'm1', contextWindow: 131072 }] },
+    meta: { createdAt: 1, updatedAt: 1, epoch: 1, keyRev: 1, guessedContext: [], ownerContext: [], manualModels: [], lastRefresh: null },
+  } }, pendingKeyRemovals: [] }))
+  const after = readFileSync(providersPathOf(root), 'utf8')
+  const r = await s.testConn('p1')
+  expect(r.status).toBe('failed')
+  if (r.status !== 'failed') return
+  expect(r).toMatchObject({ name: 'p1', model: 'm1', reason: 'unauthorized', status2: 401 })
+  expect(log.events).toContainEqual({ event: 'provider.test_failed', name: 'p1', reason: 'unauthorized', status: 401 })
+  expect(readFileSync(providersPathOf(root), 'utf8'), 'testConn 只读：providers.json 逐字节不变').toBe(after)
 })
 
 test('模型管理：加手动模型（记入 manualModels）、改上下文（记入 ownerContext）、删模型；不存在返回 not_found', async () => {

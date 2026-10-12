@@ -1,6 +1,6 @@
 // 拉模型列表（方案 3.7）：请求形状、/v1 补全、分页、截断、失败分类与文案；结果里不带密钥、地址、回包正文
 import { afterEach, expect, test } from 'bun:test'
-import { fetchFailText, fetchModels, type FetchModelsRequest } from '../../src/providers/models'
+import { fetchFailText, fetchModels, probeModel, type FetchFailReason, type FetchModelsRequest } from '../../src/providers/models'
 import { sleep } from '../../src/util'
 
 const KEY = 'test-key-models-Zx81Qw'
@@ -117,4 +117,74 @@ test('超时：慢于设定 → timeout「接口 1 秒没有响应」；连不�
 test('Anthropic 多页、第 2 页失败：整次失败', async () => {
   const s = serve((u, n) => (n === 1 ? json({ data: [{ id: 'a1' }], has_more: true, last_id: 'a1' }) : json({}, 500)))
   expect(await fetchModels({ api: 'anthropic-messages', baseURL: s.url, key: KEY }, { timeoutMs: 5_000 })).toEqual({ ok: false, reason: 'server_error', status: 500 })
+})
+
+// ─── probeModel（POST /v1/provider/test 的最小对话请求，INTERFACE-新系统bot运维 §12a） ───
+
+type ProbeSeen = { method: string; path: string; auth: string | null; xKey: string | null; version: string | null; ct: string | null; body: string }
+function serveProbe(handler: (u: URL, n: number) => Response | Promise<Response>) {
+  const seen: ProbeSeen[] = []
+  const srv = Bun.serve({
+    port: 0, hostname: '127.0.0.1',
+    fetch: async req => {
+      const u = new URL(req.url)
+      seen.push({ method: req.method, path: u.pathname, auth: req.headers.get('authorization'), xKey: req.headers.get('x-api-key'), version: req.headers.get('anthropic-version'), ct: req.headers.get('content-type'), body: await req.text() })
+      return handler(u, seen.length)
+    },
+  })
+  servers.push(srv)
+  return { url: `http://127.0.0.1:${srv.port}`, seen }
+}
+const probe = (r: { api?: 'openai-completions' | 'anthropic-messages' | 'openai-responses'; baseURL: string }, timeoutMs = 5_000) =>
+  probeModel({ api: 'openai-completions', key: KEY, model: 'm1', ...r }, { timeoutMs })
+
+test('probeModel：三型请求的地址、鉴权头与最小 body；200 且回包是 JSON 才算通', async () => {
+  const s = serveProbe(() => json({ content: [{ type: 'text', text: 'pong' }] }))
+  expect(await probe({ api: 'anthropic-messages', baseURL: s.url })).toEqual({ ok: true })
+  expect(s.seen[0]).toMatchObject({ method: 'POST', path: '/v1/messages', auth: null, xKey: KEY, version: '2023-06-01', ct: 'application/json' })
+  expect(JSON.parse(s.seen[0]!.body)).toEqual({ model: 'm1', max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] })
+
+  const s2 = serveProbe(() => json({ choices: [] }))
+  expect(await probe({ api: 'openai-completions', baseURL: `${s2.url}/v1` })).toEqual({ ok: true })
+  expect(s2.seen[0]).toMatchObject({ method: 'POST', path: '/v1/chat/completions', auth: `Bearer ${KEY}`, xKey: null })
+  expect(JSON.parse(s2.seen[0]!.body)).toEqual({ model: 'm1', max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] })
+
+  const s3 = serveProbe(() => json({ output: [] }))
+  expect(await probe({ api: 'openai-responses', baseURL: `${s3.url}/v1` })).toEqual({ ok: true })
+  expect(s3.seen[0]).toMatchObject({ path: '/v1/responses' })
+  expect(JSON.parse(s3.seen[0]!.body)).toEqual({ model: 'm1', max_output_tokens: 16, input: 'ping' })
+})
+
+test('probeModel：openai 系地址只有域名、首次 401/404 → 在 /v1 下重试一次；有路径不重试；anthropic 不回落', async () => {
+  for (const first of [401, 404]) {
+    const s = serveProbe((_u, n) => (n === 1 ? json({}, first) : json({ choices: [] })))
+    expect(await probe({ api: 'openai-completions', baseURL: s.url })).toEqual({ ok: true })
+    expect(s.seen.map(x => x.path)).toEqual(['/chat/completions', '/v1/chat/completions'])
+  }
+  const s = serveProbe(() => json({}, 401))
+  expect(await probe({ api: 'openai-completions', baseURL: `${s.url}/v1` })).toEqual({ ok: false, reason: 'unauthorized', status: 401 })
+  expect(s.seen.length).toBe(1)
+  const s2 = serveProbe(() => json({}, 404))
+  expect(await probe({ api: 'anthropic-messages', baseURL: s2.url })).toEqual({ ok: false, reason: 'not_found', status: 404 })
+  expect(s2.seen.length).toBe(1)
+})
+
+test('probeModel：状态分类（403 归 http_error，与拉列表的 403=unauthorized 刻意不同）、302 不跟随、非 JSON、超时、连不上', async () => {
+  const CASES: [number, FetchFailReason][] = [[401, 'unauthorized'], [403, 'http_error'], [404, 'not_found'], [429, 'rate_limited'], [500, 'server_error'], [418, 'http_error']]
+  for (const [status, reason] of CASES) {
+    const s = serveProbe(() => json({}, status))
+    expect(await probe({ baseURL: `${s.url}/v1` })).toEqual({ ok: false, reason, status })
+  }
+  const target = serveProbe(() => json({ choices: [] }))
+  const redirect = serveProbe(() => new Response(null, { status: 302, headers: { location: `${target.url}/v1/chat/completions` } }))
+  expect(await probe({ baseURL: `${redirect.url}/v1` })).toEqual({ ok: false, reason: 'redirect', status: 302 })
+  expect(target.seen.length, '302 不跟随：跳转目标收到 0 个请求').toBe(0)
+  const bad = serveProbe(() => new Response('hello', { status: 200, headers: { 'content-type': 'text/plain' } }))
+  expect(await probe({ baseURL: `${bad.url}/v1` })).toEqual({ ok: false, reason: 'bad_response', status: 200 })
+  const slow = serveProbe(async () => { await sleep(2_000); return json({ choices: [] }) })
+  expect(await probe({ baseURL: `${slow.url}/v1` }, 1_000)).toEqual({ ok: false, reason: 'timeout', status: null, seconds: 1 })
+  const refused = (async () => { throw new TypeError(`Unable to connect https://secret.example ${KEY}`) }) as unknown as typeof fetch
+  const n = await probeModel({ api: 'openai-completions', key: KEY, model: 'm1', baseURL: 'https://secret.example/v1' }, { timeoutMs: 1_000, fetch: refused })
+  expect(n).toEqual({ ok: false, reason: 'network', status: null })
+  expect(JSON.stringify(n)).not.toContain(KEY)
 })

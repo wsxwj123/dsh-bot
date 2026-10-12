@@ -22,10 +22,13 @@ function commands(): ProviderCommands {
 
 test('刷新结果文案（3.4.5/3.6）：成功带统计与去掉了、失败保持原列表、忙/缺密钥/被改/已不在', () => {
   const c = commands()
-  expect(c.refreshText('p1', { status: 'ok', name: 'p1', count: 3, added: 2, removed: ['m2'], keptManual: 1 }))
+  expect(c.refreshText('p1', { status: 'ok', name: 'p1', count: 3, added: 2, removed: ['m2'], keptManual: 1, selected: 4, bySelection: false }))
     .toBe('【系统】「p1」拉到 3 个模型（新增 2 个，去掉 1 个；手动加的 1 个保留）。\n去掉了：m2')
-  expect(c.refreshText('p1', { status: 'ok', name: 'p1', count: 2, added: 0, removed: [], keptManual: 0 }))
+  expect(c.refreshText('p1', { status: 'ok', name: 'p1', count: 2, added: 0, removed: [], keptManual: 0, selected: 1, bySelection: false }))
     .toBe('【系统】「p1」拉到 2 个模型（新增 0 个，去掉 0 个；手动加的 0 个保留）。')
+  // 带 only 落盘：末尾追加「（按勾选保留 S 个）」（INTERFACE §11b）
+  expect(c.refreshText('p1', { status: 'ok', name: 'p1', count: 3, added: 1, removed: ['m2'], keptManual: 1, selected: 3, bySelection: true }))
+    .toBe('【系统】「p1」拉到 3 个模型（新增 1 个，去掉 1 个；手动加的 1 个保留）。\n去掉了：m2（按勾选保留 3 个）')
   expect(c.refreshText('p1', { status: 'failed', name: 'p1', reason: 'server_error', status2: 500 })).toBe('【系统】「p1」没拉到模型：对方接口出错（HTTP 500）。模型列表保持不变。')
   expect(c.refreshText('p1', { status: 'gone', name: 'p1' })).toContain('已经不在了，这次结果没保存')
   expect(c.refreshText('p1', { status: 'changed', name: 'p1' })).toContain('刚被别处改过，这次结果没保存，请再刷新一次')
@@ -82,7 +85,7 @@ const entry = (name: string, apiKeyEnv = 'PROVIDER_P1_KEY') => ({
 const snapOf = (...entries: [string, unknown][]) => ({ version: 1, providers: Object.fromEntries(entries), pendingKeyRemovals: [] })
 
 function apiCmd(o: { root: string; refresh?: () => Promise<RefreshResult>; credential?: (env: string) => string | null; configRoutes?: string[] }): ProviderCommands {
-  const service = { credential: o.credential ?? (() => 'sekret'), refresh: o.refresh ?? (async () => ({ status: 'ok', name: 'p1', count: 3, added: 2, removed: ['m2'], keptManual: 1 })) } as unknown as ProviderService
+  const service = { credential: o.credential ?? (() => 'sekret'), refresh: o.refresh ?? (async () => ({ status: 'ok', name: 'p1', count: 3, added: 2, removed: ['m2'], keptManual: 1, selected: 4, bySelection: false })) } as unknown as ProviderService
   return new ProviderCommands({ service, api: {} as never, log: new Logger({}), root: o.root, isOwner: () => true, botUsername: () => 'b', configRouteNames: () => o.configRoutes ?? [], reply: () => {}, recordUpdate: () => {} })
 }
 
