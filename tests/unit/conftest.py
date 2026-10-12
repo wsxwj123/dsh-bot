@@ -4,6 +4,7 @@
 与验收测试的区别：这里直接调函数，不起 Flask、不起桩、不发 HTTP、不解析域名
 （SSRF 用例一律注入假解析器）。落盘只在 tmp_path 下，绝不碰真实 ~/.claude/settings.json。
 """
+import os
 import sys
 from pathlib import Path
 
@@ -33,6 +34,63 @@ def _no_real_settings(monkeypatch, tmp_path):
     # 安审 S3 起，写路径会去 chmod `<CLAUDE_TGBOT_HOME>/cliproxy/config.yaml`。
     # 不钉死的话用例会去动机主真实的那份配置。
     monkeypatch.setenv("CLAUDE_TGBOT_HOME", str(tmp_path / "tgbot-home"))
+
+
+def _write_exec(path, posix_text, windows_text):
+    """写一个当前平台能直接执行的小脚本，返回路径字符串。"""
+    if os.name == "nt":
+        path = path.with_suffix(".cmd")
+        path.write_text(windows_text, encoding="utf-8")
+    else:
+        path.write_text(posix_text, encoding="utf-8")
+        path.chmod(0o755)
+    return str(path)
+
+
+@pytest.fixture(scope="session")
+def _launchctl_nothing_installed(tmp_path_factory, request):
+    """假 launchctl（INTERFACE-新系统bot运维 §1 的 `HUB_LAUNCHCTL`）：launchd 里一个单元都没有。
+
+    只回答只读的 `print`（照真 launchctl 的样子报找不到服务、退 113）。别的子命令
+    （bootstrap / bootout / kickstart …）一律原样交给毒丸：谁要这些行为，自己在用例里
+    换假件，这里不替它放行。整个会话只造一次。
+    """
+    d = tmp_path_factory.mktemp("unit-fake-launchctl")
+    try:
+        poison = request.getfixturevalue("total_gate").poison_launchctl   # tests/conftest.py 的总闸
+    except pytest.FixtureLookupError:
+        # 总闸没加载（在 tests/unit 里面直接起 pytest 时会这样）：自备一颗，照样默认拒绝
+        poison = _write_exec(
+            d / "poison-launchctl",
+            "#!/bin/sh\necho 'unit: poison launchctl was called and refused' >&2\nexit 97\n",
+            "@echo unit: poison launchctl was called and refused 1>&2\r\n@exit /b 97\r\n")
+    return _write_exec(
+        d / "launchctl",
+        "#!/bin/sh\n"
+        'if [ "$1" = "print" ]; then\n'
+        '  echo "Could not find service \\"${2##*/}\\" in domain for user gui: 501" >&2\n'
+        "  exit 113\n"
+        "fi\n"
+        "exec '%s' \"$@\"\n" % poison,
+        "@echo off\r\n"
+        'if "%%~1"=="print" (\r\n'
+        "  echo Could not find service in domain for user gui 1>&2\r\n"
+        "  exit /b 113\r\n"
+        ")\r\n"
+        '"%s" %%*\r\n'
+        "exit /b %%ERRORLEVEL%%\r\n" % poison)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_launchctl(monkeypatch, _launchctl_nothing_installed):
+    """任何用例都不许去问真机的 launchd。
+
+    管理台列 bot 时会对新系统的 bot 做 `launchctl print`（判活，§5）。不换假件的话，
+    问到的是这台机器上真在跑的那些 bot，结果跟着真机状态变。要别的 launchd 状态的用例
+    自己再 `monkeypatch.setenv("HUB_LAUNCHCTL", ...)` 覆盖。`HUB_BUN` 这里不动，
+    保持总闸的毒丸。
+    """
+    monkeypatch.setenv("HUB_LAUNCHCTL", _launchctl_nothing_installed)
 
 
 def payload(**over):
