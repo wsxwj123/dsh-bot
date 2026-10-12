@@ -69,6 +69,7 @@ def test_开关_已停用的再点停用_不409且同步照跑(
     assert r.status_code == 200, r.get_json()
     assert r.get_json()["sync"]["state"] == "started", r.get_json()
     assert u.read_yaml(yml)["enabled"] is False
+    u.finish_sync(client, r.get_json())         # 收尾：等这次同步到终态
 
 
 def test_开关_响应形状_restart_hint与sync字段恒存在(client, sandbox, launchctl, as_darwin):
@@ -76,16 +77,21 @@ def test_开关_响应形状_restart_hint与sync字段恒存在(client, sandbox,
     body = _post(client, "xiaoyu", False).get_json()
     assert set(body) == {"ok", "enabled", "restart_hint", "sync"}, body
     assert body["restart_hint"] == {"bot": True, "moments_web": False}, body
+    u.finish_sync(client, body)                 # 收尾：等这次同步到终态
 
 
 def test_开关_重复同方向_幂等且都200(client, sandbox, launchctl, as_darwin):
     yml = u.dsh_bot(sandbox.dsh_cfg, "xiaoyu")
     launchctl.set_default(installed=True, running=True, pid=4242)
-    assert _post(client, "xiaoyu", False).status_code == 200
+    first = _post(client, "xiaoyu", False)
+    assert first.status_code == 200
     once = _yml(yml)
     r = _post(client, "xiaoyu", False)
     assert r.status_code == 200, r.get_json()
     assert _yml(yml) == once
+    # 收尾：两次点击各自指到的同步任务都等到终态（第二次可能是 busy，指的是第一次那只）
+    u.finish_sync(client, first.get_json())
+    u.finish_sync(client, r.get_json())
 
 
 # ------------------------------------------------------------ 同步的去向

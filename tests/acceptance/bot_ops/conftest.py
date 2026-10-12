@@ -21,6 +21,7 @@ import importlib
 import json
 import os
 import platform as _platform
+import re
 import socket
 import sys
 import threading
@@ -31,6 +32,7 @@ from types import SimpleNamespace
 
 import pytest
 from flask import Flask
+from flask.testing import FlaskClient
 
 from . import botops_util as u
 
@@ -466,38 +468,120 @@ def _no_touch_real():
 
 # ------------------------------------------------------------ 后台 job 收尾
 
-#: 管理台跑重启 / 开关同步 job 的后台线程名。契约里没写这个名字，是跑起来观察到的。
-#: 实现改了名，这里就等不到了，届时 tests/conftest.py 的总闸会重新报出
-#: 「夹具撤掉假件之后才发出的调用」，不会悄悄放过。
-JOB_THREAD_NAME = "hub-restart"
-#: 实测这些线程发完 launchctl 调用只要几百毫秒。个别用例的 job 会接着等满判活上限
-#: （45 秒），那种等不起也不必等：要紧的调用在这几秒里已经发完了。
-JOB_DRAIN_TIMEOUT = 3.0
+#: 拆夹具前给还没到终态的 job 留的时间。重启等待上限是 45 秒（§1），留足余量。
+JOB_DRAIN_TIMEOUT = 60.0
+_JOB_ID_RE = re.compile(r"[0-9a-f]{8}")
+_JOB_URL = "/hub/api/bots/restart/%s"
+#: 当前用例的账本：[(发请求的客户端, job_id)]。用例窗口之外是 None。
+_LEDGER = {"jobs": None}
+
+
+def _job_ids_in(resp):
+    """响应体里出现的 job_id：§3、§4 的 202 与 409，§4b 的 `sync.job_id`。"""
+    try:
+        body = resp.get_json(silent=True)
+    except Exception:
+        return []
+    if not isinstance(body, dict):
+        return []
+    out = []
+    for holder in (body, body.get("sync")):
+        if isinstance(holder, dict):
+            jid = holder.get("job_id")
+            if isinstance(jid, str) and _JOB_ID_RE.fullmatch(jid):
+                out.append(jid)
+    return out
+
+
+class JobTrackingClient(FlaskClient):
+    """照常发请求，顺手把响应里出现的 job_id 记进当前用例的账本。"""
+
+    def open(self, *args, **kwargs):
+        resp = super().open(*args, **kwargs)
+        jobs = _LEDGER["jobs"]
+        if jobs is not None:
+            for jid in _job_ids_in(resp):
+                jobs.append((self, jid))
+        return resp
+
+
+def _job_state(client, job_id):
+    """经 §9 的轮询入口问一次。读不到（例如只留 5 条被挤掉了）按已结束算。"""
+    r = client.get(_JOB_URL % job_id)
+    if r.status_code != 200:
+        return "gone"
+    body = r.get_json(silent=True) or {}
+    return body.get("state") or "gone"
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
-    item._threads_before = set(threading.enumerate())
+    item._botops_jobs = []
+    item._botops_unfinished = []
+    item._botops_stuck = []
+    _LEDGER["jobs"] = item._botops_jobs
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    if call.when == "call":
+        item._botops_call_passed = outcome.get_result().passed
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_teardown(item):
-    """拆夹具之前，先等这条用例触发的后台 job 跑完。
+    """拆夹具之前，确认这条用例触发的后台任务都到了终态。
 
-    开关（§4b）与重启（§3、§4）都是「先回响应，后台线程接着干活」。用例拿到响应就结束的话，
-    线程会拖到假 launchctl 被撤掉之后才去读 `HUB_LAUNCHCTL`。实测拖出来的调用是
-    `bootout` 与 `kickstart -k`：有总闸时打在毒丸上，记到下一条不相干的用例头上；
-    没有总闸时读到的就是真 `/bin/launchctl`。
+    重启（§3、§4）与开关同步（§4b）都是「先回响应，后台接着干活」。用例拿到受理答复就
+    结束的话，后台那一段会拖到夹具撤掉假件之后——这正是 §1a 要堵的口子，测试自己不能
+    再留一个。办法只用契约里有的东西：响应里的 job_id 与 `GET /hub/api/bots/restart/<job_id>`。
 
-    tryfirst：排在 pytest 自己拆夹具之前，此刻假 launchctl、心跳、桩都还在位。
-    只等本用例期间新出现的线程，前面用例留下的不归这条用例等。
-    等不到（超过 JOB_DRAIN_TIMEOUT）就放行，不在这里判失败，交给总闸去报。
+    tryfirst：排在 pytest 自己拆夹具之前，此刻假 launchctl、心跳、环境都还在位。
+    这里只等、只记，不抛异常（在这个钩子里抛，后面的夹具就不拆了）；判失败交给
+    下面的 `_jobs_reach_terminal` 夹具。
     """
-    before = getattr(item, "_threads_before", set())
-    deadline = time.time() + JOB_DRAIN_TIMEOUT
-    for t in threading.enumerate():
-        if t not in before and t.name.startswith(JOB_THREAD_NAME):
-            t.join(max(0.0, deadline - time.time()))
+    seen = set()
+    try:
+        for client, job_id in list(getattr(item, "_botops_jobs", [])):
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            if _job_state(client, job_id) != "running":
+                continue
+            item._botops_unfinished.append(job_id)
+            deadline = time.time() + JOB_DRAIN_TIMEOUT
+            while time.time() < deadline and _job_state(client, job_id) == "running":
+                time.sleep(0.05)
+            if _job_state(client, job_id) == "running":
+                item._botops_stuck.append(job_id)
+    except Exception as e:                      # noqa: BLE001  见上：这里不许抛
+        item._botops_stuck.append("轮询出错 %s: %s" % (type(e).__name__, e))
+    finally:
+        _LEDGER["jobs"] = None
+
+
+@pytest.fixture(autouse=True)
+def _jobs_reach_terminal(request):
+    """用例收尾时还有后台任务没到终态，就判这条用例失败。
+
+    等的动作在上面的钩子里已经做完了（假件还在位的时候）。这里只下结论：
+    - 用例主体通过、却有任务是钩子替它等完的 → 失败，点名 job；
+    - 等满 JOB_DRAIN_TIMEOUT 还在跑 → 无论用例红绿都失败（后面的用例会被它拖累）。
+    用例本来就红的，不再叠一条「没等终态」的噪声。
+    """
+    yield
+    node = request.node
+    stuck = getattr(node, "_botops_stuck", [])
+    left = getattr(node, "_botops_unfinished", [])
+    if stuck:
+        pytest.fail("后台任务等了 %.0f 秒还没到终态：%s" % (JOB_DRAIN_TIMEOUT, "、".join(stuck)),
+                    pytrace=False)
+    if left and getattr(node, "_botops_call_passed", False):
+        pytest.fail("这条用例拿到受理答复就结束了，没等后台任务到终态（job %s）。"
+                    "收尾前要经 GET /hub/api/bots/restart/<job_id> 轮询到终态，"
+                    "现成的写法是 botops_util.wait_job / finish_sync。" % "、".join(left),
+                    pytrace=False)
 
 
 # ------------------------------------------------------------ 假件/桩
@@ -564,6 +648,7 @@ def _flask_app():
     app = Flask(__name__, template_folder=str(REPO_ROOT / "moments" / "templates"))
     app.register_blueprint(hub_bp)
     app.config["TESTING"] = True
+    app.test_client_class = JobTrackingClient
     return app
 
 
@@ -611,6 +696,7 @@ def web_client(sandbox, monkeypatch, botlife_db):
         app = getattr(mod, attr, None)
         if app is not None and hasattr(app, "test_client"):
             app.config["TESTING"] = True
+            app.test_client_class = JobTrackingClient
             return app.test_client()
     raise AssertionError("moments.web 未导出可用的 Flask app")
 

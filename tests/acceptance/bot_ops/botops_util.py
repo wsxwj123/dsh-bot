@@ -111,6 +111,19 @@ def wait_job(client, job_id, timeout=20.0):
     raise AssertionError("job %s 没在 %.1f 秒内进终态：%r" % (job_id, timeout, body))
 
 
+def finish_sync(client, body, timeout=20.0):
+    """开关（§4b）的 200 体收尾：把 `sync` 指到的后台任务等到终态。
+
+    `started` 与 `busy` 都带 job_id（后者是别人正在跑的那只），一样等；`skipped` 没有任务。
+    返回终态体（没有任务时返回 None）。
+    """
+    sync = (body or {}).get("sync") or {}
+    job_id = sync.get("job_id")
+    if not job_id:
+        return None
+    return wait_job(client, job_id, timeout=timeout)
+
+
 def _candidate_modules():
     """可能放超时常量的模块（契约 §5b 点名 bot_launchd，bots_client 兜底）。"""
     mods = []

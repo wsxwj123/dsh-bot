@@ -139,9 +139,11 @@ def test_单只重启_心跳pid与launchd对不上_判活等不到_failed(
     assert "不一致" in st["tail"], st["tail"]
 
 
-def test_单只重启_launchd路径不读请求体(client, sandbox, launchctl, as_darwin):
+def test_单只重启_launchd路径不读请求体(client, sandbox, heartbeat, launchctl, as_darwin):
     """契约 §4：执行内容里没有请求体这回事；顶层非对象也不该冒 500。"""
     u.dsh_bot(sandbox.dsh_cfg, "xiaoyu")
     launchctl.set_default(installed=True, running=False, pid=4242)
+    heartbeat.tick("xiaoyu", pid=4242)          # 只为让受理的那次重启能很快到终态
     r = client.post("/hub/api/bots/xiaoyu/restart", json=[1, 2, 3])
     assert r.status_code == 202, (r.status_code, r.get_json())
+    u.wait_job(client, r.get_json()["job_id"])  # 收尾：等这次重启到终态
