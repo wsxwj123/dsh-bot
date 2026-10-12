@@ -293,7 +293,7 @@ def test_坏yml回409而不是把文件写坏(client, cfgdir):
 
 
 def test_响应带重启提示(client, cfgdir):
-    """停用不自动重启（会打断所有 bot 的对话），页面据此复用一期的重启入口。"""
+    """`restart_hint.bot` 恒为真：这只 bot 的生效依赖一次重启动作，由响应里的 `sync` 承担或待补。"""
     put_yml(cfgdir, "chenlulu", RICH_YML)
     body = client.post("/hub/api/bots/chenlulu/enabled",
                        json={"enabled": False}).get_json()
@@ -343,9 +343,11 @@ def test_重启脚本先停全部tg会话再按注册表拉起():
 # ------------------------------------------------------------ 页面
 
 def test_bots页面有停止启用按钮且带二次确认():
-    """源码级：页面得能停、能启回来，且停之前问一句（那一下会打断所有对话）。"""
+    """源码级：页面得能停、能启回来，且停之前问一句（那一下会打断这一只正在处理的对话）。"""
     html = (REPO_ROOT / "moments" / "templates" / "hub_bots.html").read_text(encoding="utf-8")
     assert "/enabled'" in html or '/enabled"' in html, "页面没接停用开关端点"
     assert "confirm(" in html and "停止" in html and "启用" in html
     assert "r.body.disabled" in html, "页面没读 disabled 名单，停用的 bot 分不出灰态"
-    assert "startRestart()" in html, "改完不重启 = 用户点了停止它还在回消息"
+    # 第 6 稿起开关之后只同步那一只（见 test_hub_bots_page_sync.py），不再调它；
+    # 定义得留着，「重启全部 bot」按钮还要用。
+    assert "startRestart()" in html, "startRestart 的定义不见了，「重启全部 bot」按钮没有入口"
