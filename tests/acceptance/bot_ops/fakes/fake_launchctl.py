@@ -8,6 +8,7 @@ conftest 生成的 shim 以
   default       未见过的单元(label)的初始状态 {installed, running, pid}
   units         {label: {installed, running, pid}}，按 label 分别跟踪
   pid           每次 kickstart/bootstrap 后用的 pid（缺省沿用单元现值）
+  kickstart_pid kickstart 成功后改用的 pid（用来构造「kickstart 后 pid 与心跳对不上」）
   delay         {子命令: 秒} —— 用来构造 LAUNCHCTL_TIMEOUT 场景
   kickstart_missing   true 时 kickstart 一律报「Could not find service」退出 3
   bootstrap_fail      true 时 bootstrap 退出 1
@@ -114,8 +115,9 @@ def main():
     if cmd == "kickstart":
         if st.get("installed") and not cfg.get("kickstart_missing"):
             st["running"] = True
-            if pid is not None:
-                st["pid"] = pid
+            kpid = cfg.get("kickstart_pid", pid)
+            if kpid is not None:
+                st["pid"] = kpid
             units[label] = st
             _save(cfg_path, cfg)
             _emit("", "", 0)

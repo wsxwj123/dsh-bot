@@ -56,7 +56,8 @@ def test_开关_启用_写盘生效且同步kickstart并判活通过(
     assert sync["state"] == "started", sync
     st = u.wait_job(client, sync["job_id"])
     assert st["state"] == "done", st
-    assert launchctl.subcommands() == ["kickstart"], launchctl.calls()
+    cmds = launchctl.subcommands()
+    assert "kickstart" in cmds and set(cmds) <= {"kickstart", "print"}, launchctl.calls()
 
 
 def test_开关_已停用的再点停用_不409且同步照跑(

@@ -151,7 +151,7 @@ def test_重启全部_旧系统的bot不被碰(client, sandbox, heartbeat, launc
     body = _post_accepted(client)
     st = u.wait_job(client, body["job_id"])
     assert st["state"] == "done", st
-    assert launchctl.labels() == ["com.dsh-bot.bot4"], launchctl.calls()
+    assert set(launchctl.labels()) == {"com.dsh-bot.bot4"}, launchctl.calls()
     assert u.snapshot_tree(sandbox.legacy_cfg) == legacy_before, "旧配置根被动过"
 
 

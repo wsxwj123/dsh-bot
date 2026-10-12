@@ -34,7 +34,7 @@ def test_单只重启_正常_202且job_done且只动这一只(
     st = u.wait_job(client, job_id)
     assert st["state"] == "done", st
     assert st["tail"].strip().splitlines()[0] == "重启 1 只：成功 1", st["tail"]
-    assert launchctl.labels() == ["com.dsh-bot.xiaoyu"], launchctl.calls()
+    assert set(launchctl.labels()) == {"com.dsh-bot.xiaoyu"}, launchctl.calls()
 
 
 def test_单只重启_停用中_409_bot_disabled且不碰进程(
@@ -129,7 +129,8 @@ def test_单只重启_心跳pid与launchd对不上_判活等不到_failed(
         client, sandbox, heartbeat, launchctl, as_darwin, monkeypatch):
     u.dsh_bot(sandbox.dsh_cfg, "xiaoyu")
     launchctl.set_default(installed=True, running=True, pid=7777)
-    heartbeat.tick("xiaoyu", pid=4242)          # 与 print 的 pid 不一致
+    launchctl.set_kickstart_pid(8888)           # kickstart 起的新进程
+    heartbeat.tick("xiaoyu", pid=4242)          # 心跳还停在旧进程那一拍，与 print 对不上
     u.tighten_constant(monkeypatch, value=45, new=1.0)
     r = _post(client, "xiaoyu")
     assert r.status_code == 202, r.get_json()

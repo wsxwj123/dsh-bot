@@ -148,7 +148,7 @@ def test_新建_旧系统两个根零字节(client, sandbox, bun, telegram, laun
 # ------------------------------------------------------------ A 段拒绝面
 
 def test_新建_bot家已被占_409_bot_exists且不落盘(client, sandbox, telegram, bun):
-    (sandbox.dsh_home / "bots" / "xiaoyu").mkdir(parents=True)
+    (sandbox.dsh_home / "bots" / "xiaoyu" / "channel").mkdir(parents=True)
     r = _post(client, u.free_port())
     assert r.status_code == 409, r.get_json()
     assert r.get_json()["error"] == "bot_exists"

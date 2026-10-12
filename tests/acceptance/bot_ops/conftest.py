@@ -151,6 +151,10 @@ class FakeLaunchctl:
     def set_kickstart_missing(self, flag=True):
         return self._set(kickstart_missing=bool(flag))
 
+    def set_kickstart_pid(self, pid):
+        """kickstart 成功后单元改报这个 pid（缺省沿用 cfg 的 pid，行为不变）。"""
+        return self._set(kickstart_pid=pid)
+
     def set_bootstrap_fail(self, flag=True):
         return self._set(bootstrap_fail=bool(flag))
 
