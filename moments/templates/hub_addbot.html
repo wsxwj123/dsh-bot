@@ -9,7 +9,7 @@
 {% include "_nav.html" %}
 <div class="wrap">
   <h1>添加 bot</h1>
-  <div class="sub">填完点创建：建好 configs/&lt;id&gt;.yml 与频道目录、注册主动开口、重启带上它</div>
+  <div class="sub">填完点创建：配置与频道目录建在新系统这边，装好开机自启并把它拉起来；建完就能在 bot 状态页看到。</div>
 
   {# 五组卡片（§14）：①②④⑤ 默认展开，③ 语音是可选项、默认收起。元素与文案只换位置。 #}
   <div class="card">
@@ -18,15 +18,16 @@
     <input id="bot_id" placeholder="xiaoyu" autocomplete="off" spellcheck="false">
     <label for="display_name">显示名</label>
     <input id="display_name" placeholder="小雨" autocomplete="off">
-    <label for="dispatcher_port">dispatcher 端口</label>
-    <input id="dispatcher_port" inputmode="numeric" placeholder="17802">
+    <label for="dispatcher_port">本机端口（这只 bot 的网关用，只在本机监听）</label>
+    <input id="dispatcher_port" inputmode="numeric" placeholder="1024-65535，每只 bot 各不相同">
+    <div class="muted" style="margin-top:6px">管理台和定时任务靠这个端口找到这只 bot。挑一个没被别的 bot 或本机其它程序占用的，撞了创建时会提示。</div>
     <label for="chat_id">你的 Telegram chat id</label>
     <input id="chat_id" inputmode="numeric" placeholder="123456789">
   </div>
 
   <div class="card">
     <h2>Telegram</h2>
-    <label for="telegram_token">Telegram token（只写进 channels/&lt;id&gt;/.env，配置文件里不留）</label>
+    <label for="telegram_token">Telegram token（只写进这只 bot 自己频道目录里的 .env，配置文件里不留）</label>
     <div class="row">
       <input id="telegram_token" type="password" style="flex:1" autocomplete="off"
              spellcheck="false" placeholder="123456789:AA...">
@@ -59,7 +60,7 @@
       <select id="persona_template"><option value="">读取中…</option></select>
     </div>
     <div id="text-box">
-      <label for="persona_text">人设正文（最多 64 KiB）</label>
+      <label for="persona_text">人设正文（最多 65536 个字）</label>
       <textarea id="persona_text" rows="8"
         style="width:100%;padding:9px 11px;font-size:14px;font-family:var(--font-body);
                color:var(--ink);background:transparent;border:1px solid var(--hairline-strong);
@@ -137,16 +138,22 @@ function payload() {
   if (fishKey.trim()) body.fish_api_key = fishKey;
   return body;
 }
+// 步骤表：后端给的是英文内部名（INTERFACE §13d），显示时换成中文；对照表里没有的原样显示。
+const STEP_NAME = {validate: '校验填写内容', getme: '向 Telegram 核对 token', files: '写配置与频道目录',
+                   register: '装开机自启并启动', restart: '等它启动完成'};
+const STEP_STATE = {done: '完成', failed: '失败', skipped: '跳过'};
 function renderSteps(steps) {
+  // 只认对照表自己的键：直接下标取的话 constructor 之类的名字会取到原型上的东西
+  const shown = (table, key) => (Object.prototype.hasOwnProperty.call(table, key) ? table[key] : key);
   const tb = $('steps').querySelector('tbody');
   tb.textContent = '';
   (steps || []).forEach((s) => {
     const tr = document.createElement('tr');
-    [s.name, s.state, s.detail || ''].forEach((cell, i) => {
+    [shown(STEP_NAME, s.name), shown(STEP_STATE, s.state), s.detail || ''].forEach((cell, i) => {
       const td = document.createElement('td');
       if (i === 1) { const p = document.createElement('span');
         p.className = 'pill ' + (s.state === 'done' ? 'on' : 'off');
-        p.textContent = s.state; td.appendChild(p); } else { td.textContent = cell; }
+        p.textContent = cell; td.appendChild(p); } else { td.textContent = cell; }
       tr.appendChild(td);
     });
     tb.appendChild(tr);
@@ -155,7 +162,7 @@ function renderSteps(steps) {
 }
 $('create').addEventListener('click', async () => {
   $('create').disabled = true;
-  hubSay($('create-msg'), '创建中…（要等重启后探活，最多半分钟）');
+  hubSay($('create-msg'), '创建中…（要等它启动完成，最多半分钟）');
   hubSay($('hint'), '');
   const r = await hubApi('/hub/api/bots', {method: 'POST', body: JSON.stringify(payload())});
   const b = r.body || {};
@@ -163,8 +170,7 @@ $('create').addEventListener('click', async () => {
   renderSteps(b.steps);
   if (r.status === 201) {
     hubSay($('create-msg'), '创建成功：' + b.bot_id + '（@' + b.username + '）');
-    hubSay($('hint'), '朋友圈/门户进程也持有 bot 列表，重启它新 bot 才可见：'
-      + 'launchctl kickstart -k gui/$UID/com.claudebotlife.moments-web');
+    hubSay($('hint'), '它已经在跑了，去「bot 状态」页就能看到。');
   } else if (r.status === 207) {
     hubSay($('create-msg'), '文件都建好了，但有步骤没走完 —— 按下面的命令自己补一下');
     hubSay($('hint'), b.manual_hint || '');
