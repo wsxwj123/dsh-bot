@@ -90,6 +90,15 @@ function switchBtn(botId, enabled) {
   return btn;
 }
 
+// 重启请求没被受理时说什么（INTERFACE §13a 第 5 条），行内重启与重启全部共用：
+// 响应里有 detail 就用它；409 restart_in_progress 不带 detail，给一句中文；其余报状态码。
+function refusedText(r) {
+  const b = r.body || {};
+  if (b.detail) return b.detail;
+  if (r.status === 409 && b.error === 'restart_in_progress') return '有别的重启任务正在跑，等它结束再试';
+  return '重启没有受理（' + r.status + '）';
+}
+
 // 行内重启（INTERFACE §4）：只服务"用户手点"这一种语义，停用中的 bot 会被 409 拒，
 // 所以这一格只给启用中的行渲染。
 async function restartOne(botId, btn) {
@@ -100,14 +109,17 @@ async function restartOne(botId, btn) {
   const b = r.body || {};
   if (r.status === 202 && b.job_id) {
     hubSay($('restart-msg'), '正在重启 ' + botId + '…');
-    pollJob(b.job_id);
+    pollJob(b.job_id, 'one');
     return;
   }
   btn.disabled = false;
-  hubSay($('restart-msg'), ((b.error || '') + ' ' + (b.detail || '')).trim() || ('失败（' + r.status + '）'));
+  hubSay($('restart-msg'), refusedText(r));
 }
 
 // 操作区：编辑（仅新系统来源的行，弹窗见 _edit_bot.html）+ 重启（仅启用行）+ 停止/启用。
+// 停用了、进程却还在跑（state 是 online 或 starting）的行多一个「再停一次」（§13a 第 7 条）：
+// 这一行的开关已经变成「启用」，再点是反方向；同步被别的任务挡住或失败之后，得有一个
+// 只动这一只、同方向再交一次的入口。它走的就是「停止」那条路，确认框与之后的显示都一样。
 function actsCell(b, enabled, source) {
   const td = document.createElement('td');
   const box = document.createElement('div');
@@ -127,6 +139,13 @@ function actsCell(b, enabled, source) {
     rs.textContent = '重启';
     rs.addEventListener('click', () => restartOne(b.id, rs));
     box.appendChild(rs);
+  } else if (b.state === 'online' || b.state === 'starting') {
+    const again = document.createElement('button');
+    again.type = 'button';
+    again.className = 'btn mini ghost';
+    again.textContent = '再停一次';
+    again.addEventListener('click', () => setEnabled(b.id, false, again));
+    box.appendChild(again);
   }
   box.appendChild(switchBtn(b.id, enabled));
   td.appendChild(box);
@@ -195,15 +214,18 @@ async function setEnabled(botId, enabled, btn) {
 
 // 开关成功后的唯一显示入口（INTERFACE §13a）：按 sync.state 分三路，各说各的。
 // 只有 started 那一路接着轮询那一个任务；busy 与 skipped 不再发任何请求。
+// busy 按方向各指一个只动这一只的入口：启用方向是这一行本来就有的「重启」，
+// 停用方向是 actsCell 给停用而还在跑的行渲染的「再停一次」。
 function showSync(botId, enabled, sync) {
   const head = botId + ' 的配置已改成' + (enabled ? '启用' : '停用');
   const state = sync && sync.state;
   if (state === 'started' && sync.job_id) {
     hubSay($('restart-msg'), head + '，正在同步这一只…');
-    pollJob(sync.job_id, botId);
+    pollJob(sync.job_id, 'sync', botId);
   } else if (state === 'busy') {
-    hubSay($('restart-msg'), head + '，但这一只还没同步：有别的重启任务正在跑。'
-                             + '等它结束后点「重启全部 bot」补上。');
+    hubSay($('restart-msg'), enabled
+      ? (head + '，但这一只还没拉起来：有别的重启任务正在跑。等它结束后刷新，在这一行点「重启」。')
+      : (head + '，但这一只还没停下来：有别的重启任务正在跑。等它结束后刷新，在这一行点「再停一次」。'));
   } else if (state === 'skipped') {
     hubSay($('restart-msg'), head + '，但没有自动同步：这台机器不是 macOS，'
                              + '管理台没法替你启停它，请手动处理。');
@@ -214,28 +236,36 @@ function showSync(botId, enabled, sync) {
 }
 
 // §6.2 是异步的：POST 拿 job_id，再轮询 GET .../restart/<job_id> 看四态。
-// label 只有开关同步会带（那只 bot 的 id）：带了就用「同步」这一套说法，终态接 tail 的
-// 最后一个非空行；不带（重启全部、行内重启）时文案一字不变。
-async function pollJob(jobId, label) {
+// kind 由调用方给，决定用哪一套说法、终态冒号后面接 tail 的哪一行（INTERFACE §13a 第 3、5 条）：
+//   'sync' 开关同步（一只，botId 是那只的 id）、'one' 行内重启（一只）、'all' 重启全部。
+const JOB_WORDS = {
+  sync: {done: '同步完成', failed: '同步失败', timeout: '同步超时'},
+  restart: {done: '重启完成', failed: '重启失败', timeout: '重启超时'},
+};
+async function pollJob(jobId, kind, botId) {
   const r = await hubApi('/hub/api/bots/restart/' + encodeURIComponent(jobId));
   if (r.status !== 200) { hubSay($('restart-msg'), '任务状态读不到了'); return; }
   const s = r.body.state;
+  const sync = kind === 'sync';
   if (s === 'running') {
-    hubSay($('restart-msg'), label ? ('正在同步 ' + label + '…') : '重启中…');
-    setTimeout(() => pollJob(jobId, label), 2000);
+    hubSay($('restart-msg'), sync ? ('正在同步 ' + botId + '…') : '重启中…');
+    setTimeout(() => pollJob(jobId, kind, botId), 2000);
     return;
   }
-  if (label) {
-    const word = {done: '同步完成', failed: '同步失败', timeout: '同步超时'}[s]
-                 || ('同步结束（' + s + '）');
-    const last = String(r.body.tail || '').split('\n').map((ln) => ln.trim())
-                                          .filter(Boolean).pop();
-    hubSay($('restart-msg'), last ? (word + '：' + last) : word);
-  } else {
-    hubSay($('restart-msg'), '重启结束：' + s +
-          (r.body.exit_code === null || r.body.exit_code === undefined
-           ? '' : '（退出码 ' + r.body.exit_code + '）'));
+  // 状态集只有四种。真遇到不认识的终态：同步沿用原来那句兜底；重启没有对应的说法，按读不到算
+  const word = (sync ? JOB_WORDS.sync : JOB_WORDS.restart)[s]
+               || (sync ? ('同步结束（' + s + '）') : '');
+  const lines = String(r.body.tail || '').split('\n').map((ln) => ln.trim()).filter(Boolean);
+  let line = lines[lines.length - 1];             // 一只的任务：末行就是这一只的结果
+  if (kind === 'all') {
+    // 重启全部不取末行：末行只是最后一只的结果，前面有一只失败时会拼出「失败：某只已重启」。
+    // 完成时接首行的汇总；失败或超时时接第一条逐只的失败行。汇总行（重启 N 只：成功 a，失败 b）
+    // 自己也带这两个字，得跳过，不然冒号后面永远是汇总，看不出是哪一只、为什么。
+    line = s === 'done'
+      ? lines[0]
+      : (lines.find((ln) => ln.indexOf('失败') >= 0 && !/^重启 \d+ 只：/.test(ln)) || line);
   }
+  hubSay($('restart-msg'), !word ? '任务状态读不到了' : (line ? (word + '：' + line) : word));
   $('restart-all').disabled = false;
   loadBots();
 }
@@ -247,8 +277,8 @@ async function startRestart() {
   $('restart-all').disabled = true;
   const r = await hubApi('/hub/api/bots/restart', {method: 'POST', body: '{}'});
   if (r.todo) { hubSay($('restart-msg'), TODO_TEXT); return; }
-  if (r.status === 202 && r.body.job_id) { pollJob(r.body.job_id); return; }
-  hubSay($('restart-msg'), (r.body.error || '') + ' ' + (r.body.detail || ''));
+  if (r.status === 202 && r.body.job_id) { pollJob(r.body.job_id, 'all'); return; }
+  hubSay($('restart-msg'), refusedText(r));
   $('restart-all').disabled = false;
 }
 
@@ -257,8 +287,9 @@ $('restart-all').addEventListener('click', () => {
   startRestart();
 });
 
-// 编辑弹窗（共享片段）保存成功后重拉名单，好让名字跟着变
-function onBotEdited() { loadBots(); }
+// 编辑弹窗（共享片段）保存成功后把那句提示交到这里：显示在本页的消息位，再重拉名单，
+// 好让名字跟着变
+function onBotEdited(text) { hubSay($('restart-msg'), text); loadBots(); }
 
 $('refresh').addEventListener('click', loadBots);
 loadBots();
