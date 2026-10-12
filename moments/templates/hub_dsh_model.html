@@ -15,7 +15,8 @@
   <div class="card" id="banner" hidden><div id="banner-text" class="muted"></div></div>
 
   {# 页签只切 hidden（§13 的硬约束）：两个 pane 的元素与文案全部留在初始 HTML 里，
-     切换只改 class，不重建 DOM、不删元素。 #}
+     切换只改 class，不重建 DOM、不删元素。两个 pane 的显隐只用 hidden 这个类（§13b）：
+     初始藏着的那个也得用类起头，用属性藏的话 switchTab 摘不掉它，点开就是空白。 #}
   <div class="row" style="margin-bottom:12px">
     <button class="btn mini" type="button" id="tab-model">bot 模型</button>
     <button class="btn mini ghost" type="button" id="tab-providers">供应商</button>
@@ -36,7 +37,7 @@
   </div>
   </div>
 
-  <div id="pane-providers" hidden>
+  <div id="pane-providers" class="hidden">
   <div class="card" style="margin-top:14px">
     <div class="row" style="justify-content:space-between">
       <h2 style="margin:0">供应商</h2>
