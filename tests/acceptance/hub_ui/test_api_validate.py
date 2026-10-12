@@ -94,6 +94,32 @@ def test_模型_名字不合规则_400_bad_provider(hub, name):
     assert (body(r) or {}).get("error") == "bad_provider", "实得 %s" % body(r)
 
 
+# 供应商名整串匹配。依据 `INTERFACE-新系统bot运维.md` 第 7 稿 §0 第 6 条：同一把尺还管着
+# 保存供应商、删除供应商、改模型列表这几个转发端点，错误码不变，只是名字末尾多一个换行不再
+# 放行。这个沙箱里没有网关：名字要是被放过去，拿到的会是 503 `no_gateway`，不是 400。
+
+BAD_PROVIDER = {"ok": False, "error": "bad_provider", "text": "供应商名字不合法"}
+
+
+def test_保存_名字末尾多一个换行_400_bad_provider_没走到找网关(hub):
+    r = hub.post(SAVE, json={"name": "myproxy\n", "api": "openai-completions",
+                             "baseURL": "https://api.example.com/v1", "key": "sk-test-00000000"})
+    assert r.status_code == 400, "期望 400，实得 %s，正文 %s" % (r.status_code, body(r))
+    assert body(r) == BAD_PROVIDER, "实得 %s" % body(r)
+
+
+def test_删除_名字末尾多一个换行_400_bad_provider_没走到找网关(hub):
+    r = hub.post(REMOVE.format(quote("myproxy\n", safe="")), json={})
+    assert r.status_code == 400, "期望 400，实得 %s，正文 %s" % (r.status_code, body(r))
+    assert body(r) == BAD_PROVIDER, "实得 %s" % body(r)
+
+
+def test_模型_名字末尾多一个换行_400_bad_provider_没走到找网关(hub):
+    r = hub.post(MODELS.format(quote("myproxy\n", safe="")), json={"action": "add", "id": "m1"})
+    assert r.status_code == 400, "期望 400，实得 %s，正文 %s" % (r.status_code, body(r))
+    assert body(r) == BAD_PROVIDER, "实得 %s" % body(r)
+
+
 @pytest.mark.parametrize("action", ["add2", "", "ADD"])
 def test_模型_action不是三个之一_400_bad_action(hub, action):
     r = hub.post(MODELS.format("myproxy"), json={"action": action, "id": "m1"})
