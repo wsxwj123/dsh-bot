@@ -9,11 +9,16 @@
 {% include "_nav.html" %}
 <div class="wrap">
   <h1>bot 状态</h1>
-  <div class="sub">这一页只管新系统的 bot。跑在旧系统的那些不在这里出现，
-    开关与重启都在旧管理台和桌面脚本里做。「开关」是配置里停没停用，
-    dispatcher 那盏灯是进程此刻在不在，phase 是它托管的 worker，三层分开看。
-    新系统里停用的 bot 仍留在表里（灰一档），点「启用」把配置改回来；
-    它要真正跑起来还得重启这只 bot 的那一步，那一步现在还没接上。</div>
+  <div class="sub">新系统 bot 的开关、重启与内容编辑。</div>
+  {# 原页头长说明整段收起（§13：只折叠、不删文案） #}
+  <details class="card">
+    <summary>这一页管什么</summary>
+    <div class="muted">这一页只管新系统的 bot。跑在旧系统的那些不在这里出现，
+      开关与重启都在旧管理台和桌面脚本里做。「开关」是配置里停没停用，
+      dispatcher 那盏灯是进程此刻在不在，phase 是它托管的 worker，三层分开看。
+      新系统里停用的 bot 仍留在表里（灰一档），点「启用」把配置改回来；
+      它要真正跑起来还得重启这只 bot 的那一步，那一步现在还没接上。</div>
+  </details>
 
   <div class="card">
     <div class="row" style="justify-content:space-between">
@@ -76,14 +81,55 @@ function sourceCell(info) {
   return td;
 }
 
-function switchCell(botId, enabled) {
-  const td = document.createElement('td');
+function switchBtn(botId, enabled) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'btn mini ' + (enabled ? 'ghost' : '');
   btn.textContent = enabled ? '停止' : '启用';
   btn.addEventListener('click', () => setEnabled(botId, !enabled, btn));
-  td.appendChild(btn);
+  return btn;
+}
+
+// 行内重启（INTERFACE §4）：只服务"用户手点"这一种语义，停用中的 bot 会被 409 拒，
+// 所以这一格只给启用中的行渲染。
+async function restartOne(botId, btn) {
+  if (!confirm('重启 ' + botId + '？正在处理的对话会被打断。')) return;
+  btn.disabled = true;
+  const r = await hubApi('/hub/api/bots/' + encodeURIComponent(botId) + '/restart',
+                         {method: 'POST', body: '{}'});
+  const b = r.body || {};
+  if (r.status === 202 && b.job_id) {
+    hubSay($('restart-msg'), '正在重启 ' + botId + '…');
+    pollJob(b.job_id);
+    return;
+  }
+  btn.disabled = false;
+  hubSay($('restart-msg'), ((b.error || '') + ' ' + (b.detail || '')).trim() || ('失败（' + r.status + '）'));
+}
+
+// 操作区：编辑（仅新系统来源的行，弹窗见 _edit_bot.html）+ 重启（仅启用行）+ 停止/启用。
+function actsCell(b, enabled, source) {
+  const td = document.createElement('td');
+  const box = document.createElement('div');
+  box.className = 'row';
+  if (source === 'dsh') {
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'btn mini ghost';
+    edit.textContent = '编辑';
+    edit.addEventListener('click', () => openEdit(b.id, edit));
+    box.appendChild(edit);
+  }
+  if (enabled) {
+    const rs = document.createElement('button');
+    rs.type = 'button';
+    rs.className = 'btn mini ghost';
+    rs.textContent = '重启';
+    rs.addEventListener('click', () => restartOne(b.id, rs));
+    box.appendChild(rs);
+  }
+  box.appendChild(switchBtn(b.id, enabled));
+  td.appendChild(box);
   return td;
 }
 
@@ -118,7 +164,7 @@ async function loadBots() {
     tr.appendChild(cell(b.phase));
     tr.appendChild(cell(b.queue_depth));
     tr.appendChild(cell(b.in_flight));
-    tr.appendChild(switchCell(b.id, enabled));
+    tr.appendChild(actsCell(b, enabled, (src[b.id] || {}).source));
     rows.appendChild(tr);
   }
   hubSay(empty, (r.body.bots || []).length ? '' : '一个 bot 都还没有');
@@ -180,8 +226,13 @@ $('restart-all').addEventListener('click', () => {
   startRestart();
 });
 
+// 编辑弹窗（共享片段）保存成功后重拉名单，好让名字跟着变
+function onBotEdited() { loadBots(); }
+
 $('refresh').addEventListener('click', loadBots);
 loadBots();
 </script>
+{# 编辑弹窗与供应商与模型页共用一份；放在页面脚本之后 include —— 片段里的脚本用页面的 $ #}
+{% include "_edit_bot.html" %}
 </body>
 </html>
