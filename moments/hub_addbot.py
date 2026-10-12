@@ -57,7 +57,10 @@ URL_PATH_RE = re.compile(r"/bot\S*")
 
 GETME_TIMEOUT = 10               # §4.1
 MAX_BODY = 64 * 1024             # §4.1 R2-2：读满即停
-MAX_PERSONA = 64 * 1024          # §4.2 A 段
+#: 人设正文的上限，按**字符数**算（§0 第 9 条），新建与编辑同一把尺。此前新建直接给的正文
+#: 与编辑按 UTF-8 字节数、从模板取的正文按字符数，三处两种算法。
+MAX_PERSONA = 65536
+_PERSONA_TOO_LONG = "人设正文超过 65536 个字符"
 MAX_DISPLAY_NAME = 64            # R8-1
 # §6b 两个可选字段的形状（全是本地判据，不做在线校验 —— 不因它们调任何语音服务）
 MAX_FISH_VOICE = 64
@@ -350,6 +353,34 @@ def _display_name(value):
     _bad("display_name 必须是 1-64 字的字符串，且不含控制字符")
 
 
+def _persona_encodable(text):
+    """人设正文得写得成 UTF-8（§0 第 9 条）：有落单的代理（半个表情符号）就回 400。
+    此前这种正文一路走到写文件那一步才炸，冒成 500。"""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        _bad("人设正文里有残缺的字符（多半是半个表情符号），删掉它再保存")
+
+
+def _persona_within_limit(text, detail=_PERSONA_TOO_LONG):
+    """人设正文最多 `MAX_PERSONA` 个字符（§0 第 9 条），超过回 413。`detail` 只有从模板取
+    正文时换一句（让用户知道该换模板，而不是去删自己没写过的字）。"""
+    if len(text) > MAX_PERSONA:
+        raise HubError(413, "payload_too_large", detail)
+
+
+def _persona_text(text, too_long=_PERSONA_TOO_LONG):
+    """人设正文的两项检查，**新建与编辑同一把尺**：写得成 UTF-8、不超过 65536 个字符。
+
+    新建直接给的正文与从模板取的正文一步查完。编辑要把音色的形状错夹在两项之间
+    （§10b 的判定顺序：字段形状的 400 全部先于 413），所以分两步调上面那两个。
+    规则与文案各只有那一份。
+    """
+    _persona_encodable(text)
+    _persona_within_limit(text, too_long)
+    return text
+
+
 def _readback(text, expect):
     """**写配置之前先读回来核对**（§0 第 9 条）：`text` 是准备写的那份配置全文，`expect` 是
     这次写进去的字符串键值。解析不出、顶层不是映射、或哪个键读回来不是同一个字符串，
@@ -452,9 +483,7 @@ def _persona(body):
     if has_tmpl == has_text:
         _bad("人设来源二选一：persona_template 或 persona_text，给一个")
     if has_text:
-        if len(text.encode("utf-8")) > MAX_PERSONA:
-            raise HubError(413, "payload_too_large", "人设正文超过 64 KiB")
-        return text
+        return _persona_text(text)
     if tmpl not in {t["id"] for t in templates()}:
         # 只认扫出来的目录名，`../` 这类穿越串自然落不进集合里
         _bad("没有这个人设模板：%s" % tmpl[:64])
@@ -466,9 +495,15 @@ def _persona(body):
     for path in candidates:
         try:
             with open(path, encoding="utf-8") as f:
-                return f.read(MAX_PERSONA)
+                # 多读一个字符就够判超限，不把一个巨大的文件整个读进来。此前读到上限就停，
+                # 等于悄悄把模板截断；现在超限是 413，一个字都不落盘。
+                text = f.read(MAX_PERSONA + 1)
         except OSError:
             continue
+        except UnicodeDecodeError:
+            # 模板文件不是合法 UTF-8：此前冒成 500
+            _bad("这个人设模板不是合法的 UTF-8 文本，换一个或直接贴正文")
+        return _persona_text(text, "这个人设模板超过 65536 个字符，换一个或直接贴正文")
     return ""            # 目录在但两处都没有 CLAUDE.md → 空人设，不是错误
 
 
@@ -1269,12 +1304,15 @@ def edit_save(bot_id, body):
 
     # 字段形状：display_name 各档 → persona → fish_voice_id 三档
     name = _display_name(body["display_name"]) if "display_name" in body else None
-    if "persona" in body and not isinstance(body["persona"], str):
-        _bad("persona 必须是字符串")
+    persona = None
+    if "persona" in body:
+        persona = body["persona"]
+        if not isinstance(persona, str):
+            _bad("persona 必须是字符串")
+        _persona_encodable(persona)
     voice = _edit_voice(body["fish_voice_id"]) if "fish_voice_id" in body else None
-    persona = body.get("persona") if "persona" in body else None
-    if persona is not None and len(persona.encode("utf-8")) > MAX_PERSONA:
-        raise HubError(413, "payload_too_large", "人设正文超过 64 KiB")
+    if persona is not None:
+        _persona_within_limit(persona)          # 413 排在三个字段的形状错之后
 
     # 404 → 频道目录落点。不论改的是哪个字段都先过落点这一格（只改名字也一样）：
     # 落在这只 bot 的家目录之外就整个拒掉，零读取零写入。
