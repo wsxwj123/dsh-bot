@@ -42,8 +42,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_API_BASE = "https://api.telegram.org"
 #: §4.1 R2-1：主机 + 可选端口，**不带路径、不带 query**。
 BASE_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d+)?/?$")
-#: 小写起头；禁 `_` 开头（`list_enabled_bots()` 会跳过它，建了也看不见）
-BOT_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+#: 小写起头；禁 `_` 开头（`list_enabled_bots()` 会跳过它，建了也看不见）。
+#: 形状那条正则全仓库只有一份，定义在 `config_sources`（整串匹配），这里是引用。
+BOT_ID_RE = config_sources.BOT_ID_RE
 TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{30,}$")
 #: A7：既有 bot 的 telegram id = `.env` 里 token 的 `:` 前数字段，不新增字段、不落第二份 token
 ENV_TOKEN_RE = re.compile(r"^\s*TELEGRAM_BOT_TOKEN\s*=\s*[\"']?(\d{8,10}):", re.M)

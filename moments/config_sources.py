@@ -35,10 +35,13 @@ SOURCE_DSH = "dsh"
 SOURCE_LABELS = {SOURCE_LEGACY: "旧系统", SOURCE_DSH: "新系统"}
 
 _OFF_VALUES = {"off", "-", "none", "0", "false", "no"}
-#: bot id 的信任边界：拼 ``<dsh_home>/bots/<id>`` / ``<配置根>/<id>.yml`` 一类路径前先过它。
-#: 与建 bot 的 ``BOT_ID_RE`` 同一把尺（§5b）：大小写、``-``、``..``、路径分隔符、
-#: 长度越界的一律当"没这个 bot"，绝不拿它去拼路径。
-_BOT_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+#: bot id 的形状，**全仓库只有这一条**（§0 第 6 条、§5b 第 5 条）：``hub_addbot.BOT_ID_RE``
+#: 是它的引用，新建、开关、编辑、单只重启、拼路径的各处量的都是它。大小写、``-``、``..``、
+#: 路径分隔符、长度越界的一律当"没这个 bot"，绝不拿它去拼路径。
+#:
+#: **整串匹配**：结尾是 ``\Z`` 不是 ``$``。``$`` 在字符串末尾那个换行之前也算匹配，
+#: ``"jiwen\n"`` 配 ``.match()`` 会过；``\Z`` 只认字符串真正的末尾，调用处照旧用 ``.match``。
+BOT_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}\Z")
 
 
 def legacy_dir() -> Path:
@@ -61,14 +64,14 @@ def dsh_home() -> Path:
 
 
 def dsh_bot_dir(bot_id):
-    """``<dsh_home()>/bots/<bot_id>``；名字过不了信任边界（``_BOT_ID_RE``，合法 bot id
+    """``<dsh_home()>/bots/<bot_id>``；名字过不了信任边界（``BOT_ID_RE``，合法 bot id
     形状）回 None。
 
     这道闸挡的是"拿一个不是 bot id 的串去拼路径"：``../x``、``a/b``、大写、超长一律
-    拒绝（§5b：名字不过 `_BOT_ID_RE` 回 None）。出现在这里的 id 应当已经与页面名单
+    拒绝（§5b：名字不过 `BOT_ID_RE` 回 None）。出现在这里的 id 应当已经与页面名单
     精确匹配过（S9），本节只是把闸门写在一处、不给调用方留 DIY 的空间。
     """
-    if not isinstance(bot_id, str) or not _BOT_ID_RE.match(bot_id):
+    if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
         return None
     return dsh_home() / "bots" / bot_id
 
@@ -254,11 +257,11 @@ def find_path(bot_id):
     （坏文件本身照旧由写入端报 409）。
 
     只认 ``<bot_id>.yml`` 文件名（管理台名单里的 id 就是文件名 stem）；名字先过
-    ``_BOT_ID_RE``（合法 bot id 形状），带路径形状的串一律当"没这个 bot"。
+    ``BOT_ID_RE``（合法 bot id 形状），带路径形状的串一律当"没这个 bot"。
     不跟 ``life_config`` 别名走：别名是"读配置"（config_loader）的事，
     写路径（启停开关）落到哪份文件，按文件名命中才不会写错人。
     """
-    if not isinstance(bot_id, str) or not _BOT_ID_RE.match(bot_id):
+    if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
         return None
     priority, running = None, None
     for _source, d in roots():            # 顺序 = 优先级，靠后（新系统）赢

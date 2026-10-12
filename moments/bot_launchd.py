@@ -94,7 +94,7 @@ def bot_home(bot_id, seams=None):
     from moments import config_sources
     if seams is None:
         return config_sources.dsh_bot_dir(bot_id)
-    if not isinstance(bot_id, str) or not config_sources._BOT_ID_RE.match(bot_id):
+    if not isinstance(bot_id, str) or not config_sources.BOT_ID_RE.match(bot_id):
         return None
     return Path(seams.home) / "bots" / bot_id
 
