@@ -46,9 +46,9 @@ BAD = [
     pytest.param("https://api.exa\tmple.com", id="tab"),
     pytest.param("https://api.example.com/v1\n", id="trailing-newline"),
     pytest.param("https://api.example.com/\r\nv1", id="crlf"),
-    pytest.param("https://api.example.com/v1　", id="ideographic-space"),
-    pytest.param("https://api.example.com/v1 ", id="no-break-space"),
-    pytest.param("https://api.example.com/v1 ", id="line-separator"),
+    pytest.param("https://api.example.com/v1\u3000", id="ideographic-space"),
+    pytest.param("https://api.example.com/v1\u00a0", id="no-break-space"),
+    pytest.param("https://api.example.com/v1\u2028", id="line-separator"),
     pytest.param("https://api.example.com/v1\u0085", id="next-line"),
     pytest.param("https://api.example.com/\u0000v1", id="U+0000"),
     pytest.param("https://api.example.com/\u0001v1", id="U+0001"),
