@@ -16,11 +16,11 @@ import { type FakeModels, type Handler, json, openaiOk, sleep as fsleep } from '
 const PREVIEW = '/v1/provider/preview'
 const REFRESH = '/v1/provider/refresh'
 
-/** 预置：旧列表 [a（主人给了 5000）, b, manual c]，凭据齐。 */
+/** 预置：旧列表 [a, b, manual c（主人给了 5000）]，凭据齐。 */
 const seed = (o: { models?: any[]; manual?: string[]; key?: boolean; name?: string } = {}) => (b: BotEnv, fm: FakeModels) => {
   seedProviders(b.root, [{
     name: o.name ?? 'myproxy', baseURL: `${fm.url}/v1`,
-    models: o.models ?? [{ id: 'a', contextWindow: 5000 }, 'b', 'c'],
+    models: o.models ?? ['a', 'b', { id: 'c', contextWindow: 5000 }],
     manualModels: o.manual ?? ['c'],
   }])
   if (o.key !== false) seedCreds(b.root, { [defaultKeyEnv(o.name ?? 'myproxy')]: fm.expectKey })
@@ -157,8 +157,11 @@ describe('POST /v1/provider/preview', () => {
 
   test('拉取失败：502 fetch_failed 带 reason，text 与 refresh 同款，列表不变', async () => {
     await withModels({ handler: () => json({}, 500), before: seed() }, async ({ gw, b }) => {
-      const before = snapshot(b)
       const a = await gw.call(REFRESH, { name: 'myproxy' })
+      // 快照须取在失败刷新之后：refresh 失败会按既有行为写 meta.lastRefresh（provider_refresh.test.ts 钉着），
+      // 取在刷新前的快照必然对不上。以「刚被 refresh 写过 lastRefresh 的现场」为基线、preview 后逐字节比，
+      // 才能证明 preview 零写入——连 lastRefresh 在内的任何字段都没被动过。
+      const before = snapshot(b)
       const r = await gw.call(PREVIEW, { name: 'myproxy' })
       expect(r.status, `应 502，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(502)
       expect(r.json.error).toBe('fetch_failed')
