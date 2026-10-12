@@ -221,17 +221,24 @@ def test_超过封顶的慢bot按offline返回(monkeypatch):
 
 def test_设了接缝时命令被替换且恒可用(monkeypatch):
     monkeypatch.setenv("HUB_RESTART_CMD", "sh -c 'exit 0'")
-    argv, available = bots_client.restart_plan()
-    assert argv == ["sh", "-c", "exit 0"] and available is True
+    plan = bots_client.restart_plan()
+    assert plan.override == ["sh", "-c", "exit 0"]
+    assert plan.available is True and plan.reason is None
 
 
-def test_未设接缝时构造真实脚本命令且不执行(monkeypatch):
-    """只看命令串长什么样，绝不真跑。"""
+def test_未设接缝时可用性看平台与新系统根_不再构造脚本命令(monkeypatch):
+    """第 2 稿起 launchd 路径取代 restart-bots.sh：未设 HUB_RESTART_CMD 时
+    override 恒 None，可用性由平台与新系统配置根在场决定（§5b）；本夹具把根设为
+    off，所以这里必然不可用，且必须给一句人话。绝不真跑任何东西。"""
     monkeypatch.delenv("HUB_RESTART_CMD", raising=False)
-    argv, available = bots_client.restart_plan()
-    assert argv[0] in ("bash", "powershell")
-    assert argv[-1].endswith(("restart-bots.sh", "restart-bots.ps1"))
-    assert isinstance(available, bool)
+    plan = bots_client.restart_plan()
+    assert plan.available is False and plan.reason and plan.override is None
+
+
+def cmd_runner(argv, timeout=bots_client.RESTART_TIMEOUT):
+    """§5b：覆盖命令路径的 runner 就是包一层既有 _run_command（保持退出码语义）。
+    下面那些用例改的是 job 状态机，命令串照旧由它跑。"""
+    return lambda: bots_client._run_command(argv, timeout)
 
 
 def wait_done(jobs, job_id, deadline=20.0):
@@ -248,7 +255,7 @@ def wait_done(jobs, job_id, deadline=20.0):
 def test_重启全流程成功(tmp_path):
     marker = tmp_path / "ran.txt"
     jobs = bots_client.RestartJobs()
-    acc = jobs.start(["sh", "-c", "echo ran > %s; echo 重启完成了" % marker])
+    acc = jobs.start(cmd_runner(["sh", "-c", "echo ran > %s; echo 重启完成了" % marker]))
     assert re.fullmatch(r"[0-9a-f]{8}", acc.job_id) and acc.busy is None
     assert isinstance(acc.started_at, int)
     st = wait_done(jobs, acc.job_id)
@@ -260,14 +267,14 @@ def test_重启全流程成功(tmp_path):
 
 def test_退出码非0是failed并如实带出(tmp_path):
     jobs = bots_client.RestartJobs()
-    st = wait_done(jobs, jobs.start(["sh", "-c", "exit 3"]).job_id)
+    st = wait_done(jobs, jobs.start(cmd_runner(["sh", "-c", "exit 3"])).job_id)
     assert (st["state"], st["exit_code"]) == ("failed", 3)
 
 
 def test_tail里的Telegram令牌被脱敏():
     """§6.2：restart-bots.sh 会 source channel 的 .env，stderr 可能带出 token。"""
     jobs = bots_client.RestartJobs()
-    st = wait_done(jobs, jobs.start(["sh", "-c", "echo %s >&2; exit 1" % TG_TOKEN]).job_id)
+    st = wait_done(jobs, jobs.start(cmd_runner(["sh", "-c", "echo %s >&2; exit 1" % TG_TOKEN])).job_id)
     assert st["state"] == "failed"
     assert TG_TOKEN not in json.dumps(st, ensure_ascii=False)
     assert "***" in st["tail"], "stderr 根本没被采集：%r" % st["tail"]
@@ -277,7 +284,7 @@ def test_超时后杀掉进程树并标记timeout(tmp_path):
     """真实超时是 180 秒，这里把超时压到秒级验状态机（§6.0 给的第三种典型）。"""
     marker = tmp_path / "child-alive.txt"
     jobs = bots_client.RestartJobs()
-    acc = jobs.start(["sh", "-c", "sleep 30; echo late > %s" % marker], timeout=0.5)
+    acc = jobs.start(cmd_runner(["sh", "-c", "sleep 30; echo late > %s" % marker], timeout=0.5))
     st = wait_done(jobs, acc.job_id, deadline=15.0)
     assert st["state"] == "timeout" and st["exit_code"] is None
     time.sleep(0.3)
@@ -286,11 +293,11 @@ def test_超时后杀掉进程树并标记timeout(tmp_path):
 
 def test_并发重启被互斥挡住并回正在跑的job_id():
     jobs = bots_client.RestartJobs()
-    first = jobs.start(["sh", "-c", "sleep 2"])
-    second = jobs.start(["sh", "-c", "sleep 2"])
+    first = jobs.start(cmd_runner(["sh", "-c", "sleep 2"]))
+    second = jobs.start(cmd_runner(["sh", "-c", "sleep 2"]))
     assert second.job_id is None and second.busy == first.job_id
     wait_done(jobs, first.job_id)
-    third = jobs.start(["true"])                 # 跑完就该放行，不是一辈子只能一次
+    third = jobs.start(cmd_runner(["true"]))      # 跑完就该放行，不是一辈子只能一次
     assert third.job_id and third.job_id != first.job_id
     wait_done(jobs, third.job_id)
 
@@ -299,7 +306,7 @@ def test_job只留最近5条():
     jobs = bots_client.RestartJobs()
     ids = []
     for _ in range(6):
-        acc = jobs.start(["true"])
+        acc = jobs.start(cmd_runner(["true"]))
         ids.append(acc.job_id)
         wait_done(jobs, acc.job_id)
     assert jobs.get(ids[0]) is None, "第 1 条没被挤掉"
@@ -312,9 +319,9 @@ def test_未知job回None():
 
 def test_命令起不来也不会卡死互斥():
     jobs = bots_client.RestartJobs()
-    st = wait_done(jobs, jobs.start(["/does/not/exist"]).job_id)
+    st = wait_done(jobs, jobs.start(cmd_runner(["/does/not/exist"])).job_id)
     assert st["state"] == "failed"
-    assert jobs.start(["true"]).job_id, "失败后互斥没释放"
+    assert jobs.start(cmd_runner(["true"])).job_id, "失败后互斥没释放"
 
 
 # ------------------------------------------------------------ 第 4 段路由
@@ -339,18 +346,20 @@ def test_名单读不出来回500且detail不带路径(client, monkeypatch, tmp_
     assert str(tmp_path) not in body["detail"] and "Traceback" not in body["detail"]
 
 
-def test_脚本缺失回409而不是500(client, monkeypatch):
+def test_重启不可用回409_unsupported而不是500(client, monkeypatch):
     monkeypatch.delenv("HUB_RESTART_CMD", raising=False)
-    monkeypatch.setattr(bots_client, "restart_plan", lambda: (["bash", "x"], False))
+    monkeypatch.setattr(bots_client, "restart_plan",
+                        lambda: bots_client.RestartPlan(False, "这台机器走不了 launchd", None))
     r = client.post("/hub/api/bots/restart")
-    assert r.status_code == 409 and r.get_json()["error"] == "restart_script_missing"
+    assert r.status_code == 409 and r.get_json()["error"] == "restart_unsupported"
 
 
 def test_重启端点不接受GET(client, monkeypatch, tmp_path):
     """反向用例：一次误 GET 不该把用户的 bot 全重启了。故意不设接缝也不该执行任何命令。"""
     marker = tmp_path / "must-not-exist"
     monkeypatch.setattr(bots_client, "restart_plan",
-                        lambda: (["sh", "-c", "touch %s" % marker], True))
+                        lambda: bots_client.RestartPlan(True, None,
+                                                        ["sh", "-c", "touch %s" % marker]))
     assert client.get("/hub/api/bots/restart").status_code == 405
     time.sleep(0.2)
     assert not marker.exists(), "GET 触发了重启"
