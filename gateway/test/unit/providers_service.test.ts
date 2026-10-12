@@ -251,6 +251,84 @@ test('refresh 不带 only：响应加 selected、removed 仍是数组、manual �
   expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['a', 'b', 'd', 'c'])
 })
 
+// ─── §11b 第 8 稿：上游回空目录。带 only 不算失败（判据与 preview 同一个），only 缺省仍是失败 ───
+
+const emptyCatalog = (): FetchModelsResult => ({ ok: false, reason: 'empty', status: null })
+
+test('refresh 带 only、上游回空目录：按拉到 0 个照勾选落盘，勾上的全进 manualModels，记成成功', async () => {
+  const root = tmp()
+  seedPreview(root)
+  let changed = 0
+  const { s, log } = svc(root, emptyCatalog, { now: () => 4242, onChanged: () => changed++ })
+  const r = await s.refresh('myproxy', ['a', 'c', 'zzz-never-seen'])
+  expect(r.status).toBe('ok')
+  if (r.status !== 'ok') return
+  expect(r).toMatchObject({ count: 0, added: 0, removed: ['b'], keptManual: 2, selected: 2, bySelection: true })
+  const e = read(root).valid.myproxy!
+  expect(e.route.models, '只留勾上的本地模型；owner 手填的上下文原样保留').toEqual([{ id: 'a', contextWindow: 5000 }, { id: 'c', contextWindow: 1048576 }])
+  expect(e.meta.manualModels, 'a 原先不是手动的，勾上而上游没有 → 记成手动').toEqual(['a', 'c'])
+  expect(e.meta.guessedContext, '这次没有从上游拿到任何上下文，不凭空标猜测').toEqual([])
+  expect(e.meta.lastRefresh).toEqual({ at: 4242, ok: true, count: 0, reason: null })
+  expect(changed).toBe(1)
+  expect(log.events.filter(ev => ev.event === 'provider.models_failed'), '这一路不是失败，不记失败日志').toEqual([])
+  expect(log.events).toContainEqual({ event: 'provider.models_fetched', name: 'myproxy', count: 0 })
+})
+
+test('refresh 带 only: []、上游回空目录：列表与 manualModels 都清空，仍是成功', async () => {
+  const root = tmp()
+  seedPreview(root)
+  const { s } = svc(root, emptyCatalog)
+  const r = await s.refresh('myproxy', [])
+  expect(r.status).toBe('ok')
+  if (r.status !== 'ok') return
+  expect(r).toMatchObject({ count: 0, added: 0, removed: ['a', 'b', 'c'], keptManual: 0, selected: 0 })
+  expect(read(root).valid.myproxy!.route.models).toEqual([])
+  expect(read(root).valid.myproxy!.meta.manualModels).toEqual([])
+})
+
+test('refresh 不带 only、上游回空目录：仍是失败（reason 为 empty），列表与 manualModels 不动', async () => {
+  const root = tmp()
+  seedPreview(root)
+  const before = read(root).valid.myproxy!
+  const { s, log } = svc(root, emptyCatalog, { now: () => 4242 })
+  const r = await s.refresh('myproxy')
+  expect(r).toEqual({ status: 'failed', name: 'myproxy', reason: 'empty', status2: null })
+  const e = read(root).valid.myproxy!
+  expect(e.route.models).toEqual(before.route.models)
+  expect(e.meta.manualModels).toEqual(before.meta.manualModels)
+  expect(e.meta.lastRefresh).toEqual({ at: 4242, ok: false, count: 3, reason: 'empty' })
+  expect(log.events.some(ev => ev.event === 'provider.models_failed' && ev.reason === 'empty')).toBe(true)
+})
+
+test('refresh 带 only、上游别的失败：照旧是失败，列表不动（放过的只有空目录这一种）', async () => {
+  for (const reason of ['unauthorized', 'server_error', 'network', 'timeout', 'bad_response'] as const) {
+    const root = tmp()
+    seedPreview(root)
+    const before = read(root).valid.myproxy!
+    const { s } = svc(root, () => ({ ok: false, reason, status: null }))
+    const r = await s.refresh('myproxy', ['a'])
+    expect(r, reason).toMatchObject({ status: 'failed', reason })
+    const e = read(root).valid.myproxy!
+    expect(e.route.models, reason).toEqual(before.route.models)
+    expect(e.meta.manualModels, reason).toEqual(before.meta.manualModels)
+    expect(e.meta.lastRefresh, reason).toMatchObject({ ok: false, reason })
+  }
+})
+
+test('空目录的判据 preview 与带 only 的 refresh 一致：预览能开弹窗，照默认勾选点确定也成功', async () => {
+  const root = tmp()
+  seedPreview(root)
+  const { s } = svc(root, emptyCatalog)
+  const pv = await s.preview('myproxy')
+  expect(pv.status).toBe('ok')
+  if (pv.status !== 'ok') return
+  const checked = pv.models.filter(m => m.default_checked).map(m => m.id)
+  expect(checked).toEqual(['c'])
+  const r = await s.refresh('myproxy', checked)
+  expect(r.status).toBe('ok')
+  expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['c'])
+})
+
 test('testConn（§12a）：用列表第一个模型发请求；成功记 provider.tested；请求里带凭据密钥、响应不含', async () => {
   const root = tmp()
   seedPreview(root)
