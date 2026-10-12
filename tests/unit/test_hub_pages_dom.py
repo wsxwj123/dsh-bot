@@ -366,8 +366,9 @@ BOTS, MODEL, ADDBOT = "hub_bots.html", "hub_dsh_model.html", "hub_addbot.html"
 
 
 def _bot_row(bot_id, state):
-    return {"id": bot_id, "display_name": bot_id, "port": 18001, "state": state, "phase": None,
-            "pid": None, "queue_depth": None, "in_flight": None}
+    """列表的一行。状态未知就是端口查不到（port 为 null）。"""
+    return {"id": bot_id, "display_name": bot_id, "port": None if state == "unknown" else 18001,
+            "state": state, "phase": None, "pid": None, "queue_depth": None, "in_flight": None}
 
 
 def _bots_list(rows, disabled=()):
@@ -696,58 +697,88 @@ def test_编辑弹窗_关了再开同一只_重新读取_不沿用上一次的�
 
 
 # ============================================================ §13a 第 7 条：「再停一次」
+# 第 9 稿：停用的行恒有这个按钮，不看 state；启用的行没有。第 8 稿只给停用而在线或启动中的
+# 行，漏了「配置停用、启动项文件还装着、进程此刻没在跑」的那种：那一行显示已停用、离线，
+# 页面上没有同方向再来一次的入口，它一恢复或下次登录就会跑起来。
 
-ROWS = [("on_up", "online"), ("off_up", "online"), ("off_starting", "starting"),
-        ("off_down", "offline"), ("off_unknown", "unknown")]
-OFF = ["off_up", "off_starting", "off_down", "off_unknown"]
-ENABLED_URL = "POST /hub/api/bots/off_up/enabled"
+STATES = ["online", "starting", "offline", "unknown"]          # 列表里 state 的四种取值
+ROWS = [("on_" + st, st) for st in STATES] + [("off_" + st, st) for st in STATES]
+OFF = ["off_" + st for st in STATES]
+ROW_OF = {bot_id: i for i, (bot_id, _) in enumerate(ROWS)}
+RESTART_ALL = "POST /hub/api/bots/restart"
+JOB = "GET /hub/api/bots/restart/abcd1234"
+STARTED = {"ok": True, "enabled": False, "sync": {"state": "started", "job_id": "abcd1234", "started_at": 1}}
 
 
-def test_bot状态页_再停一次只出现在停用而进程还在的行(tmp_path):
+def _enabled_url(bot_id):
+    return "POST /hub/api/bots/%s/enabled" % bot_id
+
+
+def _again(bot_id):
+    """点这只 bot 那一行的「再停一次」。"""
+    return {"op": "click", "in": "bot-rows", "row": ROW_OF[bot_id], "text": "再停一次"}
+
+
+def test_bot状态页_再停一次_停用的行不管什么状态都有_启用的行都没有(tmp_path):
     out = _run(tmp_path, BOTS, [_snap("s", rows=["bot-rows"])], auto=[_bots_list(ROWS, OFF)])
     buttons = {row["cells"][0]: [b["text"] for b in row["buttons"]] for row in out["s"]["rows"]["bot-rows"]}
-    assert buttons == {
-        "on_up": ["编辑", "重启", "停止"],                    # 启用的：没有
-        "off_up": ["编辑", "再停一次", "启用"],               # 停用、在线：有
-        "off_starting": ["编辑", "再停一次", "启用"],         # 停用、启动中：有
-        "off_down": ["编辑", "启用"],                         # 停用、离线：没有
-        "off_unknown": ["编辑", "启用"],
-    }
+    want = {"on_" + st: ["编辑", "重启", "停止"] for st in STATES}                # 启用的：四种状态都没有
+    want.update({"off_" + st: ["编辑", "再停一次", "启用"] for st in STATES})     # 停用的：四种状态都有
+    assert buttons == want
 
 
-def test_bot状态页_点再停一次_确认框与停止相同_只对这一只再交一次停用(tmp_path):
-    started = {"ok": True, "enabled": False, "sync": {"state": "started", "job_id": "abcd1234", "started_at": 1}}
+@pytest.mark.parametrize("state", STATES)
+def test_bot状态页_点再停一次_确认框与停止相同_只对这一只再交一次停用_不发重启全部(tmp_path, state):
+    """离线与状态未知的两行是第 9 稿才有这个按钮的，点了之后走的路与在线的行逐字相同。"""
+    bot, url = "off_" + state, _enabled_url("off_" + state)
     out = _run(tmp_path, BOTS, [
-        {"op": "clear"},
-        {"op": "click", "in": "bot-rows", "row": 1, "text": "再停一次"},
-        _respond(ENABLED_URL, 200, started), _snap("s", "restart-msg"),
+        {"op": "clear"}, _again(bot), _respond(url, 200, STARTED), _snap("s", "restart-msg"),
     ], auto=[_bots_list(ROWS, OFF)])
-    assert out["s"]["confirms"] == ["停止 off_up？只停这一只，别的 bot 不受影响；它正在处理的对话会被打断。"]
-    assert out["s"]["requests"][0] == {"req": ENABLED_URL, "body": {"enabled": False}}
-    assert [r["req"] for r in out["s"]["requests"]] == [
-        ENABLED_URL, "GET /hub/api/bots", "GET /hub/api/bots/restart/abcd1234"]
-    assert "POST /hub/api/bots/restart" not in [r["req"] for r in out["s"]["requests"]]
-    assert out["s"]["els"]["restart-msg"]["text"] == "off_up 的配置已改成停用，正在同步这一只…"
+    assert out["s"]["confirms"] == ["停止 %s？只停这一只，别的 bot 不受影响；它正在处理的对话会被打断。" % bot]
+    assert out["s"]["requests"][0] == {"req": url, "body": {"enabled": False}}
+    assert [r["req"] for r in out["s"]["requests"]] == [url, "GET /hub/api/bots", JOB]
+    assert RESTART_ALL not in [r["req"] for r in out["s"]["requests"]]
+    assert out["s"]["els"]["restart-msg"]["text"] == "%s 的配置已改成停用，正在同步这一只…" % bot
+
+
+@pytest.mark.parametrize("state", ["offline", "unknown"])
+def test_bot状态页_对已经停干净的行再停一次_走到底显示同步完成已停止(tmp_path, state):
+    """停用同步是幂等的：后端照样登记一个任务，末行是「<id> 已停止」。页面把它原样说出来。"""
+    bot, url = "off_" + state, _enabled_url("off_" + state)
+    done = {"state": "done", "exit_code": None, "took_ms": 1, "tail": "重启 1 只：成功 1\n%s 已停止\n" % bot}
+    out = _run(tmp_path, BOTS, [
+        {"op": "clear"}, _again(bot), _respond(url, 200, STARTED), _respond(JOB, 200, done),
+        _snap("s", "restart-msg", rows=["bot-rows"]),
+    ], auto=[_bots_list(ROWS, OFF)])
+    assert out["s"]["els"]["restart-msg"]["text"] == "同步完成：%s 已停止" % bot
+    reqs = [r["req"] for r in out["s"]["requests"]]
+    assert reqs == [url, "GET /hub/api/bots", JOB, "GET /hub/api/bots"]
+    assert RESTART_ALL not in reqs
+    assert "再停一次" in [b["text"] for b in out["s"]["rows"]["bot-rows"][ROW_OF[bot]]["buttons"]], \
+        "它是停用行上的固定入口，停完之后还在"
 
 
 def test_bot状态页_再停一次的确认框点了取消_一个请求都不发(tmp_path):
     out = _run(tmp_path, BOTS, [
-        {"op": "clear"}, {"op": "confirm", "answer": False},
-        {"op": "click", "in": "bot-rows", "row": 1, "text": "再停一次"}, _snap("s", "restart-msg"),
+        {"op": "clear"}, {"op": "confirm", "answer": False}, _again("off_offline"), _snap("s", "restart-msg"),
     ], auto=[_bots_list(ROWS, OFF)])
     assert len(out["s"]["confirms"]) == 1 and out["s"]["requests"] == []
 
 
 def test_bot状态页_再停一次又被挡住_提示仍指回这一行的再停一次(tmp_path):
+    """第 9 稿要堵的那个口子：停用被别的任务挡住之后这一行是已停用、离线，按钮得在。"""
+    bot = "off_offline"
     busy = {"ok": True, "enabled": False, "sync": {"state": "busy", "job_id": "abcd1234"}}
     out = _run(tmp_path, BOTS, [
-        {"op": "click", "in": "bot-rows", "row": 1, "text": "再停一次"},
-        _respond(ENABLED_URL, 200, busy), _snap("s", "restart-msg", rows=["bot-rows"]),
+        {"op": "clear"}, _again(bot), _respond(_enabled_url(bot), 200, busy),
+        _snap("s", "restart-msg", rows=["bot-rows"]),
     ], auto=[_bots_list(ROWS, OFF)])
     assert out["s"]["els"]["restart-msg"]["text"] == (
-        "off_up 的配置已改成停用，但这一只还没停下来：有别的重启任务正在跑。"
+        "off_offline 的配置已改成停用，但这一只还没停下来：有别的重启任务正在跑。"
         "等它结束后刷新，在这一行点「再停一次」。")
-    assert "再停一次" in [b["text"] for b in out["s"]["rows"]["bot-rows"][1]["buttons"]], \
+    assert [r["req"] for r in out["s"]["requests"]] == [_enabled_url(bot), "GET /hub/api/bots"], \
+        "被挡住之后不轮询、不再发请求"
+    assert "再停一次" in [b["text"] for b in out["s"]["rows"]["bot-rows"][ROW_OF[bot]]["buttons"]], \
         "提示让用户点的那个按钮，重拉之后得还在那一行"
 
 
