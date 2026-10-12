@@ -3,6 +3,9 @@
 
 F1 的解法：开关触发的同步不受 `bot_disabled` 拒绝规则约束 ——
 「停用」方向要走 bootout，若实现误用 §4 的拒绝规则，停用会永远停不下来。
+
+第 6 稿起这个端点只对新系统的 bot 开放。放行闸的逐类情形、判定顺序、同名时的同步方向
+在 test_enabled_gate.py；本文件是主干路径与形状错。
 """
 import json
 import os
@@ -96,20 +99,25 @@ def test_开关_重复同方向_幂等且都200(client, sandbox, launchctl, as_d
 
 # ------------------------------------------------------------ 同步的去向
 
-def test_开关_legacy的bot_写盘但skipped_legacy且覆盖命令也不执行(
+def test_开关_旧系统的bot_404且不写盘_覆盖命令也不执行(
         client, sandbox, monkeypatch):
-    """旧系统的东西一律不碰：即使设了 HUB_RESTART_CMD 也只写盘、不同步。"""
+    """旧系统的东西一律不碰（第 6 稿 §4b）：入口处 404，配置文件不写，设了 HUB_RESTART_CMD 也不执行。
+
+    第 5 稿这里的预期是「200 + 写盘 + sync skipped/legacy」，那条约定作废。
+    """
     yml = u.write_bot_yml(sandbox.legacy_cfg, "chenlulu", display_name="陈璐璐",
                           dispatcher_port=17899)
+    before = yml.read_bytes()
     marker = sandbox.tmp / "must-not-run"
     monkeypatch.setenv("HUB_RESTART_CMD",
                        u.python_cmd("import os;open(os.environ['BOTOPS_MARKER'],'w')"))
     monkeypatch.setenv("BOTOPS_MARKER", str(marker))
     r = _post(client, "chenlulu", False)
-    assert r.status_code == 200, r.get_json()
+    assert r.status_code == 404, r.get_json()
     body = r.get_json()
-    assert body["sync"] == {"state": "skipped", "reason": "legacy"}, body
-    assert u.read_yaml(yml)["enabled"] is False, "写盘没发生"
+    assert body["error"] == "bot_not_found", body
+    assert "sync" not in body, body
+    assert yml.read_bytes() == before, "旧系统 bot 的配置文件被写了"
     assert not marker.exists(), "旧系统的 bot 被同步动作碰到了"
 
 
