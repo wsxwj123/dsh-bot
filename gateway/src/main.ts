@@ -15,7 +15,7 @@ import { isGroupChat } from './telegram/inbound'
 import { Poller } from './telegram/poller'
 import { Sender } from './telegram/sender'
 import { addNoProxyHosts, ensureSecretFile, sleep, writeAtomic } from './util'
-import { fetchModels } from './providers/models'
+import { fetchModels, probeModel } from './providers/models'
 import { ProviderService } from './providers/service'
 import { ProviderCommands } from './providers/commands'
 import { registerCredentialSecrets } from './providers/store'
@@ -95,6 +95,7 @@ async function main(): Promise<void> {
   const service = new ProviderService({
     root: cfg.root, credentialsPath: cfg.credentialsPath, log,
     fetchModels: req => fetchModels(req, { timeoutMs: cfg.gw.modelFetchTimeoutMs }),
+    probeModel: req => probeModel(req, { timeoutMs: cfg.gw.modelFetchTimeoutMs }),
     lockWaitMs: cfg.gw.providerLockWaitMs, keyGraceMs: cfg.gw.providerKeyGraceMs,
     configRouteKeys: () => Object.values(cfg.brain.routes).map(r => r.apiKeyEnv).filter((k): k is string => !!k),
     onChanged: () => engine!.reloadProvidersNow(),
@@ -165,7 +166,9 @@ async function main(): Promise<void> {
     // （与 Telegram 同一套存储、同一把锁、同一套校验），ApiServer 只做 HTTP 转发
     provider: {
       views: () => engine!.providerViews(),
-      refresh: name => commands.apiRefresh(name),
+      refresh: (name, only) => commands.apiRefresh(name, only),
+      preview: name => commands.apiPreview(name),
+      test: name => commands.apiTest(name),
       detail: () => commands.apiDetail(),
       save: body => commands.apiSave(body),
       remove: body => commands.apiRemove(body?.name),

@@ -8,7 +8,7 @@ import {
   readProviders, setCredentialRef, writeProviders, ProvidersLockTimeout, ProvidersUnreadable, withProvidersLock,
   type ProviderApi, type ProviderEntry, type PendingKeyRemoval, type ProviderMeta, type ProviderModel, type ProviderRoute, type ProvidersSnapshot,
 } from './store'
-import type { FetchedModel, FetchFailReason, FetchModelsFn, FetchModelsResult } from './models'
+import type { FetchedModel, FetchFailReason, FetchModelsFn, FetchModelsResult, ProbeModelFn } from './models'
 
 export type ServiceDeps = {
   root: string
@@ -16,6 +16,8 @@ export type ServiceDeps = {
   log: Logger
   /** 已绑定好超时与 fetch 的拉列表函数（models.ts） */
   fetchModels: FetchModelsFn
+  /** 已绑定好超时与 fetch 的最小对话请求（INTERFACE §12a 的测试连接，models.ts） */
+  probeModel: ProbeModelFn
   now?: () => number
   lockWaitMs: number
   keyGraceMs: number
@@ -34,9 +36,16 @@ export type SaveResult =
   | { status: 'unsupported'; why: string }
   | { status: 'gone'; name: string }
 
+/** 拉取失败的形状（refresh 与 preview 共用，文案也共用） */
+export type RefreshFailure = { status: 'failed'; name: string; reason: FetchFailReason; status2: number | null; seconds?: number }
+
 export type RefreshResult =
-  | { status: 'ok'; name: string; count: number; added: number; removed: string[]; keptManual: number }
-  | { status: 'failed'; name: string; reason: FetchFailReason; status2: number | null; seconds?: number }
+  | { status: 'ok'; name: string; count: number; added: number; removed: string[]; keptManual: number
+      /** 落盘后列表长度（INTERFACE §11b：缺省 only 时也给） */
+      selected: number
+      /** 本次是否带 only 落盘（文案尾部追加「（按勾选保留 S 个）」、响应 removed 形状按此分岔） */
+      bySelection: boolean }
+  | RefreshFailure
   | { status: 'not_found' }
   | { status: 'disabled' }
   | { status: 'key_missing' }
@@ -44,6 +53,26 @@ export type RefreshResult =
   | { status: 'changed'; name: string }
   | { status: 'busy'; name: string }
   | { status: 'lock_timeout' }
+  | { status: 'unreadable' }
+
+/** POST /v1/provider/preview 的行（INTERFACE §11a，恒 6 键） */
+export type PreviewRow = { id: string; contextWindow: number | null; in_list: boolean; in_fetched: boolean; manual: boolean; default_checked: boolean }
+export type PreviewResult =
+  | { status: 'ok'; name: string; count: number; models: PreviewRow[] }
+  | RefreshFailure
+  | { status: 'not_found' }
+  | { status: 'disabled' }
+  | { status: 'key_missing' }
+  | { status: 'unreadable' }
+
+/** POST /v1/provider/test 的结果（INTERFACE §12a） */
+export type TestConnResult =
+  | { status: 'ok'; name: string; model: string; latencyMs: number }
+  | { status: 'failed'; name: string; model: string; reason: FetchFailReason; status2: number | null; seconds?: number }
+  | { status: 'not_found' }
+  | { status: 'disabled' }
+  | { status: 'key_missing' }
+  | { status: 'no_models' }
   | { status: 'unreadable' }
 
 export type ModelEditResult =
@@ -225,8 +254,104 @@ export class ProviderService {
     return { models: out, guessed }
   }
 
-  /** 刷新模型列表：锁外拉（key 从凭据现读，读不到 = key_missing）→ 锁内比对 baseURL/api/keyRev 后写 */
-  async refresh(name: string): Promise<RefreshResult> {
+  /**
+   * 带 only 的落盘集合（INTERFACE §11b）：（本次拉到的 ∩ only）∪（当前列表 ∩ only），先拉到的
+   * （上游顺序）后仅本地的（当前列表顺序）。勾上而本次没拉到的留在列表里并粘进 manualModels；
+   * 被弃选的旧手动模型从 manualModels 移除；only 里两边都没有的 id 静默忽略。
+   */
+  private buildSelected(fetched: FetchedModel[], entry: ProviderEntry, only: string[]): { models: ProviderModel[]; guessed: string[]; manual: string[] } {
+    const onlySet = new Set(only)
+    const owner = new Set(entry.meta.ownerContext ?? [])
+    const oldManual = new Set(entry.meta.manualModels ?? [])
+    const existingById = new Map(entry.route.models.map(m => [m.id, m]))
+    const out: ProviderModel[] = []
+    const seen = new Set<string>()
+    const sticky = new Set<string>()
+    for (const f of fetched) {
+      if (!onlySet.has(f.id) || seen.has(f.id)) continue
+      seen.add(f.id)
+      const keep = existingById.get(f.id)
+      const ctx = owner.has(f.id) && keep ? keep.contextWindow : (f.contextWindow ?? DEFAULT_CONTEXT)
+      out.push({ id: f.id, contextWindow: ctx })
+    }
+    for (const m of entry.route.models) {
+      if (!onlySet.has(m.id) || seen.has(m.id)) continue
+      seen.add(m.id)
+      sticky.add(m.id)
+      out.push(existingById.get(m.id) ?? { id: m.id, contextWindow: DEFAULT_CONTEXT })
+    }
+    const guessed = out.filter(m => !owner.has(m.id) && fetched.some(f => f.id === m.id && f.contextWindow === null)).map(m => m.id)
+    const manual = out.filter(m => sticky.has(m.id) || oldManual.has(m.id)).map(m => m.id)
+    return { models: out, guessed, manual }
+  }
+
+  /**
+   * POST /v1/provider/preview（INTERFACE §11a）：只拉不写——不写 providers.json、不动 lastRefresh、
+   * 不调 onChanged、不占 refreshing 去重。拉到 0 个模型也算成功（models 只含仅本地的行）。
+   */
+  async preview(name: string): Promise<PreviewResult> {
+    let snap: ProvidersSnapshot
+    try { snap = this.read() } catch { return { status: 'unreadable' } }
+    const found = this.byNorm(snap, name)
+    if (!found) return this.isInvalid(snap, name) ? { status: 'disabled' } : { status: 'not_found' }
+    const secret = crebByEnv(this.safeRefs(), found.entry.route.apiKeyEnv)
+    if (!secret) return { status: 'key_missing' }
+    const res: FetchModelsResult = await this.d.fetchModels({ api: found.entry.route.api, baseURL: found.entry.route.baseURL, key: secret })
+    // 拉到 0 个（empty）在 preview 里不是失败：200 + 只含仅本地的行（§11a）
+    if (!res.ok && res.reason !== 'empty') {
+      this.d.log.warn('provider.models_failed', { name: found.name, reason: res.reason, status: res.status })
+      return { status: 'failed', name: found.name, reason: res.reason, status2: res.status, ...(res.seconds !== undefined ? { seconds: res.seconds } : {}) }
+    }
+    const fetched = res.ok ? res.models : []
+    this.d.log.info('provider.models_fetched', { name: found.name, count: fetched.length })
+    const listById = new Map(found.entry.route.models.map(m => [m.id, m]))
+    const manual = new Set(found.entry.meta.manualModels)
+    const rows: PreviewRow[] = []
+    const seen = new Set<string>()
+    for (const f of fetched) {
+      if (seen.has(f.id)) continue
+      seen.add(f.id)
+      rows.push({ id: f.id, contextWindow: f.contextWindow, in_list: listById.has(f.id), in_fetched: true, manual: manual.has(f.id), default_checked: true })
+    }
+    for (const m of found.entry.route.models) {
+      if (seen.has(m.id)) continue
+      seen.add(m.id)
+      const isManual = manual.has(m.id)
+      rows.push({ id: m.id, contextWindow: m.contextWindow, in_list: true, in_fetched: false, manual: isManual, default_checked: isManual })
+    }
+    return { status: 'ok', name: found.name, count: fetched.length, models: rows }
+  }
+
+  /**
+   * POST /v1/provider/test（INTERFACE §12a）：真发一次最小对话请求（route.models[0]），只读——不写
+   * providers.json、不动 lastRefresh、不调 onChanged、不占 refreshing、不写凭据；日志不带密钥、地址、上游正文。
+   */
+  async testConn(name: string): Promise<TestConnResult> {
+    let snap: ProvidersSnapshot
+    try { snap = this.read() } catch { return { status: 'unreadable' } }
+    const found = this.byNorm(snap, name)
+    if (!found) return this.isInvalid(snap, name) ? { status: 'disabled' } : { status: 'not_found' }
+    const secret = crebByEnv(this.safeRefs(), found.entry.route.apiKeyEnv)
+    if (!secret) return { status: 'key_missing' }
+    const first = found.entry.route.models[0]
+    if (!first) return { status: 'no_models' }
+    const started = this.now()
+    const res = await this.d.probeModel({ api: found.entry.route.api, baseURL: found.entry.route.baseURL, model: first.id, key: secret })
+    const latencyMs = Math.max(0, Math.round(this.now() - started))
+    if (!res.ok) {
+      this.d.log.warn('provider.test_failed', { name: found.name, reason: res.reason, status: res.status })
+      return { status: 'failed', name: found.name, model: first.id, reason: res.reason, status2: res.status, ...(res.seconds !== undefined ? { seconds: res.seconds } : {}) }
+    }
+    this.d.log.info('provider.tested', { name: found.name })
+    return { status: 'ok', name: found.name, model: first.id, latencyMs }
+  }
+
+  /**
+   * 刷新模型列表：锁外拉（key 从凭据现读，读不到 = key_missing）→ 锁内比对 baseURL/api/keyRev 后写。
+   * only 给出时按勾选落盘（INTERFACE §11b：落盘 =（拉到的 ∩ only）∪（列表 ∩ only），勾上而本次没
+   * 拉到的并入 manualModels）；only 缺省时行为与扩展前一字不变。
+   */
+  async refresh(name: string, only?: string[]): Promise<RefreshResult> {
     const key = normName(name)
     let snap: ProvidersSnapshot
     try { snap = this.read() } catch { return { status: 'unreadable' } }
@@ -267,20 +392,26 @@ export class ProviderService {
         if (e.entry.route.baseURL !== before.route.baseURL || e.entry.route.api !== before.route.api || e.entry.meta.keyRev !== before.meta.keyRev) {
           return { status: 'changed', name: found.name } as RefreshResult
         }
-        const built = this.buildModels(res.models, e.entry, null)
+        // only 缺省：与扩展前同一套（拉到的 + 手动加的，manual 不动）；带 only：按勾选集合算（§11b）
+        const built: { models: ProviderModel[]; guessed: string[]; manual: string[] } = only === undefined
+          ? { ...this.buildModels(res.models, e.entry, null), manual: e.entry.meta.manualModels }
+          : this.buildSelected(res.models, e.entry, only)
         const beforeIds = new Set(e.entry.route.models.map(m => m.id))
         const afterIds = new Set(built.models.map(m => m.id))
-        // <N> 和 lastRefresh.count 都指"拉到的个数"（手动加的另算保留），新增/去掉按拉到的与旧列表比
+        // <N> 和 lastRefresh.count 都指"拉到的个数"（手动加的另算保留），新增/去掉按落盘集合与旧列表比
         const fetchedCount = res.models.length
-        const added = res.models.filter(m => !beforeIds.has(m.id)).length
+        const added = built.models.filter(m => !beforeIds.has(m.id)).length
         const removed = e.entry.route.models.filter(m => !afterIds.has(m.id)).map(m => m.id)
-        const meta = { ...e.entry.meta, updatedAt: this.now(), guessedContext: built.guessed, lastRefresh: { at: this.now(), ok: true, count: fetchedCount, reason: null } }
+        const meta = { ...e.entry.meta, updatedAt: this.now(), guessedContext: built.guessed, manualModels: built.manual, lastRefresh: { at: this.now(), ok: true, count: fetchedCount, reason: null } }
         const route = { ...e.entry.route, models: built.models }
         const rawList = cur.raw.providers as Record<string, unknown>
         const raw = { ...cur.raw, providers: { ...rawList, [e.name]: this.withKnownEntry(rawList[e.name], { route, meta }) } }
         writeProviders(this.providersPath(), raw)
         this.d.onChanged?.()
-        return { status: 'ok', name: e.name, count: fetchedCount, added, removed, keptManual: e.entry.meta.manualModels.length } as RefreshResult
+        return {
+          status: 'ok', name: e.name, count: fetchedCount, added, removed,
+          keptManual: built.manual.length, selected: built.models.length, bySelection: only !== undefined,
+        } as RefreshResult
       })
     } catch (e) {
       if (e instanceof ProvidersLockTimeout) return { status: 'lock_timeout' }

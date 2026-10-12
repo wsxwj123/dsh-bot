@@ -5,7 +5,7 @@ import type { Server } from 'bun'
 import { loadAccess } from '../config'
 import type { Ledger } from '../ledger'
 import { safeError, type Logger } from '../log'
-import { isProviderName } from '../providers/store'
+import { cleanModelId, isProviderName } from '../providers/store'
 import { allowedFile, describeResults, type Sender } from '../telegram/sender'
 import { randomToken, safeEqual } from '../util'
 
@@ -29,7 +29,12 @@ export type ApiDeps = {
    */
   provider?: {
     views: () => Promise<ProviderViewLike[]>
-    refresh: (name: string) => Promise<{ status: number; body: unknown }>
+    /** only 给出时按勾选落盘（INTERFACE §11b）；缺省时行为与扩展前一字不变 */
+    refresh: (name: string, only?: string[]) => Promise<{ status: number; body: unknown }>
+    /** POST /v1/provider/preview：只拉不写的预览（§11a） */
+    preview: (name: string) => Promise<{ status: number; body: unknown }>
+    /** POST /v1/provider/test：发一次最小对话请求测连接（§12a） */
+    test: (name: string) => Promise<{ status: number; body: unknown }>
     /** GET /v1/provider：自建供应商详情（含地址与模型清单，绝不含密钥） */
     detail: () => Promise<{ status: number; body: unknown }>
     /** POST /v1/provider/save：新建 / 更新（含密钥），mode=modify 时 key 可省 */
@@ -119,6 +124,8 @@ export class ApiServer {
           return json(r, r.ok ? 200 : 400)
         }
         case '/v1/provider/refresh': return await this.providerRefresh(body)
+        case '/v1/provider/preview': return await this.providerNamed(body, 'preview')
+        case '/v1/provider/test': return await this.providerNamed(body, 'test')
         // 写操作（3.2 到 3.5）：判定、校验、错误码映射都在 ProviderCommands 里一处写，这里只转发
         case '/v1/provider/save': return await this.providerWrite('save', body)
         case '/v1/provider/remove': return await this.providerWrite('remove', body)
@@ -139,15 +146,37 @@ export class ApiServer {
     return { ...info, providers }
   }
 
-  /** POST /v1/provider/refresh：名字先按 3.1.1 的格式筛掉，再交给 ProviderCommands 的刷新 */
+  /**
+   * POST /v1/provider/refresh：名字先按 3.1.1 的格式筛掉，再交给 ProviderCommands 的刷新。
+   * only 给出时先在这里校验（§11b）：模型名数组、每项与 cleanModelId 同一把尺、最多 1000 项，
+   * 任一不合规一律 400 零副作用（不拉取、不写盘）；缺省时不碰既有路径。
+   */
   private async providerRefresh(body: Record<string, unknown>): Promise<Response> {
     const name = body.name
     if (typeof name !== 'string' || !isProviderName(name)) {
       return json({ ok: false, error: 'bad_name', text: '供应商名字不合法' }, 400)
     }
     if (!this.d.provider) return json({ ok: false, error: 'internal error' }, 500)
-    const r = await this.d.provider.refresh(name)
+    let only: string[] | undefined
+    if (body.only !== undefined) {
+      if (!Array.isArray(body.only) || body.only.length > 1000 || body.only.some(m => cleanModelId(m) === null)) {
+        return json({ ok: false, error: 'bad_only', text: 'only 必须是模型名数组' }, 400)
+      }
+      only = body.only as string[]
+    }
+    const r = await this.d.provider.refresh(name, only)
     return json(r.body, r.status)
+  }
+
+  /** POST /v1/provider/preview 与 /v1/provider/test：同一套名字筛（§11a/§12a），其余交给命令层 */
+  private async providerNamed(body: Record<string, unknown>, op: 'preview' | 'test'): Promise<Response> {
+    const name = body.name
+    if (typeof name !== 'string' || !isProviderName(name)) {
+      return json({ ok: false, error: 'bad_name', text: '供应商名字不合法' }, 400)
+    }
+    const fn = this.d.provider?.[op]
+    if (!fn) return json({ ok: false, error: 'internal error' }, 500)
+    return this.reply(await fn(name))
   }
 
   /** 命令层给的 {status, body} 直接成响应 */

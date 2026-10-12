@@ -17,6 +17,11 @@ export type FetchModelsResult =
 /** 装配时绑定好超时设置后注入 ProviderService 的形状 */
 export type FetchModelsFn = (req: FetchModelsRequest) => Promise<FetchModelsResult>
 
+/** 测试连接（INTERFACE-新系统bot运维 §12a）：发一次最小对话请求，只看状态与回包是不是 JSON，不解析内容 */
+export type ProbeModelRequest = { api: ProviderApi; baseURL: string; model: string; key: string }
+export type ProbeModelResult = { ok: true } | { ok: false; reason: FetchFailReason; status: number | null; seconds?: number }
+export type ProbeModelFn = (req: ProbeModelRequest) => Promise<ProbeModelResult>
+
 export const MAX_MODEL_IDS = 1000
 export const MAX_MODEL_PAGES = 5
 export const MAX_LIST_BYTES = 4 * 1024 * 1024
@@ -102,6 +107,75 @@ export async function fetchModels(req: FetchModelsRequest, o: { timeoutMs: numbe
   } finally {
     clearTimeout(overallTimer)
   }
+}
+
+/**
+ * POST /v1/provider/test 用：按接口格式发一次最小对话请求（§12a）。
+ * - 与 fetchModels 同一把尺：失败只有原因枚举与状态码，绝不带密钥、地址、对方回包正文；
+ * - 判据 = HTTP 200 且回包是 JSON（不解析内容）；3xx 按 redirect（redirect:'manual'）；
+ * - 超时是单次上限（无翻页，不乘 3）；
+ * - openai 系地址 pathname 为 / 且首次 401/404 时在 /v1 下重试一次（同 fetchModels 的回落）。
+ */
+export async function probeModel(req: ProbeModelRequest, o: { timeoutMs: number; fetch?: typeof fetch }): Promise<ProbeModelResult> {
+  const doFetch = o.fetch ?? fetch
+  const path = req.api === 'anthropic-messages' ? '/v1/messages' : req.api === 'openai-responses' ? '/responses' : '/chat/completions'
+  const headers: Record<string, string> = req.api === 'anthropic-messages'
+    ? { 'x-api-key': req.key, 'anthropic-version': '2023-06-01', Accept: 'application/json' }
+    : { Authorization: `Bearer ${req.key}`, Accept: 'application/json' }
+  const body = req.api === 'openai-responses'
+    ? { model: req.model, max_output_tokens: 16, input: 'ping' }
+    : { model: req.model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }
+
+  const post = async (url: string): Promise<void> => {
+    const one = AbortSignal.timeout(o.timeoutMs)
+    try {
+      const res = await doFetch(url, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body), redirect: 'manual', signal: one })
+      const fail = probeStatusFail(res)
+      if (fail) { await res.body?.cancel().catch(() => {}); throw fail }
+      const text = await readLimited(res)
+      try { JSON.parse(text) } catch { throw new Fail('bad_response', res.status) }
+    } catch (e) {
+      if (e instanceof Fail) throw e
+      if (one.aborted) throw new Fail('timeout', null, seconds(o.timeoutMs))
+      throw new Fail('network') // 连不上、证书错、连接被掐断：不带底层错误（里面有地址）
+    }
+  }
+
+  const failOf = (e: Fail): ProbeModelResult => ({ ok: false, reason: e.reason, status: e.status, ...(e.seconds !== undefined ? { seconds: e.seconds } : {}) })
+  try {
+    await post(`${req.baseURL}${path}`)
+    return { ok: true }
+  } catch (e) {
+    // 地址只有域名时常见的是少写了 /v1：401、404 再在 /v1 下试一次（§12a）
+    if (req.api !== 'anthropic-messages' && e instanceof Fail && ['unauthorized', 'not_found'].includes(e.reason) && pathnameOf(req.baseURL) === '/') {
+      try {
+        await post(`${req.baseURL}/v1${path}`)
+        return { ok: true }
+      } catch (e2) {
+        return e2 instanceof Fail ? failOf(e2) : { ok: false, reason: 'network', status: null }
+      }
+    }
+    return e instanceof Fail ? failOf(e) : { ok: false, reason: 'network', status: null }
+  }
+}
+
+function pathnameOf(url: string): string {
+  try { return new URL(url).pathname } catch { return '' }
+}
+
+/**
+ * 测试连接的状态分类（§12a）。与 fetchModels 的 statusFail 有一处刻意不同：403 不是
+ * unauthorized 而是 http_error（拉名单时 403 = 没权限看目录；发对话时 403 = 对方的其它拒绝）。
+ */
+function probeStatusFail(res: Response): Fail | null {
+  const s = res.status
+  if (res.type === 'opaqueredirect' || (s >= 300 && s < 400)) return new Fail('redirect', s >= 300 ? s : null)
+  if (s >= 200 && s < 300) return null
+  if (s === 401) return new Fail('unauthorized', s)
+  if (s === 404) return new Fail('not_found', s)
+  if (s === 429) return new Fail('rate_limited', s)
+  if (s >= 500) return new Fail('server_error', s)
+  return new Fail('http_error', s)
 }
 
 /** 失败原因给主人看的话（方案 3.7 的表）；不含密钥、地址、对方回包正文 */

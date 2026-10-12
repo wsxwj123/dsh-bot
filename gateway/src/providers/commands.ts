@@ -4,16 +4,20 @@
 // - `/provider add` 的识别排在引导拦截与群聊"只记录"之前（poller.interceptBeforeGate）：任何聊天、任何人发来都先接走。
 import {
   checkBaseURL, checkProviderName, cleanModelId, cleanSecret, DEFAULT_CONTEXT, hostOf, isContextWindow, isProviderName,
-  NAME_FORMAT_WHY, normName, providersPath, readProviders, ProvidersUnreadable, RESERVED, type ProviderApi, type ProvidersSnapshot,
+  NAME_FORMAT_WHY, normName, providersPath, readProviders, ProvidersUnreadable, RESERVED, type ProviderApi, type ProviderEntry, type ProvidersSnapshot,
 } from './store'
 import { deleteMessageWithRetry, type TelegramApi, type TgMessage } from '../telegram/api'
 import { registerSecret, safeError, type Logger } from '../log'
 import { fetchFailText, TRUNCATED_NOTE } from './models'
-import type { ProviderService, RefreshResult, SaveResult } from './service'
+import type { PreviewResult, ProviderService, RefreshResult, SaveResult, TestConnResult } from './service'
 import { effortLabel } from '../wizard/text'
 
 /** 本机接口 `POST /v1/provider/refresh` 的返回（方案 3.8）：HTTP 状态码 + 机读错误码 + 文案 */
-export type ApiRefreshResult = { status: number; body: { ok: boolean; error?: string; reason?: string; count?: number; added?: number; removed?: number; kept_manual?: number; text: string } }
+export type ApiRefreshResult = { status: number; body: {
+  ok: boolean; error?: string; reason?: string; count?: number; added?: number
+  /** only 缺省：去掉的个数（既有形状）；带 only：被去掉的 id 数组（INTERFACE §11b） */
+  removed?: number | string[]; kept_manual?: number; selected?: number; text: string
+} }
 
 /** 本机接口（INTERFACE-管理台UI 第 3 节）的统一返回：HTTP 状态码 + 契约里的正文 */
 export type ApiResult = { status: number; body: unknown }
@@ -487,42 +491,19 @@ export class ProviderCommands {
   }
 
   /**
-   * 本机接口的 `POST /v1/provider/refresh`（方案 3.8）：与 `/provider refresh` 同一套流程，
-   * 但把结果翻成 HTTP 状态码 + 机读错误码的契约。text 去掉「【系统】」前缀，其余同 3.6 的回复。
+   * 本机接口的 `POST /v1/provider/refresh`（方案 3.8；only 扩展见 INTERFACE §11b）：与 `/provider refresh`
+   * 同一套流程，但把结果翻成 HTTP 状态码 + 机读错误码的契约。text 去掉「【系统】」前缀，其余同 3.6 的回复。
+   * only 缺省时响应与扩展前一字不变（removed 仍是数字）；带 only 时 removed 给被去掉的 id 数组。
    */
-  async apiRefresh(name: string): Promise<ApiRefreshResult> {
+  async apiRefresh(name: string, only?: string[]): Promise<ApiRefreshResult> {
     const noPrefix = (t: string) => t.replace(/^【系统】/, '')
-    const root = this.root()
-    let snap
-    try {
-      snap = readProviders(`${root}/providers.json`)
-    } catch (e) {
-      if (e instanceof ProvidersUnreadable) {
-        return { status: 503, body: { ok: false, error: 'providers_unreadable', text: noPrefix(`【系统】共用供应商文件读不了（格式坏了），先修好 ${providersPath(root)}`) } }
-      }
-      throw e
-    }
-    const found = this.findValid(snap, name)
-    if (!found) {
-      if (snap.invalid.some(i => normName(i.name) === normName(name))) {
-        return { status: 409, body: { ok: false, error: 'disabled', text: noPrefix(`【系统】「${name}」配置有误，未启用，不能刷新。`) } }
-      }
-      if (normName(name) === 'deepseek-official') {
-        return { status: 400, body: { ok: false, error: 'not_custom', text: noPrefix(`【系统】只有自建供应商能刷新模型；${name} 是内置的。`) } }
-      }
-      if (this.d.configRouteNames().map(normName).includes(normName(name))) {
-        return { status: 400, body: { ok: false, error: 'not_custom', text: noPrefix(`【系统】只有自建供应商能刷新模型；${name} 是配置文件里的。`) } }
-      }
-      return { status: 404, body: { ok: false, error: 'not_found', text: noPrefix(`【系统】没有 ${name} 这个供应商。用 /provider 看有哪些。`) } }
-    }
-    if (!this.d.service.credential(found.entry.route.apiKeyEnv)) {
-      return { status: 409, body: { ok: false, error: 'key_missing', text: noPrefix(`【系统】「${found.name}」缺密钥，先用 /provider →「修改」→「密钥」补上。`) } }
-    }
-    const r = await this.d.service.refresh(found.name)
-    const t = noPrefix(this.refreshText(found.name, r))
+    const pre = this.apiResolve(name)
+    if ('err' in pre) return pre.err as ApiRefreshResult
+    const r = await this.d.service.refresh(pre.found.name, only)
+    const t = noPrefix(this.refreshText(pre.found.name, r))
     switch (r.status) {
       case 'ok':
-        return { status: 200, body: { ok: true, count: r.count, added: r.added, removed: r.removed.length, kept_manual: r.keptManual, text: t } }
+        return { status: 200, body: { ok: true, count: r.count, added: r.added, removed: r.bySelection ? r.removed : r.removed.length, kept_manual: r.keptManual, selected: r.selected, text: t } }
       case 'failed':
         return { status: 502, body: { ok: false, error: 'fetch_failed', reason: r.reason, text: t } }
       case 'gone':
@@ -540,6 +521,90 @@ export class ProviderCommands {
       case 'disabled':
         return { status: 409, body: { ok: false, error: 'disabled', text: t } }
     }
+  }
+
+  /**
+   * `POST /v1/provider/preview`（INTERFACE §11a）：只拉不写——不写 providers.json、不动 lastRefresh、
+   * 不调 onChanged、不占 refreshing 去重。判定与失败文案与 refresh 逐字相同。
+   */
+  async apiPreview(name: string): Promise<ApiResult> {
+    const noPrefix = (t: string) => t.replace(/^【系统】/, '')
+    const pre = this.apiResolve(name)
+    if ('err' in pre) return pre.err
+    const r: PreviewResult = await this.d.service.preview(pre.found.name)
+    switch (r.status) {
+      case 'ok':
+        return { status: 200, body: { ok: true, count: r.count, models: r.models } }
+      case 'failed':
+        // 文案与 refresh 的 502 同源：r 在这一支的形状就是 RefreshResult 的失败支
+        return { status: 502, body: { ok: false, error: 'fetch_failed', reason: r.reason, text: noPrefix(refreshResultText(this.root(), r.name, r as RefreshResult)) } }
+      case 'unreadable':
+        return apiErr(503, 'providers_unreadable', providersUnreadableText(this.root()))
+      case 'not_found':
+        return apiErr(404, 'not_found', `没有 ${pre.found.name} 这个供应商。用 /provider 看有哪些。`)
+      case 'disabled':
+        return apiErr(409, 'disabled', `「${pre.found.name}」配置有误，未启用，不能刷新。`)
+      case 'key_missing':
+        return apiErr(409, 'key_missing', `「${pre.found.name}」缺密钥，先用 /provider →「修改」→「密钥」补上。`)
+    }
+  }
+
+  /**
+   * `POST /v1/provider/test`（INTERFACE §12a）：用列表里第一个模型真发一次最小对话请求测连接。
+   * 只读——不写盘、不动 lastRefresh、不占去重；响应与日志不带密钥、地址、上游正文。
+   */
+  async apiTest(name: string): Promise<ApiResult> {
+    const pre = this.apiResolve(name)
+    if ('err' in pre) return pre.err
+    const r: TestConnResult = await this.d.service.testConn(pre.found.name)
+    switch (r.status) {
+      case 'ok':
+        return { status: 200, body: { ok: true, model: r.model, latency_ms: r.latencyMs, status: 200, text: `连接正常：用 ${r.model} 测通，${r.latencyMs} 毫秒` } }
+      case 'failed':
+        return { status: 502, body: { ok: false, error: 'connect_failed', reason: r.reason, text: `${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}；用 ${r.model} 测的` } }
+      case 'no_models':
+        return apiErr(409, 'no_models', '这个供应商还没有模型，先刷新模型列表拿到模型再测')
+      case 'unreadable':
+        return apiErr(503, 'providers_unreadable', providersUnreadableText(this.root()))
+      case 'not_found':
+        return apiErr(404, 'not_found', `没有 ${pre.found.name} 这个供应商。用 /provider 看有哪些。`)
+      case 'disabled':
+        return apiErr(409, 'disabled', `「${pre.found.name}」配置有误，未启用，不能刷新。`)
+      case 'key_missing':
+        return apiErr(409, 'key_missing', `「${pre.found.name}」缺密钥，先用 /provider →「修改」→「密钥」补上。`)
+    }
+  }
+
+  /**
+   * refresh / preview / test 三个本机接口共用的前置判定：读 providers.json、找自建、判
+   * disabled / not_custom / not_found / key_missing。错误文案三处逐字相同（§11a/§11b/§12a）。
+   */
+  private apiResolve(name: string): { err: ApiResult } | { found: { name: string; entry: ProviderEntry } } {
+    const root = this.root()
+    let snap: ProvidersSnapshot
+    try {
+      snap = readProviders(providersPath(root))
+    } catch (e) {
+      if (e instanceof ProvidersUnreadable) return { err: apiErr(503, 'providers_unreadable', providersUnreadableText(root)) }
+      throw e
+    }
+    const found = this.findValid(snap, name)
+    if (!found) {
+      if (snap.invalid.some(i => normName(i.name) === normName(name))) {
+        return { err: apiErr(409, 'disabled', `「${name}」配置有误，未启用，不能刷新。`) }
+      }
+      if (normName(name) === 'deepseek-official') {
+        return { err: apiErr(400, 'not_custom', `只有自建供应商能刷新模型；${name} 是内置的。`) }
+      }
+      if (this.d.configRouteNames().map(normName).includes(normName(name))) {
+        return { err: apiErr(400, 'not_custom', `只有自建供应商能刷新模型；${name} 是配置文件里的。`) }
+      }
+      return { err: apiErr(404, 'not_found', `没有 ${name} 这个供应商。用 /provider 看有哪些。`) }
+    }
+    if (!this.d.service.credential(found.entry.route.apiKeyEnv)) {
+      return { err: apiErr(409, 'key_missing', `「${found.name}」缺密钥，先用 /provider →「修改」→「密钥」补上。`) }
+    }
+    return { found }
   }
 
   private root(): string { return this.d.root }
@@ -622,6 +687,7 @@ export function refreshResultText(root: string, name: string, r: RefreshResult):
     case 'ok': {
       let t = `【系统】「${name}」拉到 ${r.count} 个模型（新增 ${r.added} 个，去掉 ${r.removed.length} 个；手动加的 ${r.keptManual} 个保留）。`
       if (r.removed.length) t += `\n去掉了：${r.removed.slice(0, 10).join('、')}`
+      if (r.bySelection) t += `（按勾选保留 ${r.selected} 个）`
       return t
     }
     case 'failed': return `【系统】「${name}」没拉到模型：${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}。模型列表保持不变。`
