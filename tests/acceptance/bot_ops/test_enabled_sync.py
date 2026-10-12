@@ -42,8 +42,10 @@ def test_开关_停用_写盘生效且同步走停用方向bootout(
     assert isinstance(sync["started_at"], int)
     st = u.wait_job(client, sync["job_id"])
     assert st["state"] == "done", st
-    assert launchctl.subcommands() == ["bootout"], launchctl.calls()
-    assert launchctl.labels() == ["com.dsh-bot.xiaoyu"], launchctl.calls()
+    # 第 8 稿 §5c：停用方向恰好两条 bootout，先主单元、后主动消息的定时单元
+    assert launchctl.subcommands() == ["bootout", "bootout"], launchctl.calls()
+    assert launchctl.labels() == ["com.dsh-bot.xiaoyu",
+                                  "com.dsh-bot.self-initiate.xiaoyu"], launchctl.calls()
 
 
 def test_开关_启用_写盘生效且同步kickstart并判活通过(

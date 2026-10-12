@@ -121,8 +121,10 @@ def test_重启全部_同名且两份都停着_生效的是新系统那份_对�
     assert r.status_code == 202, (r.status_code, r.get_json())
     st = u.wait_job(client, r.get_json()["job_id"])
     assert st["state"] == "done", st
-    assert launchctl.subcommands() == ["bootout"], launchctl.calls()
-    assert launchctl.labels() == ["com.dsh-bot.twin"], launchctl.calls()
+    # 第 8 稿 §5c：停用方向恰好两条 bootout，先主单元、后主动消息的定时单元
+    assert launchctl.subcommands() == ["bootout", "bootout"], launchctl.calls()
+    assert launchctl.labels() == ["com.dsh-bot.twin",
+                                  "com.dsh-bot.self-initiate.twin"], launchctl.calls()
 
 
 # ============================================================ §4 单只重启：404 一格

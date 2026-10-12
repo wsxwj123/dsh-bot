@@ -97,7 +97,10 @@ def test_重启全部_停用的一只_bootout且tail说已停止(
     body = _post_accepted(client)
     st = u.wait_job(client, body["job_id"])
     assert st["state"] == "done", st
-    assert launchctl.subcommands() == ["bootout"], launchctl.calls()
+    # 第 8 稿 §5c：停用方向恰好两条 bootout，先主单元、后主动消息的定时单元
+    assert launchctl.subcommands() == ["bootout", "bootout"], launchctl.calls()
+    assert launchctl.labels() == ["com.dsh-bot.xiaoyu",
+                                  "com.dsh-bot.self-initiate.xiaoyu"], launchctl.calls()
     assert "xiaoyu 已停止" in st["tail"], st["tail"]
 
 

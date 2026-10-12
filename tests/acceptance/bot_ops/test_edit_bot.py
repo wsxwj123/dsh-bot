@@ -304,12 +304,15 @@ def test_编辑_改人设_原样写入不追加换行(web_client, sandbox, text)
     assert got == text.encode("utf-8"), ("人设必须原样落盘", got)
 
 
-def test_编辑_改人设_空串写0字节文件(web_client, sandbox):
+def test_编辑_改人设_空串_400_bad_field且人设文件不变(web_client, sandbox):
+    """第 8 稿 §10b：空的人设正文不再接受（此前是「空串 = 写 0 字节文件」）。"""
     b = _bot(sandbox)
     _persona(b.channel, "旧人设")
     r = _post(web_client, "xiaoyu", {"persona": ""})
-    assert r.status_code == 200, r.get_json()
-    assert (b.channel / "CLAUDE.md").read_bytes() == b""
+    assert r.status_code == 400, r.get_json()
+    assert r.get_json() == {"error": "bad_field",
+                            "detail": "人设正文不能为空；不想改人设就不要带 persona 这个键"}
+    assert (b.channel / "CLAUDE.md").read_bytes() == "旧人设".encode("utf-8")
 
 
 @pytest.mark.parametrize("raw,value,want", [
@@ -412,7 +415,7 @@ def test_编辑_名字带首尾空白_判据按去空白后_仍能通过(web_cli
     r = _post(web_client, "xiaoyu", {"display_name": "  新名  "})
     assert r.status_code == 200, r.get_json()
     got = u.read_yaml(b.yml)["display_name"]
-    assert str(got).strip() == "新名", ("落盘值（契约含糊点：是否 trim 以 strip 后为准）", got)
+    assert got == "新名", ("第 8 稿 §0 第 9 条：落盘的是去掉首尾空白之后的值", got)
 
 
 @pytest.mark.parametrize("bad", [123, True, ["x"], {"a": 1}, None])
@@ -474,24 +477,28 @@ def test_编辑_400_bad_body_三个键一个都没给(web_client, sandbox):
     assert b.yml.read_bytes() == before
 
 
-def test_编辑_413_人设超64KiB(web_client, sandbox):
+def test_编辑_413_人设超过65536个字符(web_client, sandbox):
     _bot(sandbox)
     r = _post(web_client, "xiaoyu", {"persona": "a" * (65536 + 1)})
     assert r.status_code == 413, r.get_json()
     body = r.get_json()
     assert body["error"] == "payload_too_large", body
-    assert body["detail"] == "人设正文超过 64 KiB", body
+    assert body["detail"] == "人设正文超过 65536 个字符", body      # 第 8 稿：按字符数
 
 
-def test_编辑_413_按UTF8字节数_中文算三字节(web_client, sandbox):
-    """21846 个汉字 = 65538 字节 > 65536。"""
-    _bot(sandbox)
-    r = _post(web_client, "xiaoyu", {"persona": "中" * 21846})
-    assert r.status_code == 413, r.get_json()
-    assert r.get_json()["error"] == "payload_too_large"
+def test_编辑_上限按字符数_21846个汉字放行(web_client, sandbox):
+    """第 8 稿 §0 第 9 条：上限按字符数。21846 个汉字是 65538 字节，但只有 21846 个字符。
+
+    此前按 UTF-8 字节数算，这一条的预期是 413。
+    """
+    b = _bot(sandbox)
+    text = "中" * 21846
+    r = _post(web_client, "xiaoyu", {"persona": text})
+    assert r.status_code == 200, r.get_json()
+    assert (b.channel / "CLAUDE.md").read_bytes() == text.encode("utf-8")
 
 
-def test_编辑_人设恰好65536字节_放行(web_client, sandbox):
+def test_编辑_人设恰好65536个字符_放行(web_client, sandbox):
     b = _bot(sandbox)
     text = "a" * 65536
     r = _post(web_client, "xiaoyu", {"persona": text})

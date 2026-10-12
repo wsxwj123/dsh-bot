@@ -413,6 +413,7 @@ def test_三份配置并存_合格那只的开关照常200_只动它(client, san
     assert st is not None and st["state"] == "done", (r.get_json(), st)
     assert u.read_yaml(cfgs.good)["enabled"] is False, cfgs.good.read_text(encoding="utf-8")
     assert (cfgs.reserved.read_bytes(), cfgs.bad.read_bytes()) == before, "旁边两份配置被动过"
-    assert launchctl.labels() == [GOOD_UNIT], launchctl.calls()
+    # 第 8 稿 §5c：停用方向恰好两条 bootout，先主单元、后主动消息的定时单元
+    assert launchctl.labels() == [GOOD_UNIT, "com.dsh-bot.self-initiate.%s" % GOOD], launchctl.calls()
     u.assert_roots_untouched(frozen)
     _never_touched(launchctl, bun)

@@ -90,7 +90,9 @@ def test_页面_showSync函数体里不调startRestart(web_client):
 
 @pytest.mark.parametrize("piece,state", [
     pytest.param("正在同步这一只", "started", id="started"),
-    pytest.param("还没同步", "busy", id="busy-not-synced"),
+    # 第 8 稿 §13a 第 2 条：busy 由一句拆成两句，各指一个只动这一只的入口；「还没同步」被取代
+    pytest.param("还没停下来", "busy（这次是停用）", id="busy-not-stopped"),
+    pytest.param("还没拉起来", "busy（这次是启用）", id="busy-not-started"),
     pytest.param("有别的重启任务正在跑", "busy", id="busy-other-job"),
     pytest.param("没有自动同步", "skipped", id="skipped"),
 ])
@@ -123,10 +125,17 @@ def test_页面_页头折叠说明改成只动这一只的说法(web_client):
 
 # ============================================================ 没改的那部分照旧
 
-@pytest.mark.parametrize("piece", ["重启中…", "重启结束：", "任务状态读不到了"],
-                         ids=["restarting", "restart-finished", "job-unreadable"])
+@pytest.mark.parametrize("piece", ["重启中…", "任务状态读不到了"],
+                         ids=["restarting", "job-unreadable"])
 def test_页面_重启全部与行内重启的那几句照旧(web_client, piece):
     assert _has(_page(web_client), piece), "页面源码缺既有的「%s」" % piece
+
+
+@pytest.mark.parametrize("piece", ["重启完成", "重启失败", "重启超时"],
+                         ids=["restart-done", "restart-failed", "restart-timeout"])
+def test_页面_重启的结束提示用重启这一套说法(web_client, piece):
+    """第 8 稿 §13a 第 5 条：此前是「重启结束：done」这种内部词，改成人话。"""
+    assert _has(_page(web_client), piece), "页面源码缺「%s」" % piece
 
 
 def test_页面_三种显示写在既有的restart_msg里_元素还在(web_client):

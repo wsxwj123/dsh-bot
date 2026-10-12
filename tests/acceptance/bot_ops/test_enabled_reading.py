@@ -21,6 +21,8 @@ from . import botops_util as u
 
 BOT = "xinbot"
 UNIT = "com.dsh-bot.%s" % BOT
+#: 第 8 稿 §5c：停用方向在主单元之后，还要对这只的主动消息定时单元发一条 bootout
+TIMER_UNIT = "com.dsh-bot.self-initiate.%s" % BOT
 
 
 def _with_life(sandbox, *, own, life):
@@ -139,8 +141,8 @@ def test_自己写停用_life那份写启用_重启全部对它发bootout不发k
     _with_life(sandbox, own=False, life=True)
     launchctl.set_default(installed=True, running=True, pid=4242)
     st = _restart_all_done(client)
-    assert launchctl.subcommands() == ["bootout"], launchctl.calls()
-    assert launchctl.labels() == [UNIT], launchctl.calls()
+    assert launchctl.subcommands() == ["bootout", "bootout"], launchctl.calls()
+    assert launchctl.labels() == [UNIT, TIMER_UNIT], launchctl.calls()
     assert "%s 已停止" % BOT in st["tail"], st["tail"]
 
 
@@ -152,8 +154,8 @@ def test_开关写成停用_life那份写着启用_同步走bootout不发kicksta
     assert r.status_code == 200, (r.status_code, r.get_json(silent=True))
     st = u.finish_sync(client, r.get_json())
     assert st is not None and st["state"] == "done", (r.get_json(), st)
-    assert launchctl.subcommands() == ["bootout"], launchctl.calls()
-    assert launchctl.labels() == [UNIT], launchctl.calls()
+    assert launchctl.subcommands() == ["bootout", "bootout"], launchctl.calls()
+    assert launchctl.labels() == [UNIT, TIMER_UNIT], launchctl.calls()
     assert life_yml.read_bytes() == life_before, "开关不该去写 life_config 那份"
 
 

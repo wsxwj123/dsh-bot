@@ -12,6 +12,8 @@ import pytest
 from . import botops_util as u
 
 LABEL = "com.dsh-bot.twin"
+#: 第 8 稿 §5c：停用方向在主单元之后，还要对这只的主动消息定时单元发一条 bootout
+TIMER_LABEL = "com.dsh-bot.self-initiate.twin"
 
 
 def _post(client, bot_id, enabled):
@@ -59,8 +61,8 @@ def test_同名都启用_请求停用_只对新系统的单元发bootout_不发k
     launchctl.set_default(installed=True, running=True, pid=4242)
     _, st = _toggle_to_terminal(client, "twin", False)
     assert st["state"] == "done", st
-    assert launchctl.subcommands() == ["bootout"], launchctl.calls()
-    assert launchctl.labels() == [LABEL], launchctl.calls()
+    assert launchctl.subcommands() == ["bootout", "bootout"], launchctl.calls()
+    assert launchctl.labels() == [LABEL, TIMER_LABEL], launchctl.calls()
 
 
 def test_同名都启用_请求停用_job的tail末行是已停止(client, sandbox, launchctl, as_darwin):
@@ -116,8 +118,8 @@ def test_新系统那份启用旧系统那份停着_请求停用_走bootout(
     launchctl.set_default(installed=True, running=True, pid=4242)
     _, st = _toggle_to_terminal(client, "twin", False)
     assert st["state"] == "done", st
-    assert launchctl.subcommands() == ["bootout"], launchctl.calls()
-    assert launchctl.labels() == [LABEL], launchctl.calls()
+    assert launchctl.subcommands() == ["bootout", "bootout"], launchctl.calls()
+    assert launchctl.labels() == [LABEL, TIMER_LABEL], launchctl.calls()
 
 
 def test_同名都启用_请求启用_走kickstart不发bootout(client, sandbox, alive, as_darwin):
@@ -144,8 +146,8 @@ def test_同名两份都停着_请求停用_走bootout(client, sandbox, launchct
     launchctl.set_default(installed=True, running=True, pid=4242)
     _, st = _toggle_to_terminal(client, "twin", False)
     assert st["state"] == "done", st
-    assert launchctl.subcommands() == ["bootout"], launchctl.calls()
-    assert launchctl.labels() == [LABEL], launchctl.calls()
+    assert launchctl.subcommands() == ["bootout", "bootout"], launchctl.calls()
+    assert launchctl.labels() == [LABEL, TIMER_LABEL], launchctl.calls()
 
 
 # ============================================================ 对象：只动这一只
@@ -158,7 +160,8 @@ def test_停用一只_别的新系统bot一条launchctl都不沾(client, sandbox
     launchctl.set_default(installed=True, running=True, pid=4242)
     body, st = _toggle_to_terminal(client, "xiaoyu", False)
     assert st["state"] == "done", st
-    assert launchctl.labels() == ["com.dsh-bot.xiaoyu"], launchctl.calls()
+    assert launchctl.labels() == ["com.dsh-bot.xiaoyu",
+                                  "com.dsh-bot.self-initiate.xiaoyu"], launchctl.calls()
 
 
 def test_启用一只_别的新系统bot一条launchctl都不沾(

@@ -169,7 +169,8 @@ def test_乙_第一条kickstart卡着时换掉环境_停用那只的bootout打�
         client, sandbox, heartbeat, launchctl, elsewhere, as_darwin, monkeypatch):
     _scene_b(client, sandbox, heartbeat, launchctl, elsewhere, monkeypatch)
     outs = [c["label"] for c in launchctl.calls_of("bootout")]
-    assert outs == ["com.dsh-bot.gamma"], launchctl.calls()
+    # 第 8 稿 §5c：停用那只有两条 bootout（主单元、主动消息的定时单元），都打到受理时那支
+    assert outs == ["com.dsh-bot.gamma", "com.dsh-bot.self-initiate.gamma"], launchctl.calls()
 
 
 def test_乙_第一条kickstart卡着时换掉环境_三只都按受理时定下的样子做完(
