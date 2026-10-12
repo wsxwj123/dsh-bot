@@ -41,11 +41,13 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULT_API_BASE = "https://api.telegram.org"
 #: §4.1 R2-1：主机 + 可选端口，**不带路径、不带 query**。
-BASE_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d+)?/?$")
+BASE_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d+)?/?\Z")
 #: 小写起头；禁 `_` 开头（`list_enabled_bots()` 会跳过它，建了也看不见）。
 #: 形状那条正则全仓库只有一份，定义在 `config_sources`（整串匹配），这里是引用。
 BOT_ID_RE = config_sources.BOT_ID_RE
-TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{30,}$")
+#: 本文件的形状正则一律以 `\Z` 结尾（整串匹配，§0 第 6 条）：`$` 会放过末尾多出来的一个换行，
+#: 带换行的 token 就会被拼进请求 URL 发出去。新加正则照这个写法，调用处用 `.match` 即可。
+TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{30,}\Z")
 #: A7：既有 bot 的 telegram id = `.env` 里 token 的 `:` 前数字段，不新增字段、不落第二份 token
 ENV_TOKEN_RE = re.compile(r"^\s*TELEGRAM_BOT_TOKEN\s*=\s*[\"']?(\d{8,10}):", re.M)
 #: 上游 description 里的请求 URL 片段 `/bot<token>/getMe`：抹掉 token 后仍留着 `/bot…`，
@@ -60,10 +62,10 @@ MAX_DISPLAY_NAME = 64            # R8-1
 MAX_FISH_VOICE = 64
 MIN_FISH_KEY = 8
 MAX_FISH_KEY = 256
-FISH_VOICE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-FISH_KEY_RE = re.compile(r"^[\x21-\x7e]{8,256}$")
+FISH_VOICE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
+FISH_KEY_RE = re.compile(r"^[\x21-\x7e]{8,256}\Z")
 #: 把 Telegram token / 供应商 key 填错格子是最常见的两种手滑，各给一句人话
-FISH_KEY_TELEGRAM_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{30,}$")
+FISH_KEY_TELEGRAM_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{30,}\Z")
 REQUIRED_FIELDS = ("bot_id", "telegram_token", "dispatcher_port", "chat_id")
 BLANK_TEMPLATE = "_persona_template"
 MEMORY_SEED = "# 记忆\n\n（还没聊过，记忆会自己长出来。）\n"
