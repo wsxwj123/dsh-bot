@@ -108,6 +108,16 @@ def log_path(bot_id, seams=None):
 
 
 def label_of(bot_id):
+    """launchd 单元名 ``com.dsh-bot.<id>`` **唯一的拼装入口**（§5b 第 5 条）。
+
+    自己把关：id 不是合格的 bot id（形状非法，或是保留名 ``jiwen`` / ``director`` /
+    ``voicecall`` —— 那几个是这个前缀下不属于 bot 的单元）就回 None，不拼。四个动作
+    （kickstart / bootstrap / bootout / print）都经这里，拿不到单元名就不调 launchctl，
+    只读的 print 也不发。上游的名单再怎么漏，到这一步也碰不到不该碰的单元。
+    """
+    from moments import config_sources
+    if not config_sources.is_qualified_bot_id(bot_id):
+        return None
     return "com.dsh-bot.%s" % bot_id
 
 
@@ -144,9 +154,12 @@ def kickstart(bot_id, seams=None):
 
     ``missing``（输出含 ``Could not find service``）= 单元没加载，要回落 bootstrap；
     真机实测这种失败退出码是 113，所以按文本判，不按码。
+    拿不到单元名（id 不合格，见 ``label_of``）按这只失败，不调 launchctl。
     """
-    code, text, why = _run(["kickstart", "-k", "gui/%d/%s" % (_uid(), label_of(bot_id))],
-                           seams=seams)
+    label = label_of(bot_id)
+    if label is None:
+        return "failed", ""
+    code, text, why = _run(["kickstart", "-k", "gui/%d/%s" % (_uid(), label)], seams=seams)
     if why == "timeout":
         return "timeout", text
     if why:
@@ -162,8 +175,12 @@ def bootstrap(bot_id, seams=None):
     """``bootstrap``（回落路径）。返回 ``(status, text)``，status ∈ ok / no_plist / timeout / failed。
 
     plist 不在场就不动手：没有单元文件时 bootstrap 只会报一句没用的错。
+    拿不到单元名（id 不合格）按这只失败：plist 就算在场也不找、不调 launchctl。
     """
-    plist = os.path.join(launchagents_dir(seams), label_of(bot_id) + ".plist")
+    label = label_of(bot_id)
+    if label is None:
+        return "failed", ""
+    plist = os.path.join(launchagents_dir(seams), label + ".plist")
     if not os.path.isfile(plist):
         return "no_plist", ""
     code, text, why = _run(["bootstrap", "gui/%d" % _uid(), plist], seams=seams)
@@ -179,8 +196,12 @@ def bootout(bot_id, seams=None):
 
     「本来就没在跑」（``No such process`` / ``Could not find service``）等价成功 ——
     停用方向要的正是「它现在不在跑」这个终态，报错反而会让幂等的停用变成失败。
+    拿不到单元名（id 不合格）按这只失败，不调 launchctl —— 保留名的单元不许被这里停掉。
     """
-    code, text, why = _run(["bootout", "gui/%d/%s" % (_uid(), label_of(bot_id))], seams=seams)
+    label = label_of(bot_id)
+    if label is None:
+        return "failed", ""
+    code, text, why = _run(["bootout", "gui/%d/%s" % (_uid(), label)], seams=seams)
     if why == "timeout":
         return "timeout", text
     if why:
@@ -211,8 +232,14 @@ def parse_print(text):
 
 
 def print_state(bot_id, seams=None):
-    """``launchctl print`` 的 ``(state, pid)``；失败或退出码非 0 按「没在运行」→ (None, None)。"""
-    code, text, why = _run(["print", "gui/%d/%s" % (_uid(), label_of(bot_id))], seams=seams)
+    """``launchctl print`` 的 ``(state, pid)``；失败或退出码非 0 按「没在运行」→ (None, None)。
+
+    拿不到单元名（id 不合格）同样按「没在运行」，这条只读的 print 也不发。
+    """
+    label = label_of(bot_id)
+    if label is None:
+        return None, None
+    code, text, why = _run(["print", "gui/%d/%s" % (_uid(), label)], seams=seams)
     if why or code != 0:
         return None, None
     state, raw_pid = parse_print(text)
