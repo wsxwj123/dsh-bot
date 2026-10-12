@@ -137,7 +137,7 @@ def test_旧栈在跑的bot不进这一页(roots, live_status):
     assert live_status.hits == [], "为旧系统跑着的 bot 发了探活请求：%s" % live_status.hits
 
 
-def test_新系统在跑的bot_来源停用在线三个标注指向同一份(roots, live_status):
+def test_新系统在跑的bot_来源停用在线三个标注指向同一份(roots, live_status, monkeypatch):
     """新根那份在跑、旧根那份停用：来源说 dsh、不在 disabled、状态 online。
 
     第 2 稿起 dsh 行的「活」由**心跳文件**做证据，本机 `/status` 探活只留给其余行
@@ -148,6 +148,9 @@ def test_新系统在跑的bot_来源停用在线三个标注指向同一份(roo
     _write_bot(dsh, "bot2", display_name="李彤彤", dispatcher_port=port)
     _write_bot(legacy, "bot2", enabled=False, display_name="李彤彤",
                dispatcher_port=free_port())
+    # 心跳写在哪，新系统家目录就显式指到哪：测试总闸默认把 DSH_BOT_HOME 改道到别的临时目录，
+    # 不指过来，实现去那边找不到这份心跳。HOME 已由 roots 夹具钉在 tmp。
+    monkeypatch.setenv("DSH_BOT_HOME", str(Path(os.environ["HOME"]) / ".dsh-bot"))
     hb = Path(os.environ["HOME"]) / ".dsh-bot" / "bots" / "bot2" / "state" / "heartbeat"
     hb.parent.mkdir(parents=True, exist_ok=True)
     hb.write_text(json.dumps({"at": int(time.time() * 1000), "pid": 4321}),
