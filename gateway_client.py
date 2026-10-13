@@ -71,18 +71,22 @@ def model_set(channel_dir: str, spec: str) -> tuple[bool, dict]:
 PROVIDER_REFRESH_TIMEOUT = 55.0
 
 
-def provider_refresh(channel_dir: str, name: str, only: list | None = None) -> tuple[int, dict]:
+def provider_refresh(channel_dir: str, name: str, only: list | None = None,
+                     rev: str | None = None) -> tuple[int, dict]:
     """刷新一个自建供应商的模型列表（管理台用）。
 
     原样把网关的状态码与正文带回去（网关按 INTERFACE 3.8 返回 200/400/404/409/502/503）；
     连不上网关（URLError）或超时（TimeoutError）由调用方接住。
 
-    `only` 给了就转发（勾选落盘，INTERFACE §11b）；缺省时请求体仍只有 `{"name"}` ——
-    既有行为一字不变。
+    `only` 给了就转发（勾选落盘，INTERFACE §11b）；`rev` 给了就转发（预览拿到的清单指纹，
+    网关在保存那一刻核对，对不上回 409）。都缺省时请求体只有 `{"name"}`。
+    这里没有 `full`：把清单整份重铺只能直接调网关的本机接口，管理台不提供这个口子。
     """
     body = {"name": name}
     if only is not None:
         body["only"] = only
+    if rev is not None:
+        body["rev"] = rev
     return _call(channel_dir, "POST", "/v1/provider/refresh", body,
                  timeout=PROVIDER_REFRESH_TIMEOUT)
 
