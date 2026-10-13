@@ -90,8 +90,9 @@ def test_路由段不再导入命令行脚本_也不留那一段的处理函数�
 
 
 def test_仓库根仍在搜索路径里_后面的段要靠它导入仓库根下的模块():
-    assert hub_routes._SK_REPO_ROOT == str(ROOT)
-    assert str(ROOT) in sys.path
+    # 用 samefile 比：仓库路径上有符号链接时，两边取到的字符串写法可以不同
+    assert os.path.samefile(hub_routes._SK_REPO_ROOT, ROOT)
+    assert any(p and os.path.isdir(p) and os.path.samefile(p, ROOT) for p in sys.path)
     # 第 9 段在模块顶层导入的两个仓库根下的模块
     assert os.path.isfile(os.path.join(hub_routes._SK_REPO_ROOT, "gateway_client.py"))
     assert os.path.isfile(os.path.join(hub_routes._SK_REPO_ROOT, "config_loader.py"))
