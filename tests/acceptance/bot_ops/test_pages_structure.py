@@ -144,8 +144,10 @@ def test_弹窗_openPick的调用点恰好一处(web_client):
 
 def test_弹窗_行标记文案在(web_client):
     html = _page(web_client, DSHMODEL)
-    for word in ("手动", "上游没有", "上下文"):
+    for word in ("手动", "对方这次没返回", "上下文"):
         assert word in html, "弹窗缺标记文案「%s」" % word
+    # INTERFACE-dsh修补 3.5：标记文字由「上游没有」换成「对方这次没返回」，旧说法不再出现
+    assert "上游没有" not in html, "弹窗里还留着旧的标记文案「上游没有」"
 
 
 # ============================================================ §12c 测试连接按钮
