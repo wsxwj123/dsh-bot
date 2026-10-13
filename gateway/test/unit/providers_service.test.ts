@@ -92,15 +92,16 @@ test('换主机（epoch 变）：换新键名，旧键名登记进 pendingKeyRem
   expect(after.pendingKeyRemovals.map(p => p.key)).toEqual([old.route.apiKeyEnv])
 })
 
-test('刷新：新增/去掉/保留统计、<N> 是拉到的个数、主人手填的上下文保留、lastRefresh 写入', async () => {
+test('全量刷新（显式带 full）：新增/去掉/保留统计、<N> 是拉到的个数、主人手填的上下文保留、lastRefresh 写入', async () => {
   const root = tmp()
   // 预置：m1 主人手填 50000、m2、man1 手动加
   writeFileSync(providersPathOf(root), JSON.stringify({ version: 1, providers: { p1: { route: { api: 'openai-completions', baseURL: 'https://p.example.com/v1', apiKeyEnv: 'PROVIDER_P1_KEY', models: [{ id: 'm1', contextWindow: 50000 }, { id: 'm2', contextWindow: 131072 }, { id: 'man1', contextWindow: 131072 }] }, meta: { createdAt: 1, updatedAt: 1, epoch: 1, keyRev: 1, guessedContext: [], ownerContext: ['m1'], manualModels: ['man1'], lastRefresh: null } } }, pendingKeyRemovals: [] }))
   setCredentialRef(credPathOf(root), 'PROVIDER_P1_KEY', 'test-key-7abcdefghij')
   const { s: s2 } = svc(root, () => okModels([{ id: 'm1', contextWindow: 8000 }, { id: 'm3', contextWindow: null }, { id: 'man1', contextWindow: null }], 'https://p.example.com/v1'))
-  const r = await s2.refresh('P1')
+  const r = await s2.refresh('P1', { full: true })
   expect(r.status).toBe('ok')
   if (r.status !== 'ok') return
+  expect(r.applied).toBe('full')
   expect(r.count).toBe(3) // 拉到的 3 个（含 man1）
   expect(r.added).toBe(1) // m3
   expect(r.removed).toEqual(['m2'])
@@ -240,15 +241,161 @@ test('refresh 带 only：未知 id 静默忽略、旧 manual 被弃选即移除�
   expect(read(root2).valid.myproxy!.meta.manualModels).toEqual([])
 })
 
-test('refresh 不带 only：响应加 selected、removed 仍是数组、manual 不动（既有行为不退化）', async () => {
+test('refresh 带 full：清单重铺成对方返回的全部加手填的，manual 不动', async () => {
   const root = tmp()
   seedPreview(root)
   const { s } = svc(root, previewFetched)
-  const r = await s.refresh('myproxy')
+  const r = await s.refresh('myproxy', { full: true })
   expect(r.status).toBe('ok')
   if (r.status !== 'ok') return
-  expect(r).toMatchObject({ count: 3, added: 1, keptManual: 1, selected: 4, applied: 'full' })
+  expect(r).toMatchObject({ count: 3, added: 1, removed: [], keptManual: 1, selected: 4, applied: 'full' })
   expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['a', 'b', 'd', 'c'])
+})
+
+// ─── INTERFACE-dsh修补 第五节：刷新和保存默认不改动挑好的清单 ───
+
+test('refresh 不带 only 也不带 full、清单不为空：清单、手填名单、猜的上下文名单都不动，只写刷新记录与更新时间；结果是对账数字', async () => {
+  const root = tmp()
+  seedPreview(root)
+  const strip = () => { const j = JSON.parse(readFileSync(providersPathOf(root), 'utf8')); delete j.providers.myproxy.meta.lastRefresh; delete j.providers.myproxy.meta.updatedAt; return JSON.stringify(j) }
+  const before = strip()
+  let changed = 0
+  // 对方返回 [a(8000), b, d]；清单 [a, b, 手填 c]：N=3，不在清单 1 个（d），没返回 1 个（c）
+  const { s } = svc(root, previewFetched, { now: () => 4242, onChanged: () => changed++ })
+  const r = await s.refresh('myproxy')
+  expect(r).toMatchObject({ status: 'ok', applied: 'kept', count: 3, added: 0, removed: [], keptManual: 1, selected: 3, notInList: 1, notReturned: 1, disjoint: false })
+  expect(strip(), '除了刷新记录和更新时间，文件一个字都不变').toBe(before)
+  const e = read(root).valid.myproxy!
+  expect(e.meta.lastRefresh).toEqual({ at: 4242, ok: true, count: 3, reason: null })
+  expect(e.meta.updatedAt).toBe(4242)
+  expect(changed, '文件写过了，照常通知重算（清单没变，路由指纹不变，不会因此重启）').toBe(1)
+  // full 为 false 等同没给
+  expect(await s.refresh('myproxy', { full: false })).toMatchObject({ status: 'ok', applied: 'kept' })
+  expect(strip()).toBe(before)
+})
+
+test('只对账时的数字：对方返回的去重后计数；清单与对方完全一样时两个数是 0；清单里的一个都没返回时 disjoint 为真', async () => {
+  const root = tmp()
+  seedList(root, [{ id: 'a', contextWindow: 8000 }, { id: 'b', contextWindow: 8000 }])
+  const same = await svc(root, fetchedIds('b', 'a')).s.refresh('myproxy')
+  expect(same).toMatchObject({ applied: 'kept', count: 2, notInList: 0, notReturned: 0, disjoint: false })
+  const other = await svc(root, fetchedIds('n1', 'n2', 'n3')).s.refresh('myproxy')
+  expect(other).toMatchObject({ applied: 'kept', count: 3, notInList: 3, notReturned: 2, disjoint: true })
+  const partly = await svc(root, fetchedIds('a', 'n1')).s.refresh('myproxy')
+  expect(partly).toMatchObject({ applied: 'kept', notInList: 1, notReturned: 1, disjoint: false })
+  expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['a', 'b'])
+})
+
+test('只对账不重写条目：手写的字段、键的先后、读取时会被丢掉的重复或不合格模型条目都原样留在文件里', async () => {
+  const root = tmp()
+  // route 里键的先后与众不同、带手写字段；模型里有一条重复的 a、一条名字不合格的、一条上下文不合格的
+  const rawModels = [{ contextWindow: 8000, id: 'a', note: '手写' }, { id: 'a', contextWindow: 9000 }, { id: 'bad\tid', contextWindow: 8000 }, { id: 'c', contextWindow: 5 }, { id: 'b', contextWindow: 8000 }]
+  writeFileSync(providersPathOf(root), JSON.stringify({ version: 1, providers: { myproxy: {
+    note: '条目上的手写字段',
+    route: { models: rawModels, timeoutMs: 9000, baseURL: 'https://p.example.com/v1', api: 'openai-completions', apiKeyEnv: 'PROVIDER_MYPROXY_KEY' },
+    meta: { manualModels: [], keyRev: 1, epoch: 1, extra: 'x', createdAt: 1, updatedAt: 1, guessedContext: [], ownerContext: [], lastRefresh: null },
+  } }, pendingKeyRemovals: [] }, null, 1))
+  setCredentialRef(credPathOf(root), 'PROVIDER_MYPROXY_KEY', 'test-key-7abcdefghij')
+  expect(read(root).valid.myproxy!.route.models.map(m => m.id), '前提：读取时看到的清单是丢掉重复和不合格之后的').toEqual(['a', 'b'])
+  const text = () => readFileSync(providersPathOf(root), 'utf8')
+  const before = text()
+  const r = await svc(root, fetchedIds('a', 'b', 'z'), { now: () => 1 }).s.refresh('myproxy')
+  expect(r).toMatchObject({ applied: 'kept', selected: 2, notInList: 1, notReturned: 0 })
+  // now 取 1，与文件里的 updatedAt 相同；整份文件只多出一条刷新记录
+  expect(JSON.parse(text())).toEqual((() => { const j = JSON.parse(before); j.providers.myproxy.meta.lastRefresh = { at: 1, ok: true, count: 3, reason: null }; return j })())
+  expect(Object.keys(JSON.parse(text()).providers.myproxy.route), '键的先后没被重排').toEqual(['models', 'timeoutMs', 'baseURL', 'api', 'apiKeyEnv'])
+  // 对照：按勾选保存是重写清单，写回去的是整理后的条目
+  await svc(root, fetchedIds('a', 'b', 'z')).s.refresh('myproxy', { only: ['a', 'b'] })
+  expect(JSON.parse(text()).providers.myproxy.route.models).toEqual([{ id: 'a', contextWindow: 8000 }, { id: 'b', contextWindow: 8000 }])
+})
+
+test('只对账而这次是在 /v1 下才拉到的：地址补上，清单仍不动', async () => {
+  const root = tmp()
+  seedBareHost(root)
+  const r = await svc(root, () => viaV1(['a', 'b'])).s.refresh('myproxy')
+  expect(r).toMatchObject({ status: 'ok', applied: 'kept', v1Added: true, baseURL: 'https://p.example.com/v1', notInList: 1 })
+  const j = JSON.parse(readFileSync(providersPathOf(root), 'utf8')).providers.myproxy.route
+  expect(j).toEqual({ api: 'openai-completions', baseURL: 'https://p.example.com/v1', apiKeyEnv: 'PROVIDER_MYPROXY_KEY', models: [{ id: 'a', contextWindow: 5000 }], timeoutMs: 9000 })
+})
+
+test('清单是空的、不带任何选项：拉到的全部收下（applied 为 full）', async () => {
+  const root = tmp()
+  seedList(root, [])
+  const r = await svc(root, fetchedIds('x', 'y')).s.refresh('myproxy')
+  expect(r).toMatchObject({ status: 'ok', applied: 'full', count: 2, added: 2, selected: 2 })
+  expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['x', 'y'])
+})
+
+test('清单空不空按保存那一刻的文件算：拉取期间被别处填上就不动，被别处清空就全部收下', async () => {
+  /** 拉取进行到一半时，像别处那样改写文件里这家的清单 */
+  const during = (root: string, models: unknown[]) => () => {
+    const j = JSON.parse(readFileSync(providersPathOf(root), 'utf8'))
+    j.providers.myproxy.route.models = models
+    writeFileSync(providersPathOf(root), JSON.stringify(j))
+    return fetchedIds('x', 'y')()
+  }
+  const filled = tmp()
+  seedList(filled, [])
+  expect(await svc(filled, during(filled, [{ id: 'picked', contextWindow: 8000 }])).s.refresh('myproxy')).toMatchObject({ applied: 'kept', count: 2, notInList: 2, notReturned: 1 })
+  expect(read(filled).valid.myproxy!.route.models.map(m => m.id)).toEqual(['picked'])
+
+  const emptied = tmp()
+  seedList(emptied, [{ id: 'old', contextWindow: 8000 }])
+  expect(await svc(emptied, during(emptied, [])).s.refresh('myproxy')).toMatchObject({ applied: 'full', added: 2 })
+  expect(read(emptied).valid.myproxy!.route.models.map(m => m.id)).toEqual(['x', 'y'])
+})
+
+test('保存到已有的同一家、清单不为空、拉取成功：清单与两份名单不动，地址和密钥照常更新，刷新记录保持原值，count 是对方返回的个数', async () => {
+  const root = tmp()
+  const mark = { at: 99, ok: true, count: 7, reason: null }
+  // 模型条目里键的先后与整理后的不同，用来确认写回去的是文件里的原样
+  writeFileSync(providersPathOf(root), JSON.stringify({ version: 1, providers: { p1: {
+    route: { api: 'openai-completions', baseURL: 'https://p.example.com/v1', apiKeyEnv: 'PROVIDER_P1_KEY', models: [{ contextWindow: 50000, id: 'm1' }, { contextWindow: 131072, id: 'm2' }, { contextWindow: 131072, id: 'man1' }] },
+    meta: { createdAt: 1, updatedAt: 1, epoch: 1, keyRev: 1, guessedContext: ['m2'], ownerContext: ['m1'], manualModels: ['man1'], lastRefresh: mark },
+  } }, pendingKeyRemovals: [] }))
+  setCredentialRef(credPathOf(root), 'PROVIDER_P1_KEY', 'test-key-7oldoldold00')
+  const listing = () => { const e = JSON.parse(readFileSync(providersPathOf(root), 'utf8')).providers.p1; return JSON.stringify([e.route.models, e.meta.manualModels, e.meta.guessedContext]) }
+  const before = listing()
+  const { s } = svc(root, () => okModels([{ id: 'm1', contextWindow: 8000 }, { id: 'm3', contextWindow: null }, { id: 'm4', contextWindow: null }], 'https://p.example.com/api/v1'), { now: () => 500 })
+  const r = await s.save({ name: 'P1', api: 'openai-completions', baseURL: 'https://p.example.com/api/v1', key: 'test-key-7newnewnew00', mode: 'modify' })
+  expect(r).toMatchObject({ status: 'saved', kind: 'updated', name: 'p1', applied: 'kept', count: 3, notInList: 2, notReturned: 2, disjoint: false, epochChanged: false, reason: null, baseURL: 'https://p.example.com/api/v1' })
+  expect(listing(), '模型条目连键的先后都没变').toBe(before)
+  const e = read(root).valid.p1!
+  expect(e.route.baseURL).toBe('https://p.example.com/api/v1')
+  expect(e.meta).toMatchObject({ keyRev: 2, epoch: 1, updatedAt: 500, lastRefresh: mark })
+  expect(creds(root)).toContain('PROVIDER_P1_KEY: "test-key-7newnewnew00"')
+})
+
+test('保存时四条有一条不成立就照旧重铺（applied 为 full）：换了主机、换了接口格式、清单是空的、新建；拉取失败则保持原清单', async () => {
+  const seedOne = (root: string, models: unknown[]) => {
+    writeFileSync(providersPathOf(root), JSON.stringify({ version: 1, providers: { p1: {
+      route: { api: 'openai-completions', baseURL: 'https://p.example.com/v1', apiKeyEnv: 'PROVIDER_P1_KEY', models },
+      meta: { createdAt: 1, updatedAt: 1, epoch: 1, keyRev: 1, guessedContext: [], ownerContext: [], manualModels: [], lastRefresh: null },
+    } }, pendingKeyRemovals: [] }))
+    setCredentialRef(credPathOf(root), 'PROVIDER_P1_KEY', 'test-key-7abcdefghij')
+  }
+  const OLD = [{ id: 'old1', contextWindow: 8000 }, { id: 'old2', contextWindow: 8000 }]
+  const CASES: [string, unknown[], { api: 'openai-completions' | 'anthropic-messages'; baseURL: string }][] = [
+    ['换了主机', OLD, { api: 'openai-completions', baseURL: 'https://other.example.com/v1' }],
+    ['换了端口', OLD, { api: 'openai-completions', baseURL: 'https://p.example.com:8443/v1' }],
+    ['换了接口格式', OLD, { api: 'anthropic-messages', baseURL: 'https://p.example.com' }],
+    ['清单是空的', [], { api: 'openai-completions', baseURL: 'https://p.example.com/v1' }],
+  ]
+  for (const [what, models, to] of CASES) {
+    const root = tmp()
+    seedOne(root, models)
+    const r = await svc(root, req => okModels([{ id: 'n1', contextWindow: null }, { id: 'n2', contextWindow: null }], req.baseURL)).s.save({ name: 'p1', key: 'test-key-7abcdefghij', ...to })
+    expect(r, what).toMatchObject({ status: 'saved', applied: 'full', count: 2 })
+    expect(read(root).valid.p1!.route.models.map(m => m.id), what).toEqual(['n1', 'n2'])
+  }
+  const fresh = tmp()
+  expect(await svc(fresh, req => okModels([{ id: 'n1', contextWindow: null }], req.baseURL)).s.save({ name: 'p1', api: 'openai-completions', baseURL: 'https://p.example.com/v1', key: 'test-key-7abcdefghij' }))
+    .toMatchObject({ status: 'saved', kind: 'created', applied: 'full', count: 1 })
+  const failed = tmp()
+  seedOne(failed, OLD)
+  expect(await svc(failed, () => ({ ok: false, reason: 'server_error', status: 500 })).s.save({ name: 'p1', api: 'openai-completions', baseURL: 'https://p.example.com/v1', key: 'test-key-7abcdefghij' }))
+    .toMatchObject({ status: 'saved', applied: 'full', reason: 'server_error', count: 2 })
+  expect(read(failed).valid.p1!.route.models.map(m => m.id)).toEqual(['old1', 'old2'])
 })
 
 // ─── §11b 第 8 稿：上游回空目录。带 only 不算失败（判据与 preview 同一个），only 缺省仍是失败 ───
