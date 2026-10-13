@@ -214,6 +214,22 @@ def test_判据_选的是哪个配置项就读哪个(web, monkeypatch):
         "https://legacy.example.test/prov"
 
 
+def test_判据_开着信转发头的开关时_照样看得到那些头(web):
+    """走隧道的机器上会设 HUB_TRUST_PROXY=1，管理台外面套一层 ProxyFix（只认一跳的协议）。
+    它读了转发头之后不把头拿走，判据照样认得出这不是从本机来的。参数与 web.py 里那一行相同。"""
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    from werkzeug.test import Client
+    client = Client(ProxyFix(web.app.wsgi_app, x_proto=1, x_for=0, x_host=0, x_port=0, x_prefix=0))
+
+    def loc(headers):
+        r = client.get("/provider", headers=headers, environ_overrides={"HTTP_HOST": LOCAL_HOST})
+        return r.status_code, r.headers.get("Location")
+
+    assert loc({}) == (302, DEFAULT_LOCAL)
+    assert loc({"X-Forwarded-Proto": "https"}) == (302, DEFAULT_PUBLIC)
+    assert loc({"X-Forwarded-For": "203.0.113.9", "X-Forwarded-Proto": "https"}) == (302, DEFAULT_PUBLIC)
+
+
 # ============================================================ §4 GET /provider
 
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
