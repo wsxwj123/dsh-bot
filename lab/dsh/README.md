@@ -34,6 +34,18 @@ DSH=$DSH bun lab/dsh/offline/facts.ts
 
 `offline/dry-run-real.ts` 会把下面四个真密钥脚本指向假模型跑一遍，只验证流程能走通，数字是假的。
 
+### 模型回空内容时的重试（B23）
+
+网关给 dsh 下发了不重试"空内容"的策略，并靠 dsh 的两句英文报错认出"模型回了空内容"。这两样都只在 0.2.0-rc.2 上核对过，升级 dsh 时要重跑这三份，和各脚本开头写的结果对照：
+
+```bash
+DSH=$DSH bun lab/dsh/offline/b23-empty-response.ts   # 自建路由：请求次数、报错原句
+DSH=$DSH bun lab/dsh/offline/b23-deepseek-route.ts   # 内置 deepseek 路由：同上
+DSH=$DSH bun lab/dsh/offline/b23-product-patch.ts    # 用网关实际生成的补丁启动 dsh
+```
+
+三份都只连本机回环上的假服务，不需要密钥。结果变了的话，先改 `gateway/src/engine/engine.ts` 里的 `TURN_ERROR_RULES` 与 `VERIFIED_DSH_VERSION`、`gateway/src/dsh/profile.ts` 里的 `RETRY_POLICY`，再升级。
+
 ## 2. 需要密钥的验证（请在你的机器上跑）
 
 ```bash
@@ -112,6 +124,7 @@ lab/dsh/
   lib/report.ts       生成 report.md
   offline/facts.ts    离线事实核对（21 项）
   offline/dry-run-real.ts  用假模型演练真密钥脚本
+  offline/b23-*.ts    模型回空内容时的请求次数与报错原句（三份，升级 dsh 时重跑）
   real/real-0*.ts     真密钥脚本
   local/inventory.py  现有部署脱敏盘点
   local/baseline_claude_usage.py  旧部署用量基线
