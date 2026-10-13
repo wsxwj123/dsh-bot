@@ -52,7 +52,8 @@ FORWARD_HEADERS = [
 
 # ------------------------------------------------------------ §3 导航与卡片
 
-NAV_PAGES = ["/hub", "/hub/bots", "/hub/addbot", "/hub/dsh-model", "/hub/setup", "/hub/params",
+#: 「密钥待填」页 /hub/setup 已下线（INTERFACE-dsh修补 4.4），从这张名单里拿掉了
+NAV_PAGES = ["/hub", "/hub/bots", "/hub/addbot", "/hub/dsh-model", "/hub/params",
              "/hub/provider"]
 NAV_ANCHOR = ('<a class="chip" href="/provider" target="_blank" rel="noopener noreferrer">'
               '旧系统供应商</a>')
