@@ -9,9 +9,11 @@ for_dsh() 把这些命令换成对应工具的用法。
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
+import socket
 import urllib.error
 import urllib.request
 
@@ -52,9 +54,32 @@ def _call(channel_dir: str, method: str, path: str, body: dict | None = None, ti
             return e.code, {}
 
 
-def model_info(channel_dir: str) -> dict:
-    """现在用的模型、配置文件里的模型、能换哪些（管理台用）"""
-    code, r = _call(channel_dir, "GET", "/v1/model", timeout=70)
+# 请求"发出去之后"才可能出现的异常。这些都可能已经写进去了，调用方一律不自动重试。
+_SENT_ERRORS = (urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError)
+
+
+def net_kind(err) -> str | None:
+    """调网关时抛出的异常归类（管理台与适配服务共用这一份判据）。
+
+    - ``unreachable``：请求根本没发出去（拒连、DNS 解析不了）。只有这种才算"这个网关不可用"，
+      也才允许换下一个网关；
+    - ``broken``：发出后中断或超时。可能已经写进去了，换网关重试就是第二次写；
+    - ``None``：不是网络上的事（本地错误），由调用方自己处理。
+    """
+    if isinstance(err, urllib.error.URLError) and isinstance(
+            err.reason, (ConnectionRefusedError, socket.gaierror)):
+        return "unreachable"
+    if isinstance(err, _SENT_ERRORS):
+        return "broken"
+    return None
+
+
+def model_info(channel_dir: str, timeout: float = 70) -> dict:
+    """现在用的模型、配置文件里的模型、能换哪些（管理台用）。
+
+    timeout 缺省 70 秒（网关冷启动要问一次模型目录）；适配服务的列表接口等不了那么久，自己传短的。
+    """
+    code, r = _call(channel_dir, "GET", "/v1/model", timeout=timeout)
     if code != 200:
         raise RuntimeError(r.get("error") or f"HTTP {code}")
     return r
@@ -148,9 +173,9 @@ def provider_model(channel_dir: str, body: dict) -> tuple[int, dict]:
 EFFORT_TIMEOUT = 55.0
 
 
-def effort_get(channel_dir: str) -> tuple[int, dict]:
-    """问一个 bot 当前的思考强度档位与可选档位（GET /v1/effort）。"""
-    return _call(channel_dir, "GET", "/v1/effort", timeout=EFFORT_TIMEOUT)
+def effort_get(channel_dir: str, timeout: float = EFFORT_TIMEOUT) -> tuple[int, dict]:
+    """问一个 bot 当前的思考强度档位与可选档位（GET /v1/effort）。timeout 缺省同上面那条说明。"""
+    return _call(channel_dir, "GET", "/v1/effort", timeout=timeout)
 
 
 def effort_set(channel_dir: str, effort: str) -> tuple[int, dict]:
