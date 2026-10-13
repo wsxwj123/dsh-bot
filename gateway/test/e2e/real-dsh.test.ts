@@ -273,3 +273,42 @@ for (const [api, mode] of [['openai-completions', 'empty'], ['openai-responses',
     })
   }, 360_000)
 }
+
+// ─── 补充（验收后补的盲区）：空内容不再重试之后，别的重试还在 ───
+// 网关补给 dsh 的重试名单里只拿掉了"空内容"，服务端错误与限流仍在（INTERFACE-dsh修补 1.1），次数没动。
+// 数的是"一次提问之内"的请求：网关之后的补救轮会在请求体里多出那句补救提示（1.2 的 ⟦系统：上一条消息没能处理完…⟧），不算在内。
+
+const RESCUE_MARK = '⟦系统：上一条消息没能处理完'
+
+/** 让假模型服务每次都回同一种 HTTP 报错，发一条消息，等第一次提问有了结局，返回这次提问之内假模型收到的请求数 */
+async function requestsInFirstPrompt(mode: UpstreamMode, text: string): Promise<{ first: number; note: string }> {
+  let out = { first: -1, note: '' }
+  await withUpstream('openai-completions', mode, async ({ tg, b, up }) => {
+    const isRescue = (r: { body: any }) => JSON.stringify(r.body ?? null).includes(RESCUE_MARK)
+    tg.pushText(acc.FRIEND, text)
+    await acc.until(() => up.generations().length >= 1, '真 dsh 向假模型发出第一个请求', 120_000)
+    // 第一次提问结束的三种看得见的迹象，哪个先到都行：日志里这一轮有了结局、补救轮的请求到了、主人收到了通知
+    await acc.until(() => acc.evs(b, 'turn.end').length >= 1 || up.generations().some(isRescue) || tg.sentTo(acc.OWNER).length > 0, '第一次提问有了结局', 150_000)
+    await acc.sleep(1_500)
+    const all = up.generations()
+    out = {
+      first: all.filter(r => !isRescue(r)).length,
+      note: `假模型共收到 ${all.length} 个请求，其中带补救提示的 ${all.filter(isRescue).length} 个；这一轮在日志里的结局：${JSON.stringify(acc.evs(b, 'turn.end'))}`,
+    }
+    expect(tg.sentTo(acc.FRIEND), '模型一个字都没回，对方不该收到任何消息').toEqual([])
+  })
+  return out
+}
+
+test.skipIf(!available)('真 dsh 重试还在：模型服务每次都回服务端错误（HTTP 500），一次提问之内假模型收到 6 个请求（与修补前一样，1 次加重试 5 次）', async () => {
+  // 依据：INTERFACE-dsh修补 1.3 的表，"上游一直回 HTTP 500"一行，改前改后都是 6。
+  const { first, note } = await requestsInFirstPrompt('http-500', '你好 retryA')
+  expect(first, note).toBe(6)
+}, 360_000)
+
+test.skipIf(!available)('真 dsh 重试还在：模型服务每次都回限流（HTTP 429），一次提问之内假模型收到 6 个请求（1 次加重试 5 次）', async () => {
+  // 依据：需求说明里现场记下的重试策略是"最多重试 5 次"，限流与服务端错误在同一张可重试名单里，并要求限流的重试行为不变；
+  // 网关补的策略只换了名单、没给次数（INTERFACE-dsh修补 1.1）。1.3 的表里没有单列 429 这一行，6 这个数是按上面两处推出来的。
+  const { first, note } = await requestsInFirstPrompt('http-429', '你好 retryB')
+  expect(first, note).toBe(6)
+}, 360_000)
