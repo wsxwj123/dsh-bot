@@ -19,11 +19,15 @@ def page(hub, path):
 
 
 def test_门户三组卡片的入口一个不少(hub):
-    """/hub 门户要留全部既有入口，再补上供应商与模型那张。"""
+    """/hub 门户要留全部既有入口，再补上供应商与模型那张。
+
+    「密钥待填」页 /hub/setup 已下线（INTERFACE-dsh修补 4.2），门户不再有指向它的卡片。
+    """
     html = page(hub, "/hub")
-    for href in ('/hub/dsh-model', '/hub/bots', '/hub/addbot', '/hub/setup', '/hub/params',
+    for href in ('/hub/dsh-model', '/hub/bots', '/hub/addbot', '/hub/params',
                  '/hub/provider', '/provider', '/styles', 'href="/"'):
         assert href in html, "/hub 门户缺入口 %s" % href
+    assert "/hub/setup" not in html, "/hub 门户还留着指向 /hub/setup 的入口"
 
 
 def test_门户provider卡片class在href之前(hub):
