@@ -20,13 +20,14 @@ GW_PREVIEW = "/v1/provider/preview"
 GW_REFRESH = "/v1/provider/refresh"
 GW_TEST = "/v1/provider/test"
 
+# 样例按 INTERFACE-dsh修补 3.1、3.3：已在清单的默认打勾，新出现的（不在清单）默认不打勾；顶层多一个 list_rev
 PREVIEW_OK = {
-    "ok": True, "count": 2,
+    "ok": True, "count": 2, "list_rev": "rev-sample-0001",
     "models": [
         {"id": "m1", "contextWindow": 131072, "in_list": True, "in_fetched": True,
          "manual": False, "default_checked": True},
         {"id": "m2", "contextWindow": None, "in_list": False, "in_fetched": True,
-         "manual": False, "default_checked": True},
+         "manual": False, "default_checked": False},
     ],
 }
 TEST_OK = {"ok": True, "model": "m1", "latency_ms": 37, "status": 200,
@@ -84,7 +85,7 @@ def test_preview_空对象体即可_200原样透传(web_client, gw_stub, gw_bot)
     gw_stub.on(GW_PREVIEW, 200, PREVIEW_OK)
     r = web_client.post(_url(PREVIEW, "myproxy"), json={})
     assert r.status_code == 200, r.get_json()
-    assert r.get_json() == PREVIEW_OK, "200 应原样透传网关（{ok,count,models}）"
+    assert r.get_json() == PREVIEW_OK, "200 应原样透传网关（{ok,count,list_rev,models}）"
     hits = gw_stub.hits(GW_PREVIEW)
     assert len(hits) == 1, gw_stub.requests
     assert hits[0]["method"] == "POST" and hits[0]["auth_ok"], hits[0]
@@ -332,3 +333,31 @@ def test_test_名字含大写下划线_转发原样(web_client, gw_stub, gw_bot)
     r = web_client.post(_url(TEST, "My_Proxy"), json={})
     assert r.status_code == 200, r.get_json()
     assert gw_stub.hits(GW_TEST)[0]["body"] == {"name": "My_Proxy"}
+
+
+# ============================================================ INTERFACE-dsh修补 3.3：refresh 的 rev
+
+LIST_CHANGED = {"ok": False, "error": "list_changed",
+                "text": "清单刚被别处改过，这次没保存，请重新刷新模型列表。"}
+
+
+def test_refresh_带rev_原样转发_网关回409清单被改过也原样透传(web_client, gw_stub, gw_bot):
+    """页面确定时把预览拿到的 list_rev 作为 rev 带上；管理台原样转发，网关的 409 原样交回页面。"""
+    _one_gw(web_client, gw_bot, gw_stub)
+    gw_stub.on(GW_REFRESH, 409, LIST_CHANGED)
+    r = web_client.post(_url(REFRESH, "myproxy"), json={"only": ["a", "b"], "rev": "rev-sample-0001"})
+    assert r.status_code == 409, r.get_json()
+    assert r.get_json() == LIST_CHANGED, "409 应原样透传"
+    hits = gw_stub.hits(GW_REFRESH)
+    assert len(hits) == 1, gw_stub.requests
+    assert hits[0]["body"] == {"name": "myproxy", "only": ["a", "b"], "rev": "rev-sample-0001"}, hits[0]["body"]
+
+
+def test_refresh_rev形状不对_管理台这侧就回400_bad_rev_不转发(web_client, gw_stub, gw_bot):
+    """rev 不是字符串、为空、超过 100 个字符：400 bad_rev 与固定文案，网关一个请求都收不到。"""
+    _one_gw(web_client, gw_bot, gw_stub)
+    for rev in (123, "", "r" * 101, ["x"]):
+        r = web_client.post(_url(REFRESH, "myproxy"), json={"only": ["a"], "rev": rev})
+        assert r.status_code == 400, (rev, r.status_code, r.get_json())
+        assert r.get_json() == {"ok": False, "error": "bad_rev", "text": "rev 不合法"}, (rev, r.get_json())
+    assert gw_stub.requests == [], "形状不对就不该转发"
