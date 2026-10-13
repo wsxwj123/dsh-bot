@@ -368,7 +368,7 @@ async function refreshProvider(p, btn) {
                          {method: 'POST', body: JSON.stringify({})});
   if (s.status === 200 && s.body && s.body.ok) {
     pickBtn = btn;
-    openPick(p, s.body.models || []);
+    openPick(p, s.body.models || [], s.body.list_rev);
     return;
   }
   btn.disabled = false;
@@ -389,15 +389,16 @@ async function testProvider(p, btn) {
 }
 
 // ── 勾选弹窗（§11d）────────────────────────────────────
-// 默认勾选、标记都来自网关算好的行（default_checked / manual / in_list / in_fetched），
-// 页面不算规则。搜索只切行的 hidden 类，不重建元素 —— 勾选状态挂在元素上，过滤不丢。
-let pickCtx = null;                 // {p, rows: [{id, el, box}]}
-const openPick = function (p, models) {
+// 默认勾选照用网关算好的 default_checked，页面不算规则；标记由行里的 manual / in_list / in_fetched 判断。
+// 搜索只切行的 hidden 类，不重建元素 —— 勾选状态挂在元素上，过滤不丢。
+// rev 是预览拿到的清单指纹，确定时带回去：打开弹窗之后清单被别处改过，网关就不保存这次勾选。
+let pickCtx = null;                 // {p, rev, rows: [{id, el, box}]}
+const openPick = function (p, models, rev) {
   const list = $('pickList');
   list.textContent = '';
   $('pickTitle').textContent = '挑要保留的模型：' + p.name;
   $('pickSearch').value = '';
-  pickCtx = {p: p, rows: []};
+  pickCtx = {p: p, rev: rev, rows: []};
   const tpl = $('pickRowTpl');
   for (const m of models) {
     const node = tpl.content.cloneNode(true);
@@ -407,9 +408,13 @@ const openPick = function (p, models) {
     box.addEventListener('change', paintPickCount);
     node.querySelector('[data-id]').textContent = m.id;
     const tag = node.querySelector('[data-tag]');
-    if (m.manual) { tag.textContent = '手动'; tag.hidden = false; }
-    else if (m.in_list && !m.in_fetched) { tag.textContent = '上游没有'; tag.hidden = false; }
-    else if (m.in_fetched && !m.in_list) { tag.textContent = '新'; tag.hidden = false; }
+    // 从上到下先命中先用：不在清单的只标「新」，哪怕手填名单里有它
+    let mark = '';
+    if (!m.in_list) mark = '新';
+    else if (m.manual && !m.in_fetched) mark = '手动、对方这次没返回';
+    else if (m.manual) mark = '手动';
+    else if (!m.in_fetched) mark = '对方这次没返回';
+    if (mark) { tag.textContent = mark; tag.hidden = false; }
     const ctx = node.querySelector('[data-ctx]');
     if (m.contextWindow != null) ctx.textContent = '上下文 ' + m.contextWindow;
     list.appendChild(node);
@@ -444,10 +449,12 @@ async function confirmPick() {
   if (!pickCtx) return;
   const p = pickCtx.p;
   const ids = pickCtx.rows.filter((r) => r.box.checked).map((r) => r.id);   // 含被过滤隐藏的
+  const payload = {only: ids};
+  if (typeof pickCtx.rev === 'string' && pickCtx.rev) payload.rev = pickCtx.rev;
   closePick();
   persistMsg(p.name + '：正在按勾选落盘…');
   const s = await hubApi('/hub/api/dsh-model/provider/' + encodeURIComponent(p.name) + '/refresh',
-                         {method: 'POST', body: JSON.stringify({only: ids})});
+                         {method: 'POST', body: JSON.stringify(payload)});
   const t = (s.body && (s.body.text || s.body.detail || s.body.error)) || ('失败（' + s.status + '）');
   await load();                       // 非 200 也重拉：结果以列表为准（与 504 的既有口径一致）
   persistMsg(p.name + '：' + t);
