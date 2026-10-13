@@ -90,9 +90,16 @@ export async function fetchModels(req: FetchModelsRequest, o: { timeoutMs: numbe
       try {
         list = await getList(`${baseURL}/models`, headers)
       } catch (e) {
-        // 地址只有域名时常见的是少写了 /v1：404、401、403 再在 /v1 下试一次（方案 3.7），成功就把地址补上
-        if (!(e instanceof Fail) || !['unauthorized', 'not_found'].includes(e.reason) || new URL(baseURL).pathname !== '/') throw e
-        list = await getList(`${baseURL}/v1/models`, headers)
+        // 地址只有域名时常见的是少写了 /v1：404、401、403，或者回了 2xx 却不是模型清单（有的中转站在域名下放的是网页），
+        // 再在 /v1 下试一次，成功就把地址补上。bad_response 在 getList 里只会来自 2xx 的回包（不是 JSON、没有清单数组、超过 4 MiB）
+        if (!(e instanceof Fail) || !['unauthorized', 'not_found', 'bad_response'].includes(e.reason) || !isBareHost(baseURL)) throw e
+        try {
+          list = await getList(`${baseURL}/v1/models`, headers)
+        } catch (e2) {
+          // 两次都失败默认报第二次的。唯独「第一次是网页、第二次 404」报第一次的：404 的文案叫主人检查 /v1，而网关刚替他试过 /v1
+          if (e.reason === 'bad_response' && e2 instanceof Fail && e2.reason === 'not_found') throw e
+          throw e2
+        }
         baseURL = `${baseURL}/v1`
         v1Added = true
       }
@@ -114,7 +121,8 @@ export async function fetchModels(req: FetchModelsRequest, o: { timeoutMs: numbe
  * - 与 fetchModels 同一把尺：失败只有原因枚举与状态码，绝不带密钥、地址、对方回包正文；
  * - 判据 = HTTP 200 且回包是 JSON（不解析内容）；3xx 按 redirect（redirect:'manual'）；
  * - 超时是单次上限（无翻页，不乘 3）；
- * - openai 系地址 pathname 为 / 且首次 401/404 时在 /v1 下重试一次（同 fetchModels 的回落）。
+ * - openai 系地址 pathname 为 / 且首次 401/404 时在 /v1 下重试一次。比 fetchModels 的回落窄：2xx 但不是 JSON 时不再试
+ *   （测试连接是只读的，补不了保存的地址，在 /v1 下测通会出现「测试说通、聊天不通」），由调用方加一句提示。
  */
 export async function probeModel(req: ProbeModelRequest, o: { timeoutMs: number; fetch?: typeof fetch }): Promise<ProbeModelResult> {
   const doFetch = o.fetch ?? fetch
@@ -147,7 +155,7 @@ export async function probeModel(req: ProbeModelRequest, o: { timeoutMs: number;
     return { ok: true }
   } catch (e) {
     // 地址只有域名时常见的是少写了 /v1：401、404 再在 /v1 下试一次（§12a）
-    if (req.api !== 'anthropic-messages' && e instanceof Fail && ['unauthorized', 'not_found'].includes(e.reason) && pathnameOf(req.baseURL) === '/') {
+    if (req.api !== 'anthropic-messages' && e instanceof Fail && ['unauthorized', 'not_found'].includes(e.reason) && isBareHost(req.baseURL)) {
       try {
         await post(`${req.baseURL}/v1${path}`)
         return { ok: true }
@@ -159,8 +167,9 @@ export async function probeModel(req: ProbeModelRequest, o: { timeoutMs: number;
   }
 }
 
-function pathnameOf(url: string): string {
-  try { return new URL(url).pathname } catch { return '' }
+/** 地址的路径部分是不是空的（只有协议、主机、可选端口）。到 /v1 下再试、提示「可能少写了 /v1」都只对这种地址 */
+export function isBareHost(url: string): boolean {
+  try { return new URL(url).pathname === '/' } catch { return false }
 }
 
 /**
