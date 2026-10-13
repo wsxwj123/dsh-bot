@@ -1,11 +1,13 @@
 // 验收：刷新模型——引导「刷新模型」（INTERFACE 3.4.5）与一行命令 /provider refresh（3.6）、锁（3.1.3）
 import { describe, expect, test } from 'bun:test'
 import { existsSync, utimesSync, writeFileSync } from 'fs'
-import { OWNER, labels, lockPath, openProviderMenu, override, providersPath, readProviders, seedCreds, seedProviders, sleep, until, waitEvent, waitSentText, waitText, withModels, type BotEnv } from './_acc'
+import { DISJOINT_NOTE, OWNER, labels, lockPath, openProviderMenu, override, providersPath, readProviders, seedCreds, reconLine, seedProviders, sleep, until, waitEvent, waitSentText, waitText, withModels, type BotEnv } from './_acc'
 import { type FakeModels, json, openaiOk, sleep as fsleep } from './fake-models'
 
 const FETCHED = [{ id: 'm1', context_length: 8000 }, 'm3', 'm4', 'm3']
-const DONE = '【系统】「myproxy」拉到 3 个模型（新增 2 个，去掉 1 个；手动加的 1 个保留）。'
+// 清单不为空时聊天里的刷新只对账、不改清单（INTERFACE-dsh修补 5.2）：对方返回 m1、m3、m4（去重后 3 个），
+// 其中 m3、m4 不在清单里，清单里的 m2、man1 对方这次没返回。
+const DONE = `【系统】「myproxy」${reconLine(3, 2, 2)}`
 /** 预置：m1（主人手填上下文 50000）、m2（拉到的）、man1（手动加的）；凭据里有 fm 期望的密钥 */
 const seed = (o: { key?: boolean; name?: string; api?: any } = {}) => (b: BotEnv, fm: FakeModels) => {
   seedProviders(b.root, [{ name: o.name ?? 'myproxy', api: o.api, baseURL: `${fm.url}/v1`, models: [{ id: 'm1', contextWindow: 50000 }, 'm2', 'man1'], manualModels: ['man1'], ownerContext: ['m1'] }])
@@ -52,22 +54,22 @@ describe('引导「刷新模型」', () => {
     })
   })
 
-  test('成功：文案写新增/去掉/保留的个数与「去掉了：m2」，按钮「切到这家」「关闭」', async () => {
+  test('成功（清单不为空）：回对账句，不再写新增/去掉了什么，按钮「切到这家」「关闭」', async () => {
     await withModels({ handler: openaiOk(FETCHED), before: seed() }, async ({ tg }) => {
       const { mid } = await refreshViaMenu(tg)
-      const t = await waitText(tg, OWNER, mid, x => x.includes('拉到 3 个模型'), '刷新结果', 20_000)
-      expect(t).toContain(DONE)
-      expect(t).toContain('去掉了：m2')
+      const t = await waitText(tg, OWNER, mid, x => x.includes('对方现在有 3 个模型'), '刷新结果', 20_000)
+      expect(t).toBe(DONE)
+      expect(t).not.toContain('去掉了')
       expect(labels(tg, mid)).toEqual(['切到这家', '关闭'])
     })
   })
 
-  test('成功：新列表 = 拉到的（去重保序）+ 手动加的；主人手填的上下文长度保留', async () => {
+  test('成功（清单不为空）：清单逐项不变（模型名、先后、上下文长度），手填名单不变', async () => {
     await withModels({ handler: openaiOk(FETCHED), before: seed() }, async ({ tg, b }) => {
       const { mid } = await refreshViaMenu(tg)
-      await waitText(tg, OWNER, mid, x => x.includes('拉到 3 个模型'), '刷新结果', 20_000)
+      await waitText(tg, OWNER, mid, x => x.includes('对方现在有 3 个模型'), '刷新结果', 20_000)
       const e = readProviders(b.root).providers.myproxy
-      expect(e.route.models).toEqual([{ id: 'm1', contextWindow: 50000 }, { id: 'm3', contextWindow: 1048576 }, { id: 'm4', contextWindow: 1048576 }, { id: 'man1', contextWindow: 1048576 }])
+      expect(e.route.models).toEqual([{ id: 'm1', contextWindow: 50000 }, { id: 'm2', contextWindow: 1048576 }, { id: 'man1', contextWindow: 1048576 }])
       expect(e.meta.manualModels).toEqual(['man1'])
     })
   })
@@ -76,7 +78,7 @@ describe('引导「刷新模型」', () => {
     await withModels({ handler: openaiOk(FETCHED), before: seed() }, async ({ tg, b }) => {
       const t0 = Date.now()
       const { mid } = await refreshViaMenu(tg)
-      await waitText(tg, OWNER, mid, x => x.includes('拉到 3 个模型'), '刷新结果', 20_000)
+      await waitText(tg, OWNER, mid, x => x.includes('对方现在有 3 个模型'), '刷新结果', 20_000)
       const lr = readProviders(b.root).providers.myproxy.meta.lastRefresh
       expect(lr.ok).toBe(true)
       expect(lr.count).toBe(3)
@@ -85,15 +87,14 @@ describe('引导「刷新模型」', () => {
     })
   })
 
-  test('本 bot 正在用被去掉的模型：结果加一句，并换回配置文件里的模型', async () => {
+  test('本 bot 正在用的模型对方这次没返回：不会被换掉，不出现「已换回配置文件里的模型」', async () => {
     await withModels({ handler: openaiOk(FETCHED), before: seed() }, async ({ tg, b }) => {
       tg.pushText(OWNER, '/model myproxy/m2')
       await waitSentText(tg, OWNER, '已换成 myproxy / m2')
       const { mid } = await refreshViaMenu(tg)
-      const t = await waitText(tg, OWNER, mid, x => x.includes('拉到 3 个模型'), '刷新结果', 20_000)
-      expect(t).toContain('这个 bot 正在用的 m2 不在新列表里，已换回配置文件里的模型。')
-      const o = override(b)
-      expect(o === null || !o.provider).toBe(true)
+      const t = await waitText(tg, OWNER, mid, x => x.includes('对方现在有 3 个模型'), '刷新结果', 20_000)
+      expect(t).not.toContain('已换回配置文件里的模型')
+      expect(override(b)).toMatchObject({ provider: 'myproxy', model: 'm2' })
     })
   })
 
@@ -160,7 +161,7 @@ async function cmd(tg: any, text: string, timeoutMs = 20_000) {
 }
 
 describe('/provider refresh <名字>', () => {
-  test('成功：回 3.4.5 的成功文案，不带按钮', async () => {
+  test('成功（清单不为空）：回对账句，不带按钮', async () => {
     await withModels({ handler: openaiOk(FETCHED), before: seed() }, async ({ tg }) => {
       const k = tg.sentTo(OWNER).length
       tg.pushText(OWNER, '/provider refresh myproxy')
@@ -171,7 +172,7 @@ describe('/provider refresh <名字>', () => {
 
   test('名字按规整名匹配（MY_PROXY 找到 my-proxy）', async () => {
     await withModels({ handler: openaiOk(['z1']), before: (b, fm) => { seedProviders(b.root, [{ name: 'my-proxy', baseURL: `${fm.url}/v1`, models: ['z0'] }]); seedCreds(b.root, { PROVIDER_MY_PROXY_KEY: fm.expectKey }) } }, async ({ tg }) => {
-      expect(await cmd(tg, '/provider refresh MY_PROXY')).toContain('【系统】「my-proxy」拉到 1 个模型')
+      expect(await cmd(tg, '/provider refresh MY_PROXY')).toBe(`【系统】「my-proxy」${reconLine(1, 1, 1)}${DISJOINT_NOTE}`)
     })
   })
 
