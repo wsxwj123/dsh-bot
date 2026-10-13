@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { Logger } from '../../src/log'
-import { ProviderService } from '../../src/providers/service'
+import { listRev, ProviderService } from '../../src/providers/service'
 import { DEFAULT_CONTEXT, parseProviders, setCredentialRef } from '../../src/providers/store'
 import type { FetchedModel, FetchModelsRequest, FetchModelsResult, ProbeModelFn, ProbeModelRequest } from '../../src/providers/models'
 
@@ -156,7 +156,7 @@ test('删除：providers.json 移除、凭据键登记待删；到点后 process
   expect(snap.pendingKeyRemovals).toEqual([])
 })
 
-// ─── INTERFACE-新系统bot运维 §11a/§11b/§12a：preview、refresh 的 only、testConn ───
+// ─── INTERFACE-新系统bot运维 §11a/§11b/§12a：preview、refresh 的 only、testConn；默认勾选与按勾选保存按 INTERFACE-dsh修补 第三节 ───
 
 /** 预置一份 [a（owner 手填 5000）、b、manual c] 的自建与凭据 */
 function seedPreview(root: string) {
@@ -168,7 +168,7 @@ function seedPreview(root: string) {
 }
 const previewFetched = () => okModels([{ id: 'a', contextWindow: 8000 }, { id: 'b', contextWindow: null }, { id: 'd', contextWindow: null }], 'https://p.example.com/v1')
 
-test('preview（§11a）：先拉到的（上游顺序）后仅本地的（列表顺序）；行恒 6 键；count 只数拉到的；default_checked = in_fetched or manual；只读', async () => {
+test('preview（§11a）：先拉到的（上游顺序）后仅本地的（列表顺序）；行恒 6 键；count 只数拉到的；在清单里的默认勾、新出现的不勾；只读', async () => {
   const root = tmp()
   seedPreview(root)
   const { s, calls } = svc(root, previewFetched)
@@ -181,7 +181,7 @@ test('preview（§11a）：先拉到的（上游顺序）后仅本地的（列�
   expect(r.models).toEqual([
     { id: 'a', contextWindow: 8000, in_list: true, in_fetched: true, manual: false, default_checked: true },
     { id: 'b', contextWindow: null, in_list: true, in_fetched: true, manual: false, default_checked: true },
-    { id: 'd', contextWindow: null, in_list: false, in_fetched: true, manual: false, default_checked: true },
+    { id: 'd', contextWindow: null, in_list: false, in_fetched: true, manual: false, default_checked: false },
     { id: 'c', contextWindow: 1048576, in_list: true, in_fetched: false, manual: true, default_checked: true },
   ])
   expect(calls.length).toBe(1)
@@ -197,7 +197,7 @@ test('preview：拉到 0 个（empty）也是 200，models 只含仅本地的行
   if (r.status !== 'ok') return
   expect(r.count).toBe(0)
   expect(r.models.map(m => m.id)).toEqual(['a', 'b', 'c'])
-  expect(r.models.map(m => m.default_checked)).toEqual([false, false, true])
+  expect(r.models.map(m => m.default_checked), '在清单里的都默认勾，不分是不是手填').toEqual([true, true, true])
 
   const { s: s1, calls } = svc(root, previewFetched)
   setCredentialRef(credPathOf(root), 'PROVIDER_MYPROXY_KEY', null)
@@ -206,25 +206,25 @@ test('preview：拉到 0 个（empty）也是 200，models 只含仅本地的行
   expect((await s1.preview('nosuch')).status).toBe('not_found')
 })
 
-test('refresh 带 only（§11b）：落盘 =（拉到的 ∩ only）∪（列表 ∩ only）；勾上但上游没有的粘进 manualModels；owner 手填的保留', async () => {
+test('refresh 带 only：原来在清单的在前（原先后、原上下文），新勾上的在后（对方返回的先后）；重复的名字当成一个', async () => {
   const root = tmp()
   seedPreview(root)
   const { s } = svc(root, previewFetched)
-  const r = await s.refresh('myproxy', ['a', 'd', 'c'])
+  const r = await s.refresh('myproxy', { only: ['d', 'a', 'd', 'c', 'a'] })
   expect(r.status).toBe('ok')
   if (r.status !== 'ok') return
-  expect(r).toMatchObject({ count: 3, added: 1, removed: ['b'], keptManual: 1, selected: 3, bySelection: true })
+  expect(r).toMatchObject({ count: 3, added: 1, removed: ['b'], keptManual: 1, selected: 3, applied: 'selection' })
   const e = read(root).valid.myproxy!
-  expect(e.route.models.map(m => m.id)).toEqual(['a', 'd', 'c'])
+  expect(e.route.models, 'a 对方这次给了 8000，仍保持原来的 5000').toEqual([{ id: 'a', contextWindow: 5000 }, { id: 'c', contextWindow: 1048576 }, { id: 'd', contextWindow: DEFAULT_CONTEXT }])
   expect(e.meta.manualModels).toEqual(['c'])
-  expect(e.route.models.find(m => m.id === 'a')!.contextWindow).toBe(5000)
+  expect(e.meta.guessedContext, 'b 被取消勾选移出，c 不变，d 对方没给上下文加进去').toEqual(['c', 'd'])
 })
 
 test('refresh 带 only：未知 id 静默忽略、旧 manual 被弃选即移除；only: [] 清空列表与 manual', async () => {
   const root = tmp()
   seedPreview(root)
   const { s } = svc(root, previewFetched)
-  const r = await s.refresh('myproxy', ['a', 'zzz-never-seen'])
+  const r = await s.refresh('myproxy', { only: ['a', 'zzz-never-seen'] })
   expect(r.status).toBe('ok')
   expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['a'])
   expect(read(root).valid.myproxy!.meta.manualModels).toEqual([])
@@ -232,7 +232,7 @@ test('refresh 带 only：未知 id 静默忽略、旧 manual 被弃选即移除�
   const root2 = tmp()
   seedPreview(root2)
   const { s: s2 } = svc(root2, previewFetched)
-  const r2 = await s2.refresh('myproxy', [])
+  const r2 = await s2.refresh('myproxy', { only: [] })
   expect(r2.status).toBe('ok')
   if (r2.status !== 'ok') return
   expect(r2).toMatchObject({ selected: 0, keptManual: 0, removed: ['a', 'b', 'c'] })
@@ -247,7 +247,7 @@ test('refresh 不带 only：响应加 selected、removed 仍是数组、manual �
   const r = await s.refresh('myproxy')
   expect(r.status).toBe('ok')
   if (r.status !== 'ok') return
-  expect(r).toMatchObject({ count: 3, added: 1, keptManual: 1, selected: 4, bySelection: false })
+  expect(r).toMatchObject({ count: 3, added: 1, keptManual: 1, selected: 4, applied: 'full' })
   expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['a', 'b', 'd', 'c'])
 })
 
@@ -255,19 +255,19 @@ test('refresh 不带 only：响应加 selected、removed 仍是数组、manual �
 
 const emptyCatalog = (): FetchModelsResult => ({ ok: false, reason: 'empty', status: null })
 
-test('refresh 带 only、上游回空目录：按拉到 0 个照勾选落盘，勾上的全进 manualModels，记成成功', async () => {
+test('refresh 带 only、上游回空目录：按拉到 0 个照勾选落盘，勾上的不会因此变成手填，记成成功', async () => {
   const root = tmp()
   seedPreview(root)
   let changed = 0
   const { s, log } = svc(root, emptyCatalog, { now: () => 4242, onChanged: () => changed++ })
-  const r = await s.refresh('myproxy', ['a', 'c', 'zzz-never-seen'])
+  const r = await s.refresh('myproxy', { only: ['a', 'c', 'zzz-never-seen'] })
   expect(r.status).toBe('ok')
   if (r.status !== 'ok') return
-  expect(r).toMatchObject({ count: 0, added: 0, removed: ['b'], keptManual: 2, selected: 2, bySelection: true })
+  expect(r).toMatchObject({ count: 0, added: 0, removed: ['b'], keptManual: 1, selected: 2, applied: 'selection' })
   const e = read(root).valid.myproxy!
   expect(e.route.models, '只留勾上的本地模型；owner 手填的上下文原样保留').toEqual([{ id: 'a', contextWindow: 5000 }, { id: 'c', contextWindow: 1048576 }])
-  expect(e.meta.manualModels, 'a 原先不是手动的，勾上而上游没有 → 记成手动').toEqual(['a', 'c'])
-  expect(e.meta.guessedContext, '这次没有从上游拿到任何上下文，不凭空标猜测').toEqual([])
+  expect(e.meta.manualModels, 'a 原先不是手动的，勾上而对方这次没返回：仍然不是').toEqual(['c'])
+  expect(e.meta.guessedContext, 'b 被取消勾选移出，c 原来在名单里、仍然在').toEqual(['c'])
   expect(e.meta.lastRefresh).toEqual({ at: 4242, ok: true, count: 0, reason: null })
   expect(changed).toBe(1)
   expect(log.events.filter(ev => ev.event === 'provider.models_failed'), '这一路不是失败，不记失败日志').toEqual([])
@@ -278,7 +278,7 @@ test('refresh 带 only: []、上游回空目录：列表与 manualModels 都清�
   const root = tmp()
   seedPreview(root)
   const { s } = svc(root, emptyCatalog)
-  const r = await s.refresh('myproxy', [])
+  const r = await s.refresh('myproxy', { only: [] })
   expect(r.status).toBe('ok')
   if (r.status !== 'ok') return
   expect(r).toMatchObject({ count: 0, added: 0, removed: ['a', 'b', 'c'], keptManual: 0, selected: 0 })
@@ -306,7 +306,7 @@ test('refresh 带 only、上游别的失败：照旧是失败，列表不动（�
     seedPreview(root)
     const before = read(root).valid.myproxy!
     const { s } = svc(root, () => ({ ok: false, reason, status: null }))
-    const r = await s.refresh('myproxy', ['a'])
+    const r = await s.refresh('myproxy', { only: ['a'] })
     expect(r, reason).toMatchObject({ status: 'failed', reason })
     const e = read(root).valid.myproxy!
     expect(e.route.models, reason).toEqual(before.route.models)
@@ -323,10 +323,110 @@ test('空目录的判据 preview 与带 only 的 refresh 一致：预览能开�
   expect(pv.status).toBe('ok')
   if (pv.status !== 'ok') return
   const checked = pv.models.filter(m => m.default_checked).map(m => m.id)
-  expect(checked).toEqual(['c'])
-  const r = await s.refresh('myproxy', checked)
+  expect(checked).toEqual(['a', 'b', 'c'])
+  const r = await s.refresh('myproxy', { only: checked, rev: pv.listRev })
   expect(r.status).toBe('ok')
-  expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['c'])
+  expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['a', 'b', 'c'])
+})
+
+// ─── INTERFACE-dsh修补 第三节：默认勾选的取值表、清单指纹、直接确定清单不变 ───
+
+/** 写一家自建供应商（模型可带 reasoningEfforts），凭据齐 */
+function seedList(root: string, models: { id: string; contextWindow: number; reasoningEfforts?: unknown }[], meta: { manual?: string[]; guessed?: string[]; owner?: string[] } = {}) {
+  writeFileSync(providersPathOf(root), JSON.stringify({ version: 1, providers: { myproxy: {
+    route: { api: 'openai-completions', baseURL: 'https://p.example.com/v1', apiKeyEnv: 'PROVIDER_MYPROXY_KEY', models },
+    meta: { createdAt: 1, updatedAt: 1, epoch: 1, keyRev: 1, guessedContext: meta.guessed ?? [], ownerContext: meta.owner ?? [], manualModels: meta.manual ?? [], lastRefresh: null },
+  } }, pendingKeyRemovals: [] }))
+  setCredentialRef(credPathOf(root), 'PROVIDER_MYPROXY_KEY', 'test-key-7abcdefghij')
+}
+const fetchedIds = (...ids: string[]) => () => okModels(ids.map(id => ({ id, contextWindow: null })), 'https://p.example.com/v1')
+
+test('默认勾选的取值表（3.1 的八行）：default_checked = in_list or（清单为空 and in_fetched）', async () => {
+  // 清单不为空：[inboth, inboth-m（手填）, gone-m（手填）, gone]，手填名单里另有一个不在清单的 ghost
+  const root = tmp()
+  seedList(root, ['inboth', 'inboth-m', 'gone-m', 'gone'].map(id => ({ id, contextWindow: 8000 })), { manual: ['inboth-m', 'gone-m', 'ghost'] })
+  const pv = await svc(root, fetchedIds('inboth', 'inboth-m', 'new', 'ghost')).s.preview('myproxy')
+  if (pv.status !== 'ok') throw new Error(pv.status)
+  expect(pv.models.map(m => [m.id, m.in_fetched, m.in_list, m.manual, m.default_checked])).toEqual([
+    ['inboth', true, true, false, true],
+    ['inboth-m', true, true, true, true],
+    ['new', true, false, false, false],
+    ['ghost', true, false, true, false],
+    ['gone-m', false, true, true, true],
+    ['gone', false, true, false, true],
+  ])
+  // 清单为空：拉到的全勾，哪怕手填名单里有它；对方也回空目录时一行都没有
+  const empty = tmp()
+  seedList(empty, [], { manual: ['ghost'] })
+  const pv2 = await svc(empty, fetchedIds('x', 'ghost')).s.preview('myproxy')
+  if (pv2.status !== 'ok') throw new Error(pv2.status)
+  expect(pv2.models.map(m => [m.id, m.in_fetched, m.in_list, m.manual, m.default_checked])).toEqual([['x', true, false, false, true], ['ghost', true, false, true, true]])
+  expect(await svc(empty, () => ({ ok: false, reason: 'empty', status: null })).s.preview('myproxy')).toMatchObject({ status: 'ok', count: 0, models: [] })
+})
+
+test('清单指纹：只看模型名序列和手填名单；上下文长度、时间戳、刷新记录、别的名单不影响；先后或手填名单一变就变', () => {
+  const entry = (ids: string[], manual: string[], extra: Record<string, unknown> = {}) => parseProviders(JSON.stringify({ version: 1, providers: { p: {
+    route: { api: 'openai-completions', baseURL: 'https://p.example.com/v1', apiKeyEnv: 'PROVIDER_P_KEY', models: ids.map(id => ({ id, contextWindow: (extra.ctx as number) ?? 8000 })) },
+    meta: { createdAt: 1, updatedAt: extra.updatedAt ?? 1, epoch: 1, keyRev: 1, guessedContext: extra.guessed ?? [], ownerContext: [], manualModels: manual, lastRefresh: extra.lastRefresh ?? null },
+  } }, pendingKeyRemovals: [] })).valid.p!
+  const rev = listRev(entry(['a', 'b'], ['b']))
+  expect(rev).toMatch(/^[0-9a-f]{32}$/)
+  expect(listRev(entry(['a', 'b'], ['b'], { ctx: 4096, updatedAt: 99, guessed: ['a'], lastRefresh: { at: 9, ok: true, count: 9, reason: null } }))).toBe(rev)
+  for (const other of [entry(['b', 'a'], ['b']), entry(['a', 'b'], []), entry(['a', 'b'], ['b', 'ghost']), entry(['a'], ['b']), entry(['a', 'b', 'c'], ['b'])]) expect(listRev(other)).not.toBe(rev)
+  // 模型名和手填名单分开算：不会因为拼在一起恰好相同而撞上
+  expect(listRev(entry(['a', 'b'], []))).not.toBe(listRev(entry(['a'], ['b'])))
+})
+
+test('什么都不动直接确定：清单、先后、上下文长度、思考档位声明、手填名单、猜的上下文名单全都不变（对方返回的先后、内容、上下文都不同）', async () => {
+  const root = tmp()
+  const models = [{ id: 'a', contextWindow: 8000 }, { id: 'b', contextWindow: 1048576, reasoningEfforts: { high: 'high' } }, { id: 'c', contextWindow: 5000 }, { id: 'gone', contextWindow: 1048576 }]
+  seedList(root, models, { manual: ['c', 'ghost'], guessed: ['b', 'gone'], owner: ['a'] })
+  const before = read(root).valid.myproxy!
+  const pv = await svc(root, () => okModels([{ id: 'd', contextWindow: null }, { id: 'b', contextWindow: 64000 }, { id: 'a', contextWindow: 32000 }], 'https://p.example.com/v1')).s.preview('myproxy')
+  if (pv.status !== 'ok') throw new Error(pv.status)
+  const only = pv.models.filter(m => m.default_checked).map(m => m.id)
+  // 确定时对方返回的又变了
+  const r = await svc(root, () => okModels([{ id: 'e', contextWindow: null }, { id: 'a', contextWindow: 16000 }, { id: 'c', contextWindow: null }], 'https://p.example.com/v1'), { now: () => 777 }).s.refresh('myproxy', { only, rev: pv.listRev })
+  expect(r).toMatchObject({ status: 'ok', added: 0, removed: [], selected: 4, keptManual: 2, applied: 'selection' })
+  const after = read(root).valid.myproxy!
+  expect(after.route.models).toEqual(before.route.models)
+  expect(after.meta.manualModels).toEqual(['c', 'ghost'])
+  expect(after.meta.guessedContext).toEqual(['b', 'gone'])
+  expect(after.meta.ownerContext).toEqual(['a'])
+  expect(after.meta, '允许变的只有刷新记录和更新时间').toEqual({ ...before.meta, updatedAt: 777, lastRefresh: { at: 777, ok: true, count: 3, reason: null } })
+})
+
+test('手填名单里本来就不在清单的名字：按勾选保存时原样留着；它这次被新勾上就成了清单里的手填模型', async () => {
+  const root = tmp()
+  seedList(root, [{ id: 'a', contextWindow: 8000 }], { manual: ['c'] })
+  expect(await svc(root, fetchedIds('a', 'c')).s.refresh('myproxy', { only: ['a'] })).toMatchObject({ status: 'ok', keptManual: 1 })
+  expect(read(root).valid.myproxy!.meta.manualModels).toEqual(['c'])
+  expect(await svc(root, fetchedIds('a', 'c')).s.refresh('myproxy', { only: ['a', 'c'] })).toMatchObject({ status: 'ok', keptManual: 1, added: 1 })
+  expect(read(root).valid.myproxy!.route.models.map(m => m.id)).toEqual(['a', 'c'])
+  expect(read(root).valid.myproxy!.meta.manualModels).toEqual(['c'])
+})
+
+test('带 rev 确定：与保存那一刻的清单一致才保存；预览之后清单被别处改过回 list_changed，文件不变；不带 rev 不检查', async () => {
+  const root = tmp()
+  seedPreview(root)
+  const pv = await svc(root, previewFetched).s.preview('myproxy')
+  if (pv.status !== 'ok') throw new Error(pv.status)
+  // 别处删掉了 b
+  const raw = JSON.parse(readFileSync(providersPathOf(root), 'utf8'))
+  raw.providers.myproxy.route.models = raw.providers.myproxy.route.models.filter((m: { id: string }) => m.id !== 'b')
+  writeFileSync(providersPathOf(root), JSON.stringify(raw))
+  const before = readFileSync(providersPathOf(root), 'utf8')
+  let changed = 0
+  const { s } = svc(root, previewFetched, { onChanged: () => changed++ })
+  expect(await s.refresh('myproxy', { only: ['a', 'b', 'c'], rev: pv.listRev })).toEqual({ status: 'list_changed', name: 'myproxy' })
+  expect(readFileSync(providersPathOf(root), 'utf8')).toBe(before)
+  expect(changed).toBe(0)
+  // 重新预览拿新指纹就能保存；同一个指纹第二次确定（清单已被第一次改掉）被挡住
+  const pv2 = await s.preview('myproxy')
+  if (pv2.status !== 'ok') throw new Error(pv2.status)
+  expect((await s.refresh('myproxy', { only: ['a'], rev: pv2.listRev })).status).toBe('ok')
+  expect((await s.refresh('myproxy', { only: ['a'], rev: pv2.listRev })).status).toBe('list_changed')
+  expect((await s.refresh('myproxy', { only: ['a'] })).status).toBe('ok')
 })
 
 test('testConn（§12a）：用列表第一个模型发请求；成功记 provider.tested；请求里带凭据密钥、响应不含', async () => {
@@ -402,14 +502,14 @@ test('刷新时在 /v1 下才拉到：保存的地址补成 <地址>/v1，结果
   const root = tmp()
   seedBareHost(root)
   const { s, calls } = svc(root, () => viaV1(['a', 'b']))
-  const r = await s.refresh('myproxy', ['a', 'b'])
+  const r = await s.refresh('myproxy', { only: ['a', 'b'] })
   expect(r).toMatchObject({ status: 'ok', v1Added: true, baseURL: 'https://p.example.com/v1' })
   expect(calls[0]!.baseURL, '拉取用的是保存的原地址').toBe('https://p.example.com')
   expect(read(root).valid.myproxy!.route.baseURL).toBe('https://p.example.com/v1')
   expect(JSON.parse(readFileSync(providersPathOf(root), 'utf8')).providers.myproxy.route.timeoutMs).toBe(9000)
   // 地址已经带 /v1：下一次不再补，也不再说
   const again = svc(root, req => okModels([{ id: 'a', contextWindow: null }], req.baseURL))
-  expect(await again.s.refresh('myproxy', ['a'])).toMatchObject({ status: 'ok', v1Added: false, baseURL: 'https://p.example.com/v1' })
+  expect(await again.s.refresh('myproxy', { only: ['a'] })).toMatchObject({ status: 'ok', v1Added: false, baseURL: 'https://p.example.com/v1' })
   expect(again.calls[0]!.baseURL).toBe('https://p.example.com/v1')
 })
 
@@ -419,7 +519,7 @@ test('不补地址的三种：预览只读；带勾选时对方在 /v1 下回的
   const before = readFileSync(providersPathOf(root), 'utf8')
   expect((await svc(root, () => viaV1(['a', 'b'])).s.preview('myproxy')).status).toBe('ok')
   expect(readFileSync(providersPathOf(root), 'utf8'), '预览不写文件').toBe(before)
-  expect(await svc(root, () => ({ ok: false, reason: 'empty', status: null })).s.refresh('myproxy', ['a'])).toMatchObject({ status: 'ok', v1Added: false, baseURL: 'https://p.example.com' })
+  expect(await svc(root, () => ({ ok: false, reason: 'empty', status: null })).s.refresh('myproxy', { only: ['a'] })).toMatchObject({ status: 'ok', v1Added: false, baseURL: 'https://p.example.com' })
   expect(read(root).valid.myproxy!.route.baseURL).toBe('https://p.example.com')
   expect((await svc(root, () => ({ ok: false, reason: 'bad_response', status: null })).s.refresh('myproxy')).status).toBe('failed')
   expect(read(root).valid.myproxy!.route.baseURL).toBe('https://p.example.com')
