@@ -1467,13 +1467,10 @@ def bots_edit_save(bot_id):
 # 旧系统的 bot 不在这个页面上出现。段内辅助一律 `_dm` 前缀。
 # ======================================================================
 
-import http.client                                      # noqa: E402  本段自己的依赖
-import os                                               # noqa: E402
+import os                                               # noqa: E402  本段自己的依赖
 import re as _dm_re                                     # noqa: E402
-import socket                                           # noqa: E402
-import urllib.error                                     # noqa: E402
 
-import config_loader                                    # noqa: E402
+import config_loader                                   # noqa: E402
 import gateway_client                                   # noqa: E402
 from werkzeug.routing import BaseConverter              # noqa: E402  空名字段的转换器
 
@@ -1507,27 +1504,11 @@ _DM_TIMEOUT_READONLY = {"ok": False, "error": "gateway_timeout",
 _DM_INTERNAL = {"ok": False, "error": "internal",
                 "text": "管理台这边出错，这次操作可能已经生效，请刷新页面看结果"}
 
-# 请求"发出去之后"才可能出现的异常。这些都可能已经写进去了，一律 504 不重试。
-_DM_GATEWAY_ERRORS = (urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError)
-
-
-def _dm_unreachable(err):
-    """请求根本没发出去（拒连、DNS 解析不了）才算"这个网关不可用"，也才允许换下一个。
-
-    收发途中的任何意外都不算：换网关重试就是第二次写，会再拉一次模型、再抬一次 keyRev
-    （契约 2.2 钉死的行为，写端点的验收测试逐条盯着）。
-    """
-    return isinstance(err, urllib.error.URLError) and isinstance(
-        err.reason, (ConnectionRefusedError, socket.gaierror))
-
-
-def _dm_net_kind(err):
-    """网络异常归类：unreachable（没发出去）/ broken（发出后中断或超时）/ None（本地错误）。"""
-    if _dm_unreachable(err):
-        return "unreachable"
-    if isinstance(err, _DM_GATEWAY_ERRORS):
-        return "broken"
-    return None
+# 网络异常归类：unreachable（没发出去）/ broken（发出后中断或超时）/ None（本地错误）。
+# 判据搬到了 gateway_client.net_kind，与适配服务共用一份；本段照旧按这个名字用。
+# 请求根本没发出去才算"这个网关不可用"，也才允许换下一个；发出之后的意外一律 504 不重试：
+# 换网关重试就是第二次写，会再拉一次模型、再抬一次 keyRev（契约 2.2 钉死的行为）。
+_dm_net_kind = gateway_client.net_kind
 
 
 def _dm_forward(call, read_only=False):
