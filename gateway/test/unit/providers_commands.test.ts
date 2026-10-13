@@ -1,6 +1,6 @@
 // 供应商命令与纯函数（方案 3.6、3.7）：/provider add 的识别、刷新文案、上游错误归类、NO_PROXY 追加、身份键。
 import { expect, test } from 'bun:test'
-import { classifyUpstreamError, brainKey, identityOf } from '../../src/engine/engine'
+import { classifyTurnError, brainKey, identityOf } from '../../src/engine/engine'
 import { isProviderAdd, ProviderCommands } from '../../src/providers/commands'
 import { Logger } from '../../src/log'
 import { addNoProxyHosts } from '../../src/util'
@@ -37,10 +37,56 @@ test('刷新结果文案（3.4.5/3.6）：成功带统计与去掉了、失败�
   expect(c.refreshText('p1', { status: 'lock_timeout' })).toBe('【系统】别的 bot 正在改供应商，请稍后再试。')
 })
 
-test('上游错误归类（3.2 第 10、11 条）：只看文字、不分大小写；无关错误不归类', () => {
-  for (const m of ["400 This model's maximum context length is 8192 tokens", 'context_length_exceeded', 'Prompt Is Too Long: 1', 'TOO MANY TOKENS', 'input exceeds context_window', 'exceeds the context length']) expect(classifyUpstreamError(m)).toBe('context-overflow')
-  for (const m of ['400 Missing `reasoning_content` field', 'Thinking blocks are required']) expect(classifyUpstreamError(m)).toBe('thinking-history')
-  expect(classifyUpstreamError('upstream returned 502 Bad Gateway')).toBe(null)
+test('上游错误归类（3.2 第 10、11 条）：只看文字、不分大小写；无关错误归成普通失败', () => {
+  for (const m of ["400 This model's maximum context length is 8192 tokens", 'context_length_exceeded', 'Prompt Is Too Long: 1', 'TOO MANY TOKENS', 'input exceeds context_window', 'exceeds the context length']) expect(classifyTurnError(m)).toBe('context-overflow')
+  for (const m of ['400 Missing `reasoning_content` field', 'Thinking blocks are required']) expect(classifyTurnError(m)).toBe('thinking-history')
+  expect(classifyTurnError('upstream returned 502 Bad Gateway')).toBe('other')
+  expect(classifyTurnError('')).toBe('other')
+})
+
+test('报错归类的先后：上游拒绝排在上下文超长、历史思考被拒前面', () => {
+  for (const m of ['MISSING_CREDENTIAL deepseek-official requires DEEPSEEK_API_KEY', 'upstream returned 401 Unauthorized', 'Insufficient Balance', 'invalid api key', 'HTTP 403', 'quota exceeded']) expect(classifyTurnError(m)).toBe('fatal')
+  expect(classifyTurnError('401 unauthorized: prompt is too long')).toBe('fatal')
+  expect(classifyTurnError('402 insufficient balance while sending thinking blocks')).toBe('fatal')
+  // 400、500 这类不在"拒绝"里；网关拼在前面的 -32603 也不会被当成 403
+  expect(classifyTurnError('-32603 session/prompt: -32603 turn failed: upstream returned 500 Internal Server Error')).toBe('other')
+})
+
+test('空内容报错：turn failed 之后整句是那两句之一才算，前后多一截都不算', () => {
+  // 网关实际拿到的样子：<code> <method>: <code> <dsh 的 message>
+  const wrap = (m: string) => `-32603 session/prompt: -32603 ${m}`
+  const custom = 'Internal error: turn failed: model "gemini-3.6-flash" returned a completed response with no content'
+  const builtin = 'Internal error: turn failed: DeepSeek Messages returned no content'
+  for (const m of [custom, builtin, wrap(custom), wrap(builtin), 'turn failed: model "" returned a completed response with no content']) expect(classifyTurnError(m)).toBe('empty-response')
+  for (const m of [
+    'Internal error: turn failed: 502: upstream returned no content',
+    'Internal error: turn failed: upstream said: model "m" returned a completed response with no content',
+    `${custom}.`,
+    `${custom} (retry later)`,
+    `${builtin}\nmore`,
+    'Internal error: turn failed: deepseek messages returned no content',
+    'model "m" returned a completed response with no content',
+    'DeepSeek Messages returned no content',
+    // turn failed 出现两次：算的是第一个之后的整段
+    `Internal error: turn failed: wrapped: turn failed: DeepSeek Messages returned no content`,
+    // 名字里带引号：引号对不上，认不出来就按普通失败（退回原来的处理）
+    'Internal error: turn failed: model "a"b" returned a completed response with no content',
+  ]) expect(classifyTurnError(m), m).toBe('other')
+})
+
+test('报错归类不看 model、provider 后面引号里的名字；引号外面和别处的引号照旧参与', () => {
+  const odd = 'x-thinking-401-quota'
+  // 名字本身带着三类关键词：空内容仍是空内容，上游 503 仍是普通失败
+  expect(classifyTurnError(`-32603 session/prompt: -32603 Internal error: turn failed: model "${odd}" returned a completed response with no content`)).toBe('empty-response')
+  expect(classifyTurnError(`turn failed: model "${odd}" is overloaded, upstream returned 503 Service Unavailable`)).toBe('other')
+  expect(classifyTurnError(`no adapter registered for provider "my-balance-403-thinking"`)).toBe('other')
+  // 引号外面的文字照旧
+  expect(classifyTurnError(`turn failed: model "${odd}" rejected: upstream returned 401 Unauthorized`)).toBe('fatal')
+  expect(classifyTurnError(`turn failed: model "plain" says prompt is too long`)).toBe('context-overflow')
+  expect(classifyTurnError(`turn failed: model "plain" needs reasoning_content`)).toBe('thinking-history')
+  // 上游用 JSON 报的错，关键词在别的引号里：不能被去掉
+  expect(classifyTurnError('turn failed: 400 {"error":{"code":"context_length_exceeded","message":"too long"}}')).toBe('context-overflow')
+  expect(classifyTurnError('turn failed: 400 {"error":{"message":"Missing `reasoning_content` field","param":"model"}}')).toBe('thinking-history')
 })
 
 test('供应商身份与键：brainKey 取名字/模型/强度；identityOf 取第一个 / 前', () => {
