@@ -5,8 +5,10 @@
 // 只列本地那几行；带 only 的刷新却把同一件事当失败回 502，于是这种供应商在勾选弹窗里点确定
 // 永远失败。两处判据统一成一句：带 only 时，空目录不算失败。
 //
-// - only 给出、上游回空目录：按「拉到 0 个」落盘。落盘集合 = 当前列表 ∩ only，勾上的全部记进
-//   manualModels，没勾的移走。200，count 为 0，text 末尾照样追加「（按勾选保留 S 个）」，这次刷新记成成功。
+// - only 给出、上游回空目录：按「拉到 0 个」落盘。落盘集合 = 当前列表 ∩ only，没勾的移走。200，count 为 0，
+//   text 末尾照样追加「（按勾选保留 S 个）」，这次刷新记成成功。
+//   手填名单按 INTERFACE-dsh修补 3.2：只去掉"在清单里、这次没被勾上"的名字；勾上而对方没返回的不再因此变成手填
+//   （替换了第 8 稿「空目录时勾上的全部记进手填名单」）。
 // - only 缺省、上游回空目录：与以前一字不变，仍是 502 fetch_failed，reason 为 empty，列表不动。
 // - 上游别的失败：带不带 only 都仍是失败。
 import { describe, expect, test } from 'bun:test'
@@ -63,13 +65,13 @@ describe('refresh 带 only，上游回空目录：不算失败', () => {
     })
   })
 
-  test('勾上的全部记进手动名单：原先不是手动的也记进去，没勾的移走', async () => {
+  test('勾上而对方没返回的不会变成手填：原先不是手填的仍不是，没勾的移走', async () => {
     await withModels({ handler: EMPTY, before: seed({ models: ['a', 'b', 'c'], manual: ['c'] }) }, async ({ gw, b }) => {
       const r = await gw.call(REFRESH, { name: 'myproxy', only: ['a', 'c'] })
       expect(r.status, `实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
       expect(ids(b)).toEqual(['a', 'c'])
-      expect(manual(b), 'a 被勾上而上游目录里没有 → 记成手动').toEqual(['a', 'c'])
-      expect(r.json).toMatchObject({ count: 0, added: 0, removed: ['b'], kept_manual: 2, selected: 2 })
+      expect(manual(b), 'a 被勾上而对方目录里没有：手填名单仍只有 c').toEqual(['c'])
+      expect(r.json).toMatchObject({ count: 0, added: 0, removed: ['b'], kept_manual: 1, selected: 2 })
     })
   })
 
