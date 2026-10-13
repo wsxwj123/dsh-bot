@@ -64,6 +64,8 @@ export const nameLooksLikeSecret = (name: string): boolean => {
 }
 
 const DELETED_NOTE = '（你发的密钥消息已删除。）'
+/** 测试连接：对方回的不是接口返回、保存的地址又只有域名时接在失败文案末尾（测试连接不到 /v1 下再试，只提示） */
+const BARE_HOST_HINT = '。地址只写了域名，可能少写了 /v1'
 const NOT_DELETED_NOTE = '（你发的密钥消息没能删除，请手动删掉它。）'
 const ADD_USAGE = '【系统】用法：/provider add <名字> <地址> <密钥> [openai|anthropic]（不写格式按 Anthropic）。'
 const GROUP_ADD_TEXT = '【系统】/provider add 只能在私聊里用。这条消息已尝试删除；没删掉的话请手动删除，并考虑换一个新密钥。'
@@ -561,7 +563,7 @@ export class ProviderCommands {
       case 'ok':
         return { status: 200, body: { ok: true, model: r.model, latency_ms: r.latencyMs, status: 200, text: `连接正常：用 ${r.model} 测通，${r.latencyMs} 毫秒` } }
       case 'failed':
-        return { status: 502, body: { ok: false, error: 'connect_failed', reason: r.reason, text: `${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}；用 ${r.model} 测的` } }
+        return { status: 502, body: { ok: false, error: 'connect_failed', reason: r.reason, text: `${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}；用 ${r.model} 测的${r.reason === 'bad_response' && r.bareHost ? BARE_HOST_HINT : ''}` } }
       case 'no_models':
         return apiErr(409, 'no_models', '这个供应商还没有模型，先刷新模型列表拿到模型再测')
       case 'unreadable':
@@ -688,6 +690,7 @@ export function refreshResultText(root: string, name: string, r: RefreshResult):
       let t = `【系统】「${name}」拉到 ${r.count} 个模型（新增 ${r.added} 个，去掉 ${r.removed.length} 个；手动加的 ${r.keptManual} 个保留）。`
       if (r.removed.length) t += `\n去掉了：${r.removed.slice(0, 10).join('、')}`
       if (r.bySelection) t += `（按勾选保留 ${r.selected} 个）`
+      if (r.v1Added) t += `（地址补成了 ${r.baseURL}）`
       return t
     }
     case 'failed': return `【系统】「${name}」没拉到模型：${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}。模型列表保持不变。`
