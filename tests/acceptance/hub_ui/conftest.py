@@ -129,6 +129,7 @@ def sandbox(tmp_path, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     env = {
         "HOME": str(home),
+        "USERPROFILE": str(home),      # Windows 上展开 ~ 认的是它，不认 HOME；不设就落到真实用户目录
         "DSH_BOT_HOME": str(root),
         "CLAUDE_TGBOT_HOME": str(tmp_path / "tgbot-home"),
         "BOTLIFE_STATE_DB": str(tmp_path / "state.db"),
