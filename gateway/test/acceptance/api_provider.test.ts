@@ -1,7 +1,7 @@
 // 验收：网关本机接口——GET /v1/model 的 providers、POST /v1/provider/refresh（INTERFACE 3.8）
 import { describe, expect, test } from 'bun:test'
 import { writeFileSync } from 'fs'
-import { lockPath, providersPath, readProviders, seedCreds, seedProviders, sleep, withModels, type BotEnv } from './_acc'
+import { lockPath, providersPath, readProviders, reconLine, seedCreds, seedProviders, sleep, withModels, type BotEnv } from './_acc'
 import { type FakeModels, json, openaiOk, sleep as fsleep } from './fake-models'
 
 const FETCHED = ['m1', 'm3', 'm4']
@@ -85,13 +85,14 @@ describe('GET /v1/model', () => {
 })
 
 describe('POST /v1/provider/refresh', () => {
-  test('成功：200 {ok:true, count:3, added:2, removed:1, kept_manual:1, text}，text 不带【系统】', async () => {
-    await withModels({ handler: openaiOk(FETCHED), before: seed() }, async ({ gw }) => {
+  test('成功（清单不为空、不带 only 也不带 full）：200，只对账不改清单，applied 为 kept，text 是对账句、不带【系统】', async () => {
+    await withModels({ handler: openaiOk(FETCHED), before: seed() }, async ({ gw, b }) => {
       const r = await gw.call('/v1/provider/refresh', { name: 'myproxy' })
       expect(r.status).toBe(200)
-      expect(r.json).toMatchObject({ ok: true, count: 3, added: 2, removed: 1, kept_manual: 1 })
-      expect(r.json.text).toContain('「myproxy」拉到 3 个模型（新增 2 个，去掉 1 个；手动加的 1 个保留）。')
+      expect(r.json).toMatchObject({ ok: true, count: 3, added: 0, removed: 0, kept_manual: 1, selected: 3, applied: 'kept', not_in_list: 2, not_returned: 2 })
+      expect(r.json.text).toContain(reconLine(3, 2, 2))
       expect(r.json.text.startsWith('【系统】')).toBe(false)
+      expect(readProviders(b.root).providers.myproxy.route.models.map((m: any) => m.id)).toEqual(['m1', 'm2', 'man1'])
     })
   })
 
