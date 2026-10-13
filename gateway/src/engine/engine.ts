@@ -109,6 +109,18 @@ type Outcome = (
 
 const LOCKED = { text: '现在是整理记忆的时间，不能调用工具，也不会发给对方。请直接输出摘要正文。', isError: true }
 
+/**
+ * 认空内容的那两句话、交给 dsh 的重试策略写法，都只在这一版 dsh 上核对过（harness/package.json 钉的就是它）。
+ * 升级 dsh 时先重跑 lab/dsh/offline/b23-*.ts，结果一致再改这里。
+ */
+const VERIFIED_DSH_VERSION = '0.2.0-rc.2'
+
+/** 启动时要不要提醒"dsh 的版本没验证过"：要提醒就返回那个版本号。用了自定义启动命令（跑的不是 harness 目录里那一份）、或读不到版本号时不检查 */
+export function unverifiedDshVersion(installed: string, customCommand: boolean): string | null {
+  const version = installed.slice(0, 40)
+  return customCommand || !version || version === VERIFIED_DSH_VERSION ? null : version
+}
+
 export function brainKey(b: Brain): string {
   return `${b.provider}/${b.model}/${b.reasoningEffort ?? ''}`
 }
@@ -550,6 +562,7 @@ export class Engine {
       this.log.warn('recovery', { crashed: rep.crashedTurns.length, aborted: rep.abortedTurns.length, requeued: rep.requeued.length, settled: rep.settled.length, abandoned_segments: rep.abandonedSegments.length, ambiguous_outbound: rep.ambiguousOutbound.length })
     }
     this.fingerprint = restartFingerprint(this.patchInput())
+    this.checkDshVersion()
     // 上次网关被强杀时，正在处理一轮的 dsh 不会马上退出（Windows 上子进程也不会跟着父进程结束）。启动时就清理，不等下一条消息。
     this.reaping = this.dsh.reapStale(this.dshSpec()).catch(e => this.log.warn('dsh.reap_failed', { err: safeError(e) }))
     this.configMtime = mtime(this.cfg.configPath)
@@ -642,6 +655,14 @@ export class Engine {
     try {
       return String(JSON.parse(readFileSync(join(this.cfg.harnessDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8')).version ?? '')
     } catch { return '' }
+  }
+
+  /** 装的 dsh 不是核对过的那一版：记一条日志，通知主人一次（每次网关启动一次） */
+  private checkDshVersion(): void {
+    const version = unverifiedDshVersion(this.harnessVersion(), !!this.cfg.gw.dshCommand)
+    if (!version) return
+    this.log.warn('dsh.version_unverified', { version })
+    void this.notifyOwner('dsh-version', `dsh 的版本是 ${version}，这一版没有验证过。模型回空内容时网关可能认不出来，会多花请求。`)
   }
 
   dshSpec(): DshSpec {
