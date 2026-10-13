@@ -157,11 +157,12 @@ async function pickModel(tg: any, action: string, id: string): Promise<number> {
 }
 
 describe('删一个模型', () => {
-  test('删拉到的模型：「已从「myproxy」删掉模型 m1。」并说明刷新时可能重新出现', async () => {
+  test('删拉到的模型：「已从「myproxy」删掉模型 m1。」并说明以后在管理台刷新时它会重新出现在候选里、勾上才回到清单', async () => {
     await withBot({ before: seed() }, async ({ tg, b }) => {
       await pickModel(tg, '删一个模型', 'm1')
       const t = await said(tg, x => x.startsWith('【系统】已从「myproxy」删掉模型 m1。'), '删除结果')
-      expect(t).toContain('下次「刷新模型」时，对方列表里还有的话它会重新出现。')
+      expect(t).toContain('以后在管理台刷新模型列表时，对方列表里还有的话它会重新出现在候选里，勾上才会回到清单。')
+      expect(t).not.toContain('下次「刷新模型」时')
       expect(entry(b).route.models.map((m: any) => m.id)).toEqual(['m2'])
     })
   })
