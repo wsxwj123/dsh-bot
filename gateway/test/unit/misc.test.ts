@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { buildDshEnv } from '../../src/dsh/process'
-import { buildPatchRows, escapePersona } from '../../src/dsh/profile'
+import { buildPatchRows, escapePersona, restartFingerprint, RETRY_POLICY } from '../../src/dsh/profile'
 import { parseBrain } from '../../src/config'
 import { escapeUserText, formatMessages, formatSeed } from '../../src/engine/format'
 import type { InboundRow } from '../../src/ledger'
@@ -122,4 +122,34 @@ test('补丁层：路由、凭据文件、压缩默认关、隐私行禁用', ()
   expect(rows.find(r => r.id === 'skill-filesystem').config).toEqual({ includeDefaultRoots: false, customSkillDirs: ['/bot/skills'] })
   expect(rows.find(r => r.id === 'agent-instructions').disabled).toBe(true)
   expect(escapePersona('{{a}} {{b}}')).toBe('{⁠{a}} {⁠{b}}')
+})
+
+test('补丁层的重试策略：没写的路由补固定值，自己写的原样不动；llm-deepseek 行恒有；不改动传入的路由', () => {
+  const policy = { mode: 'normal', retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'] }
+  expect(RETRY_POLICY).toEqual(policy)
+  const own = { mode: 'normal', maxRetries: 0 }
+  const brain = parseBrain({ provider: 'plain', model: 'a', routes: {
+    plain: { api: 'openai-completions', baseURL: 'http://127.0.0.1:9/v1', apiKeyEnv: 'K1', models: [{ id: 'a' }] },
+    own: { api: 'anthropic-messages', baseURL: 'http://127.0.0.1:9', apiKeyEnv: 'K2', retryPolicy: own, models: [{ id: 'b' }] },
+    // 写了但写成空值：也算自己写的，照原样交给 dsh，由它自己拒绝
+    nulled: { api: 'openai-responses', baseURL: 'http://127.0.0.1:9/v1', apiKeyEnv: 'K3', retryPolicy: null, models: [{ id: 'c' }] },
+  } })
+  const input = { persona: 'p', brain, credentialsPath: '/c.yaml', sessionsRoot: '/s', skillDir: '/bot/skills' }
+  const before = JSON.stringify(brain.routes)
+  const fp = restartFingerprint(input)
+  const rows = buildPatchRows(input) as any[]
+  const got = rows.find(r => r.id === 'llm-pi-ai').config.providers
+  expect(Object.keys(got)).toEqual(['plain', 'own', 'nulled'])
+  expect(got.plain).toEqual({ ...brain.routes.plain, retryPolicy: policy })
+  expect(got.own.retryPolicy).toEqual(own)
+  expect(got.nulled.retryPolicy).toBe(null)
+  expect(rows.filter(r => r.id === 'llm-deepseek')).toEqual([{ id: 'llm-deepseek', config: { retryPolicy: policy } }])
+  // 路由对象本身没被改：重启指纹按它算，补策略不该让 dsh 多重启一次
+  expect(JSON.stringify(brain.routes)).toBe(before)
+  expect(restartFingerprint(input)).toBe(fp)
+
+  // 一条路由都没有（只用内置 deepseek）：没有 llm-pi-ai 行，llm-deepseek 行照样有
+  const builtin = buildPatchRows({ ...input, brain: parseBrain({}) }) as any[]
+  expect(builtin.some(r => r.id === 'llm-pi-ai')).toBe(false)
+  expect(builtin.filter(r => r.id === 'llm-deepseek')).toEqual([{ id: 'llm-deepseek', config: { retryPolicy: policy } }])
 })
