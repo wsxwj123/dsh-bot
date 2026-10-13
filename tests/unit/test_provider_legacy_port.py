@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""旧 provider 面板（管 8770 provider-proxy 的那套）搬入本仓的回归。
+"""旧 provider 面板（管 8770 provider-proxy 的那套）那几个模块自身的回归，以及它已从管理台摘掉。
 
 三块：① 路径解析的默认值与 env 覆盖（默认必须指向**旧仓**那份）；
 ② provider_config 的读写与校验（全部落 tmp_path，绝不碰旧仓/机主真实文件）；
-③ 蓝图注册后新旧两套 provider 页 URL 共存不冲突。
+③ 管理台已经不再提供这一套：十五条旧接口不在路由清单里，旧页面的地址只剩一条跳转，
+   管理台应用不再导入这几个模块（INTERFACE-旧系统供应商入口 §4、§5、§6）。
 
-不联网、不起 HTTP、不发探针；重启 worker 的调用点不在此文件覆盖（HTTP 层验证另行真跑）。
+①② 量的是模块自己的函数，模块文件都还留在原处，所以原样保留。③ 原先量的是「蓝图注册后
+新旧两套 provider 页 URL 共存」，这一批把旧的那套下线了，预期随之反过来。
+
+不联网、不起 HTTP、不发探针。
 """
 import json
 import os
@@ -134,16 +138,78 @@ def test_set_bot_provider_rejects_bot_dir_outside_channels_root(legacy_env, tmp_
     assert not (outside / ".claude" / "settings.json").exists()
 
 
-# ── ③ 两套 provider 页共存 ─────────────────────────────────────────────────
+# ── ③ 管理台已经把这一套摘掉 ───────────────────────────────────────────────
 
-def test_url_map_has_both_provider_pages():
+#: 约定 §5 的十五条：(原来的方法, 一个具体路径)。bot 与供应商都用假名。
+RETIRED = [
+    ("GET", "/api/providers"), ("POST", "/api/providers"),
+    ("PUT", "/api/providers/jia-gys-001"), ("DELETE", "/api/providers/jia-gys-001"),
+    ("POST", "/api/providers/models"), ("POST", "/api/providers/sync_all"),
+    ("GET", "/api/aux-llm"), ("POST", "/api/aux-llm"),
+    ("POST", "/api/bots/jiabot/provider"), ("POST", "/api/bots/jiabot/provider/reset"),
+    ("POST", "/api/bots/jiabot/restart"),
+    ("GET", "/api/proxy"), ("GET", "/api/proxy/generation"),
+    ("POST", "/api/proxy/restart"), ("POST", "/api/proxy/sync"),
+]
+#: 管理台应用不许再导入的六个模块（约定 §6 第 2 条）
+RETIRED_MODULES = {"moments.provider_routes", "provider_config", "provider_proxy",
+                   "provider_paths", "legacy_config_loader", "scripts.restart_bot_worker"}
+#: 这一批只摘入口、不删文件：下面这些都得还在原处
+KEPT_FILES = ["moments/provider_routes.py", "moments/templates/provider.html", "provider_config.py",
+              "provider_proxy.py", "provider_paths.py", "legacy_config_loader.py",
+              "scripts/restart_bot_worker.py"]
+
+
+def _web():
     from moments import web as web_mod
-    rules = {}
-    for r in web_mod.app.url_map.iter_rules():
-        rules.setdefault(str(r), set()).add(r.endpoint)
-    for path in ("/provider", "/api/providers", "/hub/provider"):
-        assert path in rules, "缺路由: %s" % path
-    assert rules["/provider"] == {"provider.provider_page"}
-    # 旧页在自己前缀下，新版 hub 页在 /hub 下；互不覆盖（同一 path 不可能有两个端点，
-    # 否则 Flask 注册期就抛异常）
-    assert all(not p.startswith("/hub") for p in ("/provider", "/api/providers"))
+    return web_mod
+
+
+@pytest.mark.parametrize("method,path", RETIRED, ids=["%s_%s" % mp for mp in RETIRED])
+def test_管理台的路由清单里没有这条旧接口(method, path):
+    """原来这里断言的是「/api/providers 在路由清单里」。现在十五条一条都匹配不上：
+    不是换了方法，是整条路径没有规则。"""
+    from werkzeug.exceptions import NotFound
+    adapter = _web().app.url_map.bind("127.0.0.1")
+    for m in (method, "GET", "POST", "PUT", "DELETE"):
+        with pytest.raises(NotFound):
+            adapter.match(path, method=m)
+
+
+def test_旧页面的地址只剩一条跳转规则_不再是旧蓝图的页面端点():
+    """原来这里断言的是「/provider 的端点是 provider.provider_page」。"""
+    rules = [r for r in _web().app.url_map.iter_rules() if str(r) == "/provider"]
+    assert len(rules) == 1, rules
+    assert rules[0].endpoint == "legacy_provider_entry"
+    assert sorted(rules[0].methods) == ["GET", "HEAD", "OPTIONS"]
+
+
+def test_蓝图清单里没有旧供应商蓝图_模型来源那一套还在():
+    app = _web().app
+    assert "provider" not in app.blueprints, sorted(app.blueprints)
+    assert {"hub", "styles"} <= set(app.blueprints)
+    rules = {str(r) for r in app.url_map.iter_rules()}
+    for path in ("/hub/provider", "/hub/api/provider", "/hub/api/bots/restart",
+                 "/hub/api/bots/<bot_id>/restart", "/api/moments"):
+        assert path in rules, "不在下线名单里的路由被顺手摘掉了：%s" % path
+
+
+def test_管理台应用的源码不再导入那六个模块():
+    """管理台进程里有没有这些模块，取决于 moments/web.py 导不导入它们（验收测试另起一个
+    干净的解释器量整条导入链）。这里量源码：任何位置的 import 语句都算，写在 try 里、
+    函数里的也算。"""
+    import ast
+    tree = ast.parse((_ROOT / "moments" / "web.py").read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+            imported.update("%s.%s" % (node.module, a.name) for a in node.names)
+    assert imported & RETIRED_MODULES == set(), imported & RETIRED_MODULES
+
+
+@pytest.mark.parametrize("rel", KEPT_FILES)
+def test_只摘入口不删文件_这几个文件都还在原处(rel):
+    assert (_ROOT / rel).is_file(), "%s 不见了：这一批不删任何文件" % rel
