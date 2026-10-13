@@ -1,6 +1,6 @@
 // 拉模型列表（方案 3.7）：请求形状、/v1 补全、分页、截断、失败分类与文案；结果里不带密钥、地址、回包正文
 import { afterEach, expect, test } from 'bun:test'
-import { fetchFailText, fetchModels, probeModel, type FetchFailReason, type FetchModelsRequest } from '../../src/providers/models'
+import { fetchFailText, fetchModels, isBareHost, probeModel, type FetchFailReason, type FetchModelsRequest } from '../../src/providers/models'
 import { sleep } from '../../src/util'
 
 const KEY = 'test-key-models-Zx81Qw'
@@ -45,6 +45,75 @@ test('OpenAI：地址只有域名、/models 回 404 或 401 → 再试 /v1/model
   const s = serve(() => json({}, 404))
   expect(await run({ baseURL: `${s.url}/api` })).toEqual({ ok: false, reason: 'not_found', status: 404 })
   expect(s.seen.length).toBe(1)
+})
+
+// ─── INTERFACE-dsh修补 第二节：地址只写域名、/models 回的不是模型清单时到 /v1 下再试 ───
+
+const html = () => new Response('<!doctype html><html><body>welcome</body></html>', { headers: { 'content-type': 'text/html' } })
+const okList = () => json({ data: [{ id: 'm1' }] })
+
+test('地址只有域名、/models 回 2xx 但不是清单（网页、JSON 数组、没有清单数组的对象、超过 4 MiB）或 403：再试 /v1/models 一次，同一组请求头，成功则地址补成 /v1', async () => {
+  const big = () => new Response(JSON.stringify({ data: [{ id: 'm', pad: 'x'.repeat(4 * 1024 * 1024) }] }), { headers: { 'content-type': 'application/json' } })
+  for (const first of [html, () => json([1, 2]), () => json({ ok: true }), big, () => json({}, 403)]) {
+    const s = serve((_u, n) => (n === 1 ? first() : okList()))
+    expect(await run({ baseURL: s.url })).toEqual({ ok: true, truncated: false, baseURL: `${s.url}/v1`, v1Added: true, models: [{ id: 'm1', contextWindow: null }] })
+    expect(s.seen.map(x => [x.path, x.auth])).toEqual([['/models', `Bearer ${KEY}`], ['/v1/models', `Bearer ${KEY}`]])
+  }
+})
+
+test('不再试的情形只发一次：第一次是空清单、是清单但没有合格模型名、429、5xx、其它 4xx；地址带路径；Anthropic 格式', async () => {
+  const ONCE: [() => Response, FetchFailReason, number | null][] = [
+    [() => json({ data: [] }), 'empty', null], [() => json({ data: [{ id: 'bad\tid' }] }), 'bad_response', null],
+    [() => json({}, 429), 'rate_limited', 429], [() => json({}, 500), 'server_error', 500], [() => json({}, 418), 'http_error', 418],
+  ]
+  for (const [first, reason, status] of ONCE) {
+    const s = serve((_u, n) => (n === 1 ? first() : okList()))
+    expect(await run({ baseURL: s.url })).toEqual({ ok: false, reason, status })
+    expect(s.seen.map(x => x.path)).toEqual(['/models'])
+  }
+  const withPath = serve(html)
+  expect(await run({ baseURL: `${withPath.url}/api` })).toEqual({ ok: false, reason: 'bad_response', status: null })
+  expect(withPath.seen.map(x => x.path)).toEqual(['/api/models'])
+  const anthropic = serve(html)
+  expect(await fetchModels({ api: 'anthropic-messages', baseURL: anthropic.url, key: KEY }, { timeoutMs: 5_000 })).toEqual({ ok: false, reason: 'bad_response', status: null })
+  expect(anthropic.seen.map(x => x.path)).toEqual(['/v1/models?limit=1000'])
+})
+
+test('两次都失败报哪一次：第一次是网页、第二次 404 报第一次的「格式不认识」；其余报第二次的；失败结果里没有补后的地址', async () => {
+  // [第一次, 第二次, 报出的 reason, 报出的 status]
+  const TABLE: [() => Response, () => Response, FetchFailReason, number | null][] = [
+    [html, () => json({}, 404), 'bad_response', null],
+    [html, html, 'bad_response', null],
+    [html, () => json({}, 401), 'unauthorized', 401], [html, () => json({}, 403), 'unauthorized', 403],
+    [html, () => json({}, 429), 'rate_limited', 429], [html, () => json({}, 502), 'server_error', 502], [html, () => json({}, 418), 'http_error', 418],
+    [html, () => new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:9/v1/models' } }), 'redirect', 302],
+    [html, () => json({ data: [] }), 'empty', null],
+    [html, () => json({ data: [{ id: 'bad\tid' }] }), 'bad_response', null],
+    // 第一次是 401、403、404：一律报第二次的（原有规则不变）
+    [() => json({}, 404), () => json({}, 404), 'not_found', 404], [() => json({}, 401), () => json({}, 500), 'server_error', 500], [() => json({}, 404), html, 'bad_response', null],
+  ]
+  for (const [first, second, reason, status] of TABLE) {
+    const s = serve((_u, n) => (n === 1 ? first() : second()))
+    const r = await run({ baseURL: s.url })
+    expect(r, `${reason}/${status}`).toEqual({ ok: false, reason, status })
+    expect(s.seen.map(x => x.path)).toEqual(['/models', '/v1/models'])
+  }
+})
+
+test('第二次超时或连不上：报第二次的；回包里把密钥印出来的网页不进结果', async () => {
+  const slow = serve(async (_u, n) => { if (n === 1) return new Response(`<pre>authorization: Bearer ${KEY}</pre>`, { headers: { 'content-type': 'text/html' } }); await sleep(2_000); return okList() })
+  const r = await run({ baseURL: slow.url }, 500)
+  expect(r).toEqual({ ok: false, reason: 'timeout', status: null, seconds: 0.5 })
+  expect(JSON.stringify(r)).not.toContain(KEY)
+  let n = 0
+  const dropSecond = (async () => { if (++n === 1) return html(); throw new TypeError(`Unable to connect ${KEY}`) }) as unknown as typeof fetch
+  expect(await fetchModels({ api: 'openai-completions', baseURL: 'https://relay.example', key: KEY }, { timeoutMs: 1_000, fetch: dropSecond })).toEqual({ ok: false, reason: 'network', status: null })
+  expect(n).toBe(2)
+})
+
+test('isBareHost：只有协议、主机、可选端口才算；末尾的斜杠不算路径；带路径或不是地址都不算', () => {
+  for (const u of ['https://relay.example', 'https://relay.example/', 'http://127.0.0.1:8080', 'https://v1']) expect(isBareHost(u)).toBe(true)
+  for (const u of ['https://relay.example/v1', 'https://relay.example/api', 'https://relay.example/v1/', 'not a url', '']) expect(isBareHost(u)).toBe(false)
 })
 
 test('Anthropic：GET /v1/models?limit=1000，has_more 时带 after_id 翻页；5 页后仍有就停并标截断', async () => {
