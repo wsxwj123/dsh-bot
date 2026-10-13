@@ -236,9 +236,7 @@ const answer = (status, body) => ({
 function fetch(url, opts) {
   const key = ((opts && opts.method) || 'GET') + ' ' + url;
   const auto = (input.auto || []).find((a) => a.req === key);
-  if (!(auto && auto.quiet)) {
-    log.requests.push({req: key, body: opts && opts.body !== undefined ? JSON.parse(opts.body) : null});
-  }
+  log.requests.push({req: key, body: opts && opts.body !== undefined ? JSON.parse(opts.body) : null});
   if (auto) return Promise.resolve(answer(auto.status, auto.body));
   return new Promise((resolve) => pending.push({key, resolve}));
 }
@@ -330,9 +328,8 @@ const settle = async () => { for (let i = 0; i < 10; i++) await tick(); };
 
 _ENV = jinja2.Environment(loader=jinja2.FileSystemLoader(str(TEMPLATES)), autoescape=True)
 _NAV = {"hub_bots.html": "bots", "hub_dsh_model.html": "dsh-model", "hub_addbot.html": "addbot"}
-#: 导航条自己拉的那一下，与被测的事无关：自动应答，不记账
-_QUIET = {"req": "GET /hub/api/setup/status", "status": 200, "quiet": True,
-          "body": {"token": True, "userid": True, "deepseek": True}}
+#: 导航条自己不发任何请求（原来查密钥填没填的那一下，随「密钥待填」页一起下线了）。
+#: 所以页面发出的每个请求都记账：没在 auto 里登记的会挂着，用例里看得见
 
 
 def _run(tmp_path, page, steps, auto=()):
@@ -341,7 +338,7 @@ def _run(tmp_path, page, steps, auto=()):
     tree.feed(_ENV.get_template(page).render(nav_active=_NAV[page]))
     driver, spec = tmp_path / "driver.js", tmp_path / "spec.json"
     driver.write_text(DRIVER, encoding="utf-8")
-    spec.write_text(json.dumps({"tree": tree.root, "steps": steps, "auto": [_QUIET, *auto]},
+    spec.write_text(json.dumps({"tree": tree.root, "steps": steps, "auto": list(auto)},
                                ensure_ascii=False), encoding="utf-8")
     r = subprocess.run([NODE, str(driver), str(spec)], stdin=subprocess.DEVNULL,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
@@ -430,6 +427,24 @@ def _posts(snap):
 def _row_edit_disabled(snap, cfg, row=0):
     """那一行的「编辑」（打开弹窗的那枚行内按钮）现在是不是禁用的。"""
     return {b["text"]: b["disabled"] for b in snap["rows"][cfg["rows"]][row]["buttons"]}["编辑"]
+
+
+# ============================================================ INTERFACE-dsh修补 4.2 导航条不再查密钥状态
+
+@pytest.mark.parametrize("page,auto,first", [
+    (BOTS, [_bots_list([("bota", "online")])], "GET /hub/api/bots"),
+    (MODEL, [_model_list("bota")], "GET /hub/api/dsh-model"),
+    (ADDBOT, [{"req": "GET /hub/api/bots/templates", "status": 200, "body": {"templates": []}}],
+     "GET /hub/api/bots/templates"),
+])
+def test_页面加载时不向密钥状态接口发请求_导航里也没有那颗提示(tmp_path, page, auto, first):
+    """整页脚本实跑一遍：发出的请求里没有 /hub/api/setup/status，也没有挂着没人答的请求。"""
+    out = _run(tmp_path, page, [_snap("load", "nav-setup")], auto=auto)
+    sent = [r["req"] for r in out["load"]["requests"]]
+    assert first in sent, sent
+    assert [r for r in sent if "setup" in r] == [], sent
+    assert [r for r in out["load"]["pending"] if "setup" in r] == []
+    assert out["load"]["els"]["nav-setup"] is None, "导航里还有 id 为 nav-setup 的元素"
 
 
 # ============================================================ §13b 模型页：两个面板恰好一个看得见
