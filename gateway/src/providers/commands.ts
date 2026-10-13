@@ -9,8 +9,8 @@ import {
 import { deleteMessageWithRetry, type TelegramApi, type TgMessage } from '../telegram/api'
 import { registerSecret, safeError, type Logger } from '../log'
 import { fetchFailText, TRUNCATED_NOTE } from './models'
-import type { PreviewResult, ProviderService, RefreshResult, SaveResult, TestConnResult } from './service'
-import { effortLabel } from '../wizard/text'
+import type { ListApplied, ListRecon, PreviewResult, ProviderService, RefreshResult, SaveResult, TestConnResult } from './service'
+import { effortLabel, MODEL_REMOVED_NOTE } from '../wizard/text'
 
 /** 本机接口 `POST /v1/provider/refresh` 的返回（方案 3.8）：HTTP 状态码 + 机读错误码 + 文案 */
 export type ApiRefreshResult = { status: number; body: {
@@ -18,7 +18,9 @@ export type ApiRefreshResult = { status: number; body: {
   /** only 缺省：去掉的个数（既有形状）；带 only：被去掉的 id 数组（INTERFACE §11b） */
   removed?: number | string[]; kept_manual?: number; selected?: number; text: string
   /** 这次落盘走的哪种做法（所有 200 都有） */
-  applied?: 'selection' | 'full'
+  applied?: ListApplied
+  /** 只在 applied 为 kept 时有：对方返回而不在清单的个数、清单里对方这次没返回的个数 */
+  not_in_list?: number; not_returned?: number
 } }
 
 /** 本机接口（INTERFACE-管理台UI 第 3 节）的统一返回：HTTP 状态码 + 契约里的正文 */
@@ -372,7 +374,10 @@ export class ProviderCommands {
     const noPrefix = (t: string) => t.replace(/^【系统】/, '')
     switch (r.status) {
       case 'saved':
-        return { status: 200, body: { ok: true, kind: r.kind, name: r.name, count: r.count, reason: r.reason, text: noPrefix(saveResultText(r, name)), epoch_changed: r.epochChanged } }
+        return { status: 200, body: {
+          ok: true, kind: r.kind, name: r.name, count: r.count, reason: r.reason, text: noPrefix(saveResultText(r, name)), epoch_changed: r.epochChanged,
+          applied: r.applied, ...(r.applied === 'kept' ? { not_in_list: r.notInList, not_returned: r.notReturned } : {}),
+        } }
       case 'save_failed':
         return { status: 500, body: { ok: false, error: 'save_failed', text: noPrefix(saveResultText(r, name)) } }
       case 'cred_failed':
@@ -454,7 +459,7 @@ export class ProviderCommands {
     const r = await this.d.service.removeModel(found.name, id)
     if (!r.ok) return this.modelEditFail(r.why, found.name, id)
     let text = `已从「${found.name}」删掉模型 ${id}。`
-    if (!manual) text += '下次「刷新模型」时，对方列表里还有的话它会重新出现。'
+    if (!manual) text += MODEL_REMOVED_NOTE
     if (found.entry.route.models.filter(m => m.id !== id).length === 0) text += `「${found.name}」没有模型了，暂时不会出现在可选模型里。`
     if (before && this.d.engine && normName(before.provider) === normName(found.name) && before.model === id) {
       const c = this.d.engine.clearOverride()
@@ -498,8 +503,9 @@ export class ProviderCommands {
    * 本机接口的 `POST /v1/provider/refresh`（方案 3.8；only 扩展见 INTERFACE §11b）：与 `/provider refresh`
    * 同一套流程，但把结果翻成 HTTP 状态码 + 机读错误码的契约。text 去掉「【系统】」前缀，其余同 3.6 的回复。
    * only 缺省时 removed 是数字；带 only 时 removed 给被去掉的 id 数组。rev 是预览拿到的清单指纹，对不上回 409 list_changed。
+   * 不带 only 时清单不为空就只对账（applied 为 kept，多给 not_in_list、not_returned）；要把清单整份重铺得显式带 full。
    */
-  async apiRefresh(name: string, o: { only?: string[]; rev?: string } = {}): Promise<ApiRefreshResult> {
+  async apiRefresh(name: string, o: { only?: string[]; rev?: string; full?: boolean } = {}): Promise<ApiRefreshResult> {
     const noPrefix = (t: string) => t.replace(/^【系统】/, '')
     const pre = this.apiResolve(name)
     if ('err' in pre) return pre.err as ApiRefreshResult
@@ -507,7 +513,10 @@ export class ProviderCommands {
     const t = noPrefix(this.refreshText(pre.found.name, r))
     switch (r.status) {
       case 'ok':
-        return { status: 200, body: { ok: true, count: r.count, added: r.added, removed: r.applied === 'selection' ? r.removed : r.removed.length, kept_manual: r.keptManual, selected: r.selected, text: t, applied: r.applied } }
+        return { status: 200, body: {
+          ok: true, count: r.count, added: r.added, removed: r.applied === 'selection' ? r.removed : r.removed.length, kept_manual: r.keptManual, selected: r.selected, text: t,
+          applied: r.applied, ...(r.applied === 'kept' ? { not_in_list: r.notInList, not_returned: r.notReturned } : {}),
+        } }
       case 'failed':
         return { status: 502, body: { ok: false, error: 'fetch_failed', reason: r.reason, text: t } }
       case 'list_changed':
@@ -675,9 +684,11 @@ export function saveResultText(r: SaveResult, name: string): string {
       const verb = r.kind === 'created' ? '已添加' : '已更新'
       return `【系统】${verb}供应商「${r.name}」，但没拉到模型：${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}。之后可以在 /provider 里点「刷新模型」，或用 /model →「管理模型」手动加。${extra}${trunc}`
     }
-    if (r.kind === 'collided') return `【系统】「${r.name}」刚被别处新建，已改为更新它，拉到 ${r.count} 个模型。${extra}${trunc}`
+    // 落到已有的同一家上、清单不为空：清单没动，原来的「，拉到 N 个模型。」换成句号加对账句
+    const got = r.applied === 'kept' ? `。${reconText(r)}` : `，拉到 ${r.count} 个模型。`
+    if (r.kind === 'collided') return `【系统】「${r.name}」刚被别处新建，已改为更新它${got}${extra}${trunc}`
     const verb = r.kind === 'created' ? '已添加' : '已更新'
-    return `【系统】${verb}供应商「${r.name}」，拉到 ${r.count} 个模型。${extra}${trunc}`
+    return `【系统】${verb}供应商「${r.name}」${got}${extra}${trunc}`
   }
   if (r.status === 'cred_failed') return `【系统】供应商「${r.name}」已保存，但密钥没写进去（${r.why}）。请用 /provider →「修改」→「密钥」重试。`
   if (r.status === 'lock_timeout') return '【系统】没保存成功：别的 bot 正在改供应商，请稍后再试。密钥没有写入。'
@@ -687,13 +698,28 @@ export function saveResultText(r: SaveResult, name: string): string {
   return `【系统】没添加：${name} 没保存成功。`
 }
 
+/**
+ * 对账句（INTERFACE-dsh修补 第五节）：刷新或保存没有改动清单时，告诉主人对方现在有什么、要挑去哪里挑。
+ * count 是对方这次返回的个数；两个数是 0 时照写 0。对方返回了模型而清单里的一个都没返回时，后面多接一句提示。
+ * 刷新、保存、引导里的修改三处共用这一句。
+ */
+export function reconText(r: { count: number } & ListRecon): string {
+  const line = `对方现在有 ${r.count} 个模型，其中 ${r.notInList} 个不在清单里，清单里有 ${r.notReturned} 个对方这次没返回。清单没有改动，要挑选请到管理台的「供应商与模型」页。`
+  return r.disjoint ? `${line}清单里的模型对方一个都没返回，这个地址上的内容可能换了，建议到管理台重新挑。` : line
+}
+
 /** 刷新模型的结果文案（方案 3.4.5）；root 用来在"读不了"时指出文件位置 */
 export function refreshResultText(root: string, name: string, r: RefreshResult): string {
   switch (r.status) {
     case 'ok': {
-      let t = `【系统】「${name}」拉到 ${r.count} 个模型（新增 ${r.added} 个，去掉 ${r.removed.length} 个；手动加的 ${r.keptManual} 个保留）。`
-      if (r.removed.length) t += `\n去掉了：${r.removed.slice(0, 10).join('、')}`
-      if (r.applied === 'selection') t += `（按勾选保留 ${r.selected} 个）`
+      let t: string
+      if (r.applied === 'kept') {
+        t = `【系统】「${name}」${reconText(r)}`
+      } else {
+        t = `【系统】「${name}」拉到 ${r.count} 个模型（新增 ${r.added} 个，去掉 ${r.removed.length} 个；手动加的 ${r.keptManual} 个保留）。`
+        if (r.removed.length) t += `\n去掉了：${r.removed.slice(0, 10).join('、')}`
+        if (r.applied === 'selection') t += `（按勾选保留 ${r.selected} 个）`
+      }
       if (r.v1Added) t += `（地址补成了 ${r.baseURL}）`
       return t
     }
