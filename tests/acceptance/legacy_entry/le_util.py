@@ -223,8 +223,10 @@ _AUDIT_ATTR = "_dsh_legacy_entry_audit"
 
 
 def _brief(args):
+    """只留前两个参数（可执行文件与参数表、或进程号与信号）。子进程事件的第四个参数是整份
+    环境变量，里面可能有口令，不能跟着失败信息打到终端上。"""
     try:
-        return repr(args)[:300]
+        return repr(tuple(args[:2]))[:300]
     except Exception:                                   # noqa: BLE001  审计钩子里不许抛
         return "<参数打印不出来>"
 
