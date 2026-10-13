@@ -7,7 +7,7 @@
 // 实现未落地时本文件红（多半 404），那是红基线，不是测试坏了。
 import { describe, expect, test } from 'bun:test'
 import { writeFileSync } from 'fs'
-import { defaultKeyEnv, fakeKey, lockPath, openProviderMenu, providersPath, readCreds, readProviders, seedCreds, seedProviders, withBot, withModels, type BotEnv } from './_acc'
+import { defaultKeyEnv, fakeKey, lockPath, openProviderMenu, providersPath, readCreds, readProviders, reconLine, seedCreds, seedProviders, withBot, withModels, type BotEnv } from './_acc'
 import { type FakeModels, json, openaiOk } from './fake-models'
 
 const IDS = ['m1', 'm2']
@@ -48,12 +48,15 @@ describe('POST /v1/provider/save 的正常路径', () => {
     })
   })
 
-  test('同名新建：不报错，走更新，kind=updated', async () => {
-    await withModels({ handler: openaiOk(IDS), before: seedCustom() }, async ({ gw, fm }) => {
-      const r = await gw.call(SAVE, body(fm))
+  test('同名新建（同一主机、同一格式，清单不为空，拉取成功）：走更新，kind=updated，清单不动，text 是对账句', async () => {
+    const key = fakeKey('save')
+    await withModels({ handler: openaiOk(IDS), key, before: seedCustom({ key: 'test-key-7old-old-old-old-old-1111' }) }, async ({ gw, b, fm }) => {
+      const r = await gw.call(SAVE, body(fm, { key }))
       expect(r.status, `同名更新应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
       expect(r.json.kind, `同名已有条目时应 updated，实得 ${JSON.stringify(r.json.kind)}`).toBe('updated')
-      expect(String(r.json.text), `text 应说已更新，实得 ${JSON.stringify(r.json.text)}`).toContain('已更新供应商「myproxy」')
+      expect(String(r.json.text), `text 应说已更新并接对账句，实得 ${JSON.stringify(r.json.text)}`).toContain(`已更新供应商「myproxy」。${reconLine(2, 0, 0)}`)
+      expect(r.json).toMatchObject({ applied: 'kept', count: 2, not_in_list: 0, not_returned: 0 })
+      expect(readProviders(b.root).providers.myproxy.route.models.map((m: any) => m.id)).toEqual(IDS)
     })
   })
 
@@ -70,6 +73,7 @@ describe('POST /v1/provider/save 的正常路径', () => {
       const before = readCreds(b.root)
       const r = await gw.call(SAVE, body(fm, { key: '', mode: 'modify' }))
       expect(r.status, `应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
+      expect(r.json.applied, '清单不为空、拉取成功：只对账不改清单').toBe('kept')
       expect(fm.requests.length, '应用现有密钥去拉列表').toBeGreaterThan(0)
       expect(fm.requests[0]!.authOk, '拉列表必须带凭据文件里的密钥，不能是空串').toBe(true)
       expect(readCreds(b.root), '凭据文件应逐字节不变').toBe(before)
@@ -82,6 +86,7 @@ describe('POST /v1/provider/save 的正常路径', () => {
     await withModels({ handler: openaiOk(IDS), key: fresh, before: seedCustom({ key: OLD }) }, async ({ gw, b, fm }) => {
       const r = await gw.call(SAVE, body(fm, { key: fresh, mode: 'modify' }))
       expect(r.status, `应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
+      expect(r.json.applied, '清单不为空、拉取成功：只对账不改清单').toBe('kept')
       const after = readCreds(b.root)
       expect(after, `凭据文件里应是新密钥，实得：\n${after}`).toContain(fresh)
       expect(after.includes(OLD), '旧密钥应被换掉').toBe(false)
