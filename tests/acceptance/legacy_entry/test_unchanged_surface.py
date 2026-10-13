@@ -21,7 +21,8 @@ def got(client, path, **kw):
 
 # ============================================================ 页面都还打得开
 
-@pytest.mark.parametrize("path", ["/hub", "/hub/provider", "/hub/setup", "/hub/params", "/hub/bots",
+# 「密钥待填」页 /hub/setup 已下线（INTERFACE-dsh修补 4.4），不在这张名单里；它的去向见 test_setup_page_retired.py
+@pytest.mark.parametrize("path", ["/hub", "/hub/provider", "/hub/params", "/hub/bots",
                                   "/hub/addbot", "/hub/dsh-model", "/", "/styles"])
 def test_页面仍是200的HTML(hub, styles_env, path):
     r = u.go(hub, path=path)
@@ -32,7 +33,7 @@ def test_页面仍是200的HTML(hub, styles_env, path):
 def test_首页别的卡片入口一个不少(hub):
     html = u.go(hub, path="/hub").get_data(as_text=True)
     missing = [h for h in ('href="/hub/dsh-model"', 'href="/hub/bots"', 'href="/hub/addbot"',
-                           'href="/hub/setup"', 'href="/hub/params"', 'href="/hub/provider"',
+                           'href="/hub/params"', 'href="/hub/provider"',
                            'href="/styles"', 'href="/"') if h not in html]
     assert missing == [], "/hub 少了这些入口：%s" % missing
 
@@ -53,11 +54,11 @@ def test_切回官方订阅的接口还在_用GET请求是405(hub):
     assert got(hub, "/hub/api/claude-native/activate") == (405, {"error": "method_not_allowed"})
 
 
-# ============================================================ 密钥向导、系统参数
+# ============================================================ 密钥向导（已下线）、系统参数
 
-def test_密钥向导状态接口_空环境下三项都是否(hub):
-    assert got(hub, "/hub/api/setup/status") == \
-        (200, {"deepseek": False, "token": False, "userid": False})
+def test_密钥向导状态接口_已下线_回404的not_found(hub):
+    """原来：空环境下回 200 与三项都是否。INTERFACE-dsh修补 4.1、4.4 把这条接口整条下线了。"""
+    assert got(hub, "/hub/api/setup/status") == (404, {"error": "not_found"})
 
 
 def test_系统参数接口_照旧200并给出参数值(hub):
