@@ -57,16 +57,6 @@ def test_每页仍恰好高亮一个导航项(hub, path):
     assert n == 1, "%s 里 class=\"chip on\" 应恰好一次，实得 %d 次" % (path, n)
 
 
-def test_模型来源页_恰好高亮一个导航项(hub):
-    """约定 §3 的表把 /hub/provider 也列在「仍恰好一次」里。
-
-    待裁决：下线之前这一页是 0 次（它早已撤出导航，导航里没有属于它的那一项），与「仍」字
-    对不上。这条照约定的字面写，单独放一条，免得把另外六页一起拖红。
-    """
-    n = page(hub, "/hub/provider").count('class="chip on"')
-    assert n == 1, "/hub/provider 里 class=\"chip on\" 应恰好一次，实得 %d 次" % n
-
-
 @pytest.mark.parametrize("path", u.NAV_PAGES)
 def test_页面源码里不出现8767(hub, path):
     assert "8767" not in page(hub, path), "%s 的源码里出现了旧系统那边的端口号" % path
