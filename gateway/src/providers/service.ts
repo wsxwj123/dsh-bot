@@ -2,6 +2,7 @@
 // 取舍（方案 3.1.1、Q1、5.1）：联网拉列表在锁外；写 providers.json 与凭据文件在锁内"重读 → 改 → 写"；
 // 先写 providers.json 再写凭据（写凭据失败只是"缺密钥"，S7 证实缺键 dsh 照常启动，不会留无主密钥）。
 // 每次写完调注入的 onChanged()（Engine.reloadProvidersNow）让本 bot 立刻用上新路由。
+import { createHash } from 'crypto'
 import { safeError, type Logger } from '../log'
 import {
   apiKeyEnvFor, CredentialsUnsupported, DEFAULT_CONTEXT, hostOf, isProviderKeyEnv, normName, readCredentialRefs,
@@ -43,8 +44,8 @@ export type RefreshResult =
   | { status: 'ok'; name: string; count: number; added: number; removed: string[]; keptManual: number
       /** 落盘后列表长度（INTERFACE §11b：缺省 only 时也给） */
       selected: number
-      /** 本次是否带 only 落盘（文案尾部追加「（按勾选保留 S 个）」、响应 removed 形状按此分岔） */
-      bySelection: boolean
+      /** 这次落盘走的哪种做法：selection = 带 only 按勾选（文案尾部追加「（按勾选保留 S 个）」、响应 removed 给数组），full = 重铺成对方返回的全部加手填的 */
+      applied: 'selection' | 'full'
       /** 这次是在 /v1 下才拉到的：落盘时把保存的地址一并补成了 baseURL（文案尾部追加「（地址补成了 …）」） */
       v1Added: boolean; baseURL: string }
   | RefreshFailure
@@ -53,6 +54,8 @@ export type RefreshResult =
   | { status: 'key_missing' }
   | { status: 'gone'; name: string }
   | { status: 'changed'; name: string }
+  /** 带了 rev，而保存那一刻清单的指纹对不上（预览之后清单被别处改过）：不保存 */
+  | { status: 'list_changed'; name: string }
   | { status: 'busy'; name: string }
   | { status: 'lock_timeout' }
   | { status: 'unreadable' }
@@ -60,7 +63,8 @@ export type RefreshResult =
 /** POST /v1/provider/preview 的行（INTERFACE §11a，恒 6 键） */
 export type PreviewRow = { id: string; contextWindow: number | null; in_list: boolean; in_fetched: boolean; manual: boolean; default_checked: boolean }
 export type PreviewResult =
-  | { status: 'ok'; name: string; count: number; models: PreviewRow[] }
+  /** listRev：拉取前那份清单的指纹，确定时带回来核对 */
+  | { status: 'ok'; name: string; count: number; models: PreviewRow[]; listRev: string }
   | RefreshFailure
   | { status: 'not_found' }
   | { status: 'disabled' }
@@ -95,6 +99,14 @@ const crebByEnv = (refs: Record<string, unknown> | null, env: string): string | 
  */
 function isFetchFailure(res: FetchModelsResult, emptyIsOk: boolean): res is Extract<FetchModelsResult, { ok: false }> {
   return !res.ok && !(emptyIsOk && res.reason === 'empty')
+}
+
+/**
+ * 清单指纹（INTERFACE-dsh修补 3.3）：预览给出，确定时带回，保存那一刻对不上就不保存。
+ * 只看模型名序列和手填名单。上下文长度、时间戳、刷新记录不算进去，所以聊天里的一次对账不会让已经打开的弹窗作废。
+ */
+export function listRev(entry: ProviderEntry): string {
+  return createHash('sha256').update(JSON.stringify([entry.route.models.map(m => m.id), entry.meta.manualModels])).digest('hex').slice(0, 32)
 }
 
 export class ProviderService {
@@ -267,39 +279,38 @@ export class ProviderService {
   }
 
   /**
-   * 带 only 的落盘集合（INTERFACE §11b）：（本次拉到的 ∩ only）∪（当前列表 ∩ only），先拉到的
-   * （上游顺序）后仅本地的（当前列表顺序）。勾上而本次没拉到的留在列表里并粘进 manualModels；
-   * 被弃选的旧手动模型从 manualModels 移除；only 里两边都没有的 id 静默忽略。
+   * 按勾选落盘（INTERFACE-dsh修补 3.2）。四条合起来保证「预览后什么都不动直接确定，清单原样不变」：
+   * - 先后：原来就在清单里、这次被勾上的在前（保持原来的先后），新勾上的（对方返回、原来不在清单）在后（按对方返回的先后）；
+   * - 上下文长度：原来就在清单里的整条原样留下，不管对方这次给没给、给的是多少；只有新加进来的才取对方给的值或默认值；
+   * - 手填名单：只去掉「在清单里、这次没被勾上」的名字，其余原样（含本来就不在清单的），不因为「勾上而对方没返回」新增；
+   * - 猜的上下文名单：被取消勾选的移出，新加进来而对方没给上下文的加进去，其余不变。
+   * only 里两边都没有的名字静默忽略。
    */
   private buildSelected(fetched: FetchedModel[], entry: ProviderEntry, only: string[]): { models: ProviderModel[]; guessed: string[]; manual: string[] } {
     const onlySet = new Set(only)
-    const owner = new Set(entry.meta.ownerContext ?? [])
-    const oldManual = new Set(entry.meta.manualModels ?? [])
-    const existingById = new Map(entry.route.models.map(m => [m.id, m]))
-    const out: ProviderModel[] = []
-    const seen = new Set<string>()
-    const sticky = new Set<string>()
+    const inList = new Set(entry.route.models.map(m => m.id))
+    const kept = entry.route.models.filter(m => onlySet.has(m.id))
+    const dropped = new Set(entry.route.models.filter(m => !onlySet.has(m.id)).map(m => m.id))
+    const added: ProviderModel[] = []
+    const addedGuessed: string[] = []
+    const addedIds = new Set<string>()
     for (const f of fetched) {
-      if (!onlySet.has(f.id) || seen.has(f.id)) continue
-      seen.add(f.id)
-      const keep = existingById.get(f.id)
-      const ctx = owner.has(f.id) && keep ? keep.contextWindow : (f.contextWindow ?? DEFAULT_CONTEXT)
-      out.push({ id: f.id, contextWindow: ctx })
+      if (!onlySet.has(f.id) || inList.has(f.id) || addedIds.has(f.id)) continue
+      addedIds.add(f.id)
+      added.push({ id: f.id, contextWindow: f.contextWindow ?? DEFAULT_CONTEXT })
+      if (f.contextWindow === null) addedGuessed.push(f.id)
     }
-    for (const m of entry.route.models) {
-      if (!onlySet.has(m.id) || seen.has(m.id)) continue
-      seen.add(m.id)
-      sticky.add(m.id)
-      out.push(existingById.get(m.id) ?? { id: m.id, contextWindow: DEFAULT_CONTEXT })
+    return {
+      models: [...kept, ...added],
+      guessed: [...entry.meta.guessedContext.filter(id => !dropped.has(id) && !addedIds.has(id)), ...addedGuessed],
+      manual: entry.meta.manualModels.filter(id => !dropped.has(id)),
     }
-    const guessed = out.filter(m => !owner.has(m.id) && fetched.some(f => f.id === m.id && f.contextWindow === null)).map(m => m.id)
-    const manual = out.filter(m => sticky.has(m.id) || oldManual.has(m.id)).map(m => m.id)
-    return { models: out, guessed, manual }
   }
 
   /**
    * POST /v1/provider/preview（INTERFACE §11a）：只拉不写——不写 providers.json、不动 lastRefresh、
    * 不调 onChanged、不占 refreshing 去重。拉到 0 个模型也算成功（models 只含仅本地的行）。
+   * 行的默认勾选与清单指纹都按拉取之前读到的那份清单算。
    */
   async preview(name: string): Promise<PreviewResult> {
     let snap: ProvidersSnapshot
@@ -318,20 +329,23 @@ export class ProviderService {
     this.d.log.info('provider.models_fetched', { name: found.name, count: fetched.length })
     const listById = new Map(found.entry.route.models.map(m => [m.id, m]))
     const manual = new Set(found.entry.meta.manualModels)
+    // 默认勾选（INTERFACE-dsh修补 3.1）：in_list or（清单为空 and in_fetched）。清单不为空时默认勾上的恰好是清单的全部，
+    // 新出现的不勾（手填名单里有而清单里没有的也按不在清单算）；清单为空时拉到的全勾，免得第一次要一个个点
+    const listEmpty = found.entry.route.models.length === 0
     const rows: PreviewRow[] = []
     const seen = new Set<string>()
     for (const f of fetched) {
       if (seen.has(f.id)) continue
       seen.add(f.id)
-      rows.push({ id: f.id, contextWindow: f.contextWindow, in_list: listById.has(f.id), in_fetched: true, manual: manual.has(f.id), default_checked: true })
+      const inList = listById.has(f.id)
+      rows.push({ id: f.id, contextWindow: f.contextWindow, in_list: inList, in_fetched: true, manual: manual.has(f.id), default_checked: inList || listEmpty })
     }
     for (const m of found.entry.route.models) {
       if (seen.has(m.id)) continue
       seen.add(m.id)
-      const isManual = manual.has(m.id)
-      rows.push({ id: m.id, contextWindow: m.contextWindow, in_list: true, in_fetched: false, manual: isManual, default_checked: isManual })
+      rows.push({ id: m.id, contextWindow: m.contextWindow, in_list: true, in_fetched: false, manual: manual.has(m.id), default_checked: true })
     }
-    return { status: 'ok', name: found.name, count: fetched.length, models: rows }
+    return { status: 'ok', name: found.name, count: fetched.length, models: rows, listRev: listRev(found.entry) }
   }
 
   /**
@@ -361,11 +375,12 @@ export class ProviderService {
 
   /**
    * 刷新模型列表：锁外拉（key 从凭据现读，读不到 = key_missing）→ 锁内比对 baseURL/api/keyRev 后写。
-   * only 给出时按勾选落盘（INTERFACE §11b：落盘 =（拉到的 ∩ only）∪（列表 ∩ only），勾上而本次没
-   * 拉到的并入 manualModels）；only 缺省时行为与扩展前一字不变。
+   * only 给出时按勾选落盘（buildSelected）；only 缺省时重铺成对方返回的全部加手填的。
+   * rev 给出时（预览拿到的清单指纹）在锁里和保存那一刻的清单比，对不上就不保存（list_changed）。
    * 上游回空目录：带 only 时按「拉到 0 个」照勾选落盘、记成成功；only 缺省时仍是失败（reason 为 empty）。
    */
-  async refresh(name: string, only?: string[]): Promise<RefreshResult> {
+  async refresh(name: string, o: { only?: string[]; rev?: string } = {}): Promise<RefreshResult> {
+    const { only } = o
     const key = normName(name)
     let snap: ProvidersSnapshot
     try { snap = this.read() } catch { return { status: 'unreadable' } }
@@ -412,6 +427,8 @@ export class ProviderService {
         if (e.entry.route.baseURL !== before.route.baseURL || e.entry.route.api !== before.route.api || e.entry.meta.keyRev !== before.meta.keyRev) {
           return { status: 'changed', name: found.name } as RefreshResult
         }
+        // 预览之后清单被别处改过：这次的勾选是照旧清单挑的，不保存
+        if (o.rev !== undefined && o.rev !== listRev(e.entry)) return { status: 'list_changed', name: found.name } as RefreshResult
         // only 缺省：与扩展前同一套（拉到的 + 手动加的，manual 不动）；带 only：按勾选集合算（§11b）
         const built: { models: ProviderModel[]; guessed: string[]; manual: string[] } = only === undefined
           ? { ...this.buildModels(fetched, e.entry, null), manual: e.entry.meta.manualModels }
@@ -430,7 +447,7 @@ export class ProviderService {
         this.d.onChanged?.()
         return {
           status: 'ok', name: e.name, count: fetchedCount, added, removed,
-          keptManual: built.manual.length, selected: built.models.length, bySelection: only !== undefined,
+          keptManual: built.manual.length, selected: built.models.length, applied: only !== undefined ? 'selection' : 'full',
           v1Added, baseURL: storedURL,
         } as RefreshResult
       })
