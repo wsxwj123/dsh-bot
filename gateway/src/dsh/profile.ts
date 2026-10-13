@@ -52,6 +52,14 @@ export function runtimeRules(): string {
   ].join('\n')
 }
 
+/**
+ * 交给 dsh 的重试策略。dsh 的默认策略把"正常结束但一个内容块都没有"（EMPTY_RESPONSE）也算可重试：
+ * 模型照运行规则"发完就结束"回了空，会被原样再请求 5 次（账本 B23）。这里只留真失败的四种。
+ * 只写这两个键，次数和退避沿用 dsh 的默认值；retryableCodes 不能是空数组（dsh 会拒收）。
+ * 写法在 dsh 0.2.0-rc.2 上实测过，升级 dsh 后重跑 lab/dsh/offline/b23-*.ts 核对。
+ */
+export const RETRY_POLICY = { mode: 'normal', retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'] }
+
 export type PatchInput = {
   persona: string
   brain: Brain
@@ -64,7 +72,13 @@ export type PatchInput = {
 export function buildPatchRows(p: PatchInput): object[] {
   const rows: object[] = []
   const b = p.brain
-  if (Object.keys(b.routes).length > 0) rows.push({ id: 'llm-pi-ai', config: { providers: b.routes } })
+  // 路由自己写了 retryPolicy 的原样交给 dsh（不改、不合并），没写的补上。
+  // 补在这一行里、不动 b.routes：重启指纹按 b.routes 算，路由没变就不该因为这个多重启一次。
+  const routes = Object.entries(b.routes).map(([name, r]) => [name, r.retryPolicy === undefined ? { ...r, retryPolicy: RETRY_POLICY } : r])
+  if (routes.length > 0) rows.push({ id: 'llm-pi-ai', config: { providers: Object.fromEntries(routes) } })
+  // 内置 deepseek-official 路由的策略放在它自己的行里。不管当前用哪家都下发：
+  // 运行中用 /model 切到内置路由不重启 dsh，到那时再补就晚了。
+  rows.push({ id: 'llm-deepseek', config: { retryPolicy: RETRY_POLICY } })
   rows.push({ id: 'credentials', config: { path: p.credentialsPath } })
   // 技能只从这个 bot 自己的目录发现：关掉项目根/用户根（否则 <cwd>/.dsh/skills、<DSH_HOME>/skills 会成为额外来源）。
   rows.push({ id: 'skill-filesystem', config: { includeDefaultRoots: false, customSkillDirs: [p.skillDir] } })
