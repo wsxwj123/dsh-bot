@@ -526,3 +526,11 @@ export async function warmUp(tg: FakeTelegram, text = '预热一下'): Promise<v
 }
 
 export const dshStarts = (b: BotEnv) => lifecycle(b).filter(l => l.event === 'start').length
+
+// ─── 对账句（INTERFACE-dsh修补 第五节名词）：清单不为空时，不带勾选的刷新、落到已有供应商上的保存只报数、不改清单 ───
+
+/** n = 对方这次返回的模型数（去重后），x = 对方返回而不在清单里的，y = 清单里对方这次没返回的（手填的也算） */
+export const reconLine = (n: number, x: number, y: number) =>
+  `对方现在有 ${n} 个模型，其中 ${x} 个不在清单里，清单里有 ${y} 个对方这次没返回。清单没有改动，要挑选请到管理台的「供应商与模型」页。`
+/** n 大于 0 而清单里的模型对方一个都没返回时，对账句后面再接的那一句 */
+export const DISJOINT_NOTE = '清单里的模型对方一个都没返回，这个地址上的内容可能换了，建议到管理台重新挑。'
