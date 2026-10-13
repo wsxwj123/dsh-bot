@@ -5,7 +5,7 @@
 import { describe, expect, setDefaultTimeout, test } from 'bun:test'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { DS_KEY, FRIEND, OWNER, Gateway, chatPrompts, eventsOf, evs, inboundRow, logPath, makeBot, patchRoutes, patchSeen, prompts, q, seedCreds, seedProviders, sleep, until, waitSentText, warmUp, withBot, writeConfig, type BotEnv } from './_acc'
+import { DS_KEY, FRIEND, OWNER, Gateway, eventsOf, evs, inboundRow, logPath, makeBot, patchRoutes, patchSeen, prompts, q, seedCreds, seedProviders, sleep, until, waitSentText, warmUp, withBot, writeConfig, type BotEnv } from './_acc'
 import { FakeTelegram } from '../fakes/fake-telegram'
 
 // 不依赖命令行的 --timeout：这里的等待最长 20 秒
