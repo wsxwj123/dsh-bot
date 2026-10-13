@@ -1,6 +1,7 @@
 // lab/dsh/tools/verify-tool-usage.ts 的纯函数：参数、从模型响应里取工具调用、单条记录、判据、汇总、打码。
 // 真跑那一段（真模型、要花钱）不在这里测。
 import { expect, test } from 'bun:test'
+import { normalize } from 'path'
 import { registerSecret } from '../../src/log'
 import {
   buildTurn, judge, parseArgs, parseToolCalls, renderReport, safeArgs, summarize, swapKey, toJson, UsageError,
@@ -16,7 +17,7 @@ test('参数：可重复项按出现顺序收集，没给的用默认值', () =>
   expect(a.threshold).toBe(2)
   expect(a.api).toBe('openai-completions')
   expect(a.keyEnv).toBe('DEEPSEEK_API_KEY')
-  expect(a.homeLinks).toEqual(['resource/stickers'])
+  expect(a.homeLinks).toEqual([normalize('resource/stickers')]) // 工具按本机的路径写法规整，Windows 上是反斜杠
   expect(a.turnTimeoutMs).toBe(900_000)
   expect(a.effort).toBeUndefined()
 })
