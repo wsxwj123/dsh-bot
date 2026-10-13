@@ -29,8 +29,8 @@ export type ApiDeps = {
    */
   provider?: {
     views: () => Promise<ProviderViewLike[]>
-    /** only 给出时按勾选落盘（INTERFACE §11b）；rev 是预览拿到的清单指纹，带了就在保存那一刻核对 */
-    refresh: (name: string, o: { only?: string[]; rev?: string }) => Promise<{ status: number; body: unknown }>
+    /** only 给出时按勾选落盘（INTERFACE §11b）；rev 是预览拿到的清单指纹，带了就在保存那一刻核对；full 为真才把清单整份重铺 */
+    refresh: (name: string, o: { only?: string[]; rev?: string; full?: boolean }) => Promise<{ status: number; body: unknown }>
     /** POST /v1/provider/preview：只拉不写的预览（§11a） */
     preview: (name: string) => Promise<{ status: number; body: unknown }>
     /** POST /v1/provider/test：发一次最小对话请求测连接（§12a） */
@@ -151,7 +151,8 @@ export class ApiServer {
   /**
    * POST /v1/provider/refresh：名字先按 3.1.1 的格式筛掉，再交给 ProviderCommands 的刷新。
    * only 给出时先在这里校验（§11b）：模型名数组、每项与 cleanModelId 同一把尺、最多 1000 项；
-   * rev 给出时必须是 1 到 100 个字符的字符串。任一不合规一律 400 零副作用（不拉取、不写盘）。
+   * rev 给出时必须是 1 到 100 个字符的字符串；full 给出时必须是布尔值，而且不能和 only 一起给（full 为 false 等同没给）。
+   * 任一不合规一律 400 零副作用（不拉取、不写盘）。
    * 「给出」指请求体里有这个键：值是 null 也算给了，按形状不对拒绝，不当成没带（没带 rev 就不核对清单，不能悄悄走到那条路）。
    */
   private async providerRefresh(body: Record<string, unknown>): Promise<Response> {
@@ -174,7 +175,13 @@ export class ApiServer {
       }
       rev = body.rev
     }
-    const r = await this.d.provider.refresh(name, { only, rev })
+    if (body.full !== undefined && typeof body.full !== 'boolean') {
+      return json({ ok: false, error: 'bad_body', text: 'full 必须是 true 或 false' }, 400)
+    }
+    if (body.full === true && only !== undefined) {
+      return json({ ok: false, error: 'bad_body', text: 'only 和 full 不能同时给' }, 400)
+    }
+    const r = await this.d.provider.refresh(name, { only, rev, full: body.full === true })
     return json(r.body, r.status)
   }
 
