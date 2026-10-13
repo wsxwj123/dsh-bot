@@ -7,6 +7,9 @@ import { isAlive, processCommandLine } from '../../src/dsh/process'
 import { startFakeLlm, type FakeLlm } from '../../../lab/dsh/lib/fake-llm'
 import { FakeTelegram } from '../fakes/fake-telegram'
 import { cleanup, Gateway, makeBot, OWNER, sleep, until, writeConfig, type BotEnv } from '../harness'
+import { rmSync } from 'fs'
+import * as acc from '../acceptance/_acc'
+import { startFakeUpstream, type UpstreamMode } from './_fake-upstream'
 
 const harness = process.env.DSH_BOT_HARNESS ? resolve(process.env.DSH_BOT_HARNESS) : ''
 const available = !!harness && existsSync(join(harness, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
@@ -215,3 +218,58 @@ test.skipIf(!available)('真 dsh：网关被强杀后，旧 dsh 不会一直留�
   tg.pushText(OWNER, 'realC')
   await until(() => llm.requests.some(r => JSON.stringify(r.body.messages).includes('realC')), 'new dsh works', 60_000)
 }, 180_000) // 用例级超时：内部最坏 20（网关重启就绪）+20（等旧 dsh 退出）+60 秒（等新 dsh 干活）=100 秒
+
+// ─── 模型回空内容时发给上游的请求次数（INTERFACE-dsh修补 1.3） ───
+// 每条用例自己起一套环境：假 Telegram + 网关 + 真 dsh + 本机假模型服务。路由不手写 retryPolicy（用网关补上的那一个）。
+// 对方用 FRIEND 发消息，主人（OWNER）聊天里出现的只会是系统通知。
+
+type UpApi = 'openai-completions' | 'openai-responses' | 'anthropic-messages'
+type UpCtx = { tg: FakeTelegram; b: acc.BotEnv; up: ReturnType<typeof startFakeUpstream> }
+
+async function withUpstream(api: UpApi, mode: UpstreamMode, fn: (c: UpCtx) => Promise<void>): Promise<void> {
+  const tg2 = new FakeTelegram()
+  const up = startFakeUpstream(mode)
+  const base = `http://127.0.0.1:${up.port}`
+  const bot = acc.makeBot(tg2, {
+    gw: { burst_window_ms: 0 },
+    brain: { provider: 'up', model: 'up-chat', routes: { up: { api, baseURL: api === 'anthropic-messages' ? base : `${base}/v1`, apiKeyEnv: 'UP_KEY', models: [{ id: 'up-chat', contextWindow: 1000000 }] } } },
+  })
+  delete (bot.gw as Record<string, unknown>).dsh_command
+  acc.writeConfig(bot)
+  acc.seedCreds(bot.root, { UP_KEY: 'fake-key-for-tests' })
+  const g = new acc.Gateway(bot)
+  try {
+    await g.start({ DSH_BOT_HARNESS: harness })
+    await fn({ tg: tg2, b: bot, up })
+  } finally {
+    await g.stop().catch(() => {})
+    up.stop()
+    tg2.stop()
+    try { rmSync(bot.root, { recursive: true, force: true }) } catch {}
+  }
+}
+
+test.skipIf(!available)('真 dsh 空完成：先调 reply、工具结果之后回空完成（content 是空字符串），这一轮假模型只收到 2 个请求，主人没有消息', async () => {
+  await withUpstream('openai-completions', 'reply-then-empty', async ({ tg, b, up }) => {
+    tg.pushText(acc.FRIEND, '你好 emptyA')
+    await acc.until(() => tg.sentTo(acc.FRIEND).some(s => s.text === up.replyText), '回复经真 dsh 发出', 120_000)
+    await acc.until(() => acc.evs(b, 'turn.end').length >= 1, '这一轮有了结局', 90_000)
+    await acc.sleep(2_000)
+    expect(up.generations().length, `假模型收到的请求数；网关日志里这一轮的结局：${JSON.stringify(acc.evs(b, 'turn.end'))}`).toBe(2)
+    expect(tg.sentTo(acc.FRIEND).map(s => s.text)).toEqual([up.replyText])
+    expect(tg.sentTo(acc.OWNER)).toEqual([])
+  })
+}, 300_000)
+
+for (const [api, mode] of [['openai-completions', 'empty'], ['openai-responses', 'empty'], ['anthropic-messages', 'empty']] as const) {
+  test.skipIf(!available)(`真 dsh 空完成（${api}）：一上来就回空完成，每次 prompt 只发 1 个请求，连同网关的补救整批共 3 个，主人收到「…已放弃（模型回了空内容）。」`, async () => {
+    await withUpstream(api, mode, async ({ tg, up }) => {
+      tg.pushText(acc.FRIEND, '你好 emptyB')
+      const note = await acc.waitSentText(tg, acc.OWNER, '已放弃', 0, 240_000)
+      await acc.sleep(1_000)
+      expect(up.generations().length, `假模型收到的请求数；主人收到的通知：${note.text}`).toBe(3)
+      expect(note.text).toBe('【系统】有 1 条消息重试 2 次后仍然失败，已放弃（模型回了空内容）。')
+      expect(tg.sentTo(acc.FRIEND)).toEqual([])
+    })
+  }, 360_000)
+}
