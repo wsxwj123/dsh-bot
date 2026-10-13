@@ -17,7 +17,7 @@ from werkzeug.test import EnvironBuilder
 LOCAL = "HUB_LEGACY_PROVIDER_URL_LOCAL"
 PUBLIC = "HUB_LEGACY_PROVIDER_URL_PUBLIC"
 DEFAULT_LOCAL = "http://127.0.0.1:8767/provider"
-DEFAULT_PUBLIC = "https://8767.wsxwj123.top/provider"
+DEFAULT_PUBLIC = "https://legacy-provider.invalid/provider"
 LOCAL_HOST = "127.0.0.1:8765"
 PUBLIC_HOST = "8765.example.com"
 FORWARD_HEADERS = ["X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host", "Forwarded",
