@@ -8,7 +8,7 @@ import {
   readProviders, setCredentialRef, writeProviders, ProvidersLockTimeout, ProvidersUnreadable, withProvidersLock,
   type ProviderApi, type ProviderEntry, type PendingKeyRemoval, type ProviderMeta, type ProviderModel, type ProviderRoute, type ProvidersSnapshot,
 } from './store'
-import type { FetchedModel, FetchFailReason, FetchModelsFn, FetchModelsResult, ProbeModelFn } from './models'
+import { isBareHost, type FetchedModel, type FetchFailReason, type FetchModelsFn, type FetchModelsResult, type ProbeModelFn } from './models'
 
 export type ServiceDeps = {
   root: string
@@ -44,7 +44,9 @@ export type RefreshResult =
       /** 落盘后列表长度（INTERFACE §11b：缺省 only 时也给） */
       selected: number
       /** 本次是否带 only 落盘（文案尾部追加「（按勾选保留 S 个）」、响应 removed 形状按此分岔） */
-      bySelection: boolean }
+      bySelection: boolean
+      /** 这次是在 /v1 下才拉到的：落盘时把保存的地址一并补成了 baseURL（文案尾部追加「（地址补成了 …）」） */
+      v1Added: boolean; baseURL: string }
   | RefreshFailure
   | { status: 'not_found' }
   | { status: 'disabled' }
@@ -68,7 +70,8 @@ export type PreviewResult =
 /** POST /v1/provider/test 的结果（INTERFACE §12a） */
 export type TestConnResult =
   | { status: 'ok'; name: string; model: string; latencyMs: number }
-  | { status: 'failed'; name: string; model: string; reason: FetchFailReason; status2: number | null; seconds?: number }
+  /** bareHost：OpenAI 格式、保存的地址只有域名（回的不是接口返回时，文案提示可能少写了 /v1） */
+  | { status: 'failed'; name: string; model: string; reason: FetchFailReason; status2: number | null; seconds?: number; bareHost: boolean }
   | { status: 'not_found' }
   | { status: 'disabled' }
   | { status: 'key_missing' }
@@ -349,7 +352,8 @@ export class ProviderService {
     const latencyMs = Math.max(0, Math.round(this.now() - started))
     if (!res.ok) {
       this.d.log.warn('provider.test_failed', { name: found.name, reason: res.reason, status: res.status })
-      return { status: 'failed', name: found.name, model: first.id, reason: res.reason, status2: res.status, ...(res.seconds !== undefined ? { seconds: res.seconds } : {}) }
+      const bareHost = found.entry.route.api !== 'anthropic-messages' && isBareHost(found.entry.route.baseURL)
+      return { status: 'failed', name: found.name, model: first.id, reason: res.reason, status2: res.status, ...(res.seconds !== undefined ? { seconds: res.seconds } : {}), bareHost }
     }
     this.d.log.info('provider.tested', { name: found.name })
     return { status: 'ok', name: found.name, model: first.id, latencyMs }
@@ -397,6 +401,9 @@ export class ProviderService {
       }
       // 走到这里只有两种：拉成功；或带 only 而上游回空目录（按拉到 0 个落盘）
       const fetched = res.ok ? res.models : []
+      // 这次是在 /v1 下才拉到的：落盘时把保存的地址一并补上，不然聊天时 dsh 仍去请求没有 /v1 的地址（空目录不算拉到，不补）
+      const v1Added = res.ok && res.v1Added
+      const storedURL = res.ok ? res.baseURL : before.route.baseURL
       this.d.log.info('provider.models_fetched', { name: found.name, count: fetched.length })
       return await withProvidersLock(this.d.root, { waitMs: this.d.lockWaitMs, log: this.d.log, now: this.now }, () => {
         const cur = this.read()
@@ -416,7 +423,7 @@ export class ProviderService {
         const added = built.models.filter(m => !beforeIds.has(m.id)).length
         const removed = e.entry.route.models.filter(m => !afterIds.has(m.id)).map(m => m.id)
         const meta = { ...e.entry.meta, updatedAt: this.now(), guessedContext: built.guessed, manualModels: built.manual, lastRefresh: { at: this.now(), ok: true, count: fetchedCount, reason: null } }
-        const route = { ...e.entry.route, models: built.models }
+        const route = { ...e.entry.route, baseURL: storedURL, models: built.models }
         const rawList = cur.raw.providers as Record<string, unknown>
         const raw = { ...cur.raw, providers: { ...rawList, [e.name]: this.withKnownEntry(rawList[e.name], { route, meta }) } }
         writeProviders(this.providersPath(), raw)
@@ -424,6 +431,7 @@ export class ProviderService {
         return {
           status: 'ok', name: e.name, count: fetchedCount, added, removed,
           keptManual: built.manual.length, selected: built.models.length, bySelection: only !== undefined,
+          v1Added, baseURL: storedURL,
         } as RefreshResult
       })
     } catch (e) {
