@@ -8,6 +8,8 @@
 >
 > ✅ **单 bot 私聊**（主链路）已在 macOS 端到端验证通过。原生 Windows 在上一版验证通过；本版专门修了 Windows 的 worker 启动命令行、claude 探测、摘要子进程收尾三处，目前只有模拟器与单测证据，**待真机复验**。
 > 🧪 **朋友圈生图、多 bot 群聊导演**是进阶功能，代码齐全但尚未在所有平台完整跑通，用到时留意。
+>
+> 🆕 **这个仓库在原引擎之外多了一套新系统**：`gateway/`（每个 bot 一个网关进程）加 DeepSeek Harness（dsh）当大脑，这一套不依赖 Claude Code。新系统的装法与命令见 [`gateway/README.md`](gateway/README.md)，从原来那一套切过去的步骤见 [`docs/dsh-migration/CUTOVER.md`](docs/dsh-migration/CUTOVER.md)。下面「部署」各节讲的是原来那一套（Claude Code 当大脑），两套可以并存。
 
 ---
 
