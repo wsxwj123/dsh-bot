@@ -288,6 +288,12 @@ powershell -ExecutionPolicy Bypass -File windows\register-tasks.ps1
 
 四个页面：**模型来源**（`/hub/provider`，换 provider、填 key）、**bot 状态**（`/hub/bots`，看在跑没、重启）、**系统参数**（`/hub/params`，网页改 `configs/_global.yml` 里的数值参数，带高级模式直接改原文、以及改前自动备份和一键回滚）、**添加 bot**（`/hub/addbot`，填个 token 就建好新 bot 并拉起来，详见「加更多机器人」）。
 
+**新系统（dsh 网关）的 bot 另有几处**：
+
+- **bot 状态**页对新系统的 bot 可以单只启用、停止、重启，也可以编辑显示名、人设与音色。保存人设前会自动备份（同目录 `CLAUDE.md.bak.<时间>`，留 5 份）；停用会把这只 bot 的开机自启一并收起，重新登录也不会自己起来。这些操作只对新系统的 bot 开放。
+- **模型与供应商**（`/hub/dsh-model`）：给每只 bot 选模型，增删自建供应商、刷新模型列表、测试连接。
+- 导航里的**旧系统供应商**只是一个入口，点开会在新标签页跳到旧系统自己跑的供应商页，管理台本身不再提供那一页。目的地在 `hub.env` 里配：`HUB_LEGACY_PROVIDER_URL_LOCAL`（从本机地址打开管理台时用）与 `HUB_LEGACY_PROVIDER_URL_PUBLIC`（经隧道或反代打开时用）。
+
 - **口令写在 `~/.claude-tgbot/hub.env`**：`install.sh` 会生成一条随机 `HUB_ACCESS_PASSWORD` 写进去。这个文件是**门户自己去读的配置文件**（600 权限，不进 git），不是给 shell `source` 的——所以你改完它只要重启 moments-web 就生效，不用去动 plist / 计划任务。同一个文件里还放着 cliproxy 的端口和 key。
 - **上游 key 存在哪**：`~/.claude-tgbot/cliproxy/config.yaml`（明文，600）。目录本身是 700 兜底——**把这个目录拷给别人排障、或让备份工具带走之前，先把里面的 key 删掉**。
 - **想再加一道内锁**：文件里加一行 `HUB_ADMIN_PASSWORD=<另一个口令>`，`/hub` 之下就要两把口令都对（家人只给第一把，只能看不能改）。
