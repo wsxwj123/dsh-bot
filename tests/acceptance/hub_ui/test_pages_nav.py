@@ -96,15 +96,31 @@ def test_思考按钮在页面上_档位名不是初始渲染(hub):
         assert label not in html, "初始 HTML 里就渲染了档位按钮（%s），档位应懒加载" % label
 
 
-def test_旧页provider不共用新导航(hub):
-    """契约 1 第 19 行：/provider 自带顶栏，与旧仓逐字一致，不共用这条导航。"""
-    html = page(hub, "/provider")
-    assert 'href="/hub/dsh-model"' not in html, "/provider 旧页混进了新导航（出现了 /hub/dsh-model）"
+def test_旧页provider已下线_只回302不再出页面(hub):
+    """预期随「旧系统供应商只留入口」这一批改了（INTERFACE-旧系统供应商入口 §4）。
+
+    原来（契约 1 第 19 行）：GET /provider 回 200，出的是本仓那份自带顶栏的旧页面。
+    现在：这个地址不再出本仓的页面，只回 302 把人带到旧系统那边。跳到哪、怎么挑，
+    由 tests/acceptance/legacy_entry 细量，这里只钉「不再是 200 的页面」。
+    """
+    r = hub.get("/provider")
+    assert r.status_code == 302, "/provider 应回 302（已下线为入口），实得 %s" % r.status_code
+
+
+def test_旧页provider已下线_响应里照旧没有新导航(hub):
+    """原用例 test_旧页provider不共用新导航 的那句断言，原样留着：
+    以前是旧页自带顶栏所以没有新导航，现在是根本不出页面，同样不该出现。"""
+    html = hub.get("/provider").get_data(as_text=True)
+    assert 'href="/hub/dsh-model"' not in html, "/provider 的响应里出现了新导航（/hub/dsh-model）"
 
 
 def test_既有页面还能开(hub):
-    """契约 1 恒 200 铁律：这些页面重写后都必须仍能打开。"""
+    """契约 1 恒 200 铁律：这些页面重写后都必须仍能打开。
+
+    /provider 原先也在这张清单里，「旧系统供应商只留入口」这一批把它下线成了跳转，
+    已从清单拿掉，去向是上面的 test_旧页provider已下线_只回302不再出页面。
+    """
     for path in ("/hub", "/hub/dsh-model", "/hub/bots", "/hub/addbot", "/hub/params", "/hub/provider",
-                 "/provider", "/styles", "/"):
+                 "/styles", "/"):
         r = hub.get(path)
         assert r.status_code == 200, "%s 期望 200，实得 %s" % (path, r.status_code)
