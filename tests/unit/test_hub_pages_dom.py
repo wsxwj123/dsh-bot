@@ -464,6 +464,80 @@ def test_模型页_供应商面板里的行与操作按钮渲染得出来(tmp_pa
         "刷新模型列表", "测试连接", "管理", "编辑", "删除"]
 
 
+# ============================================================ INTERFACE-dsh修补 3.5 勾选弹窗：标记、带回清单指纹
+
+PICK_PREVIEW = "POST /hub/api/dsh-model/provider/myproxy/preview"
+PICK_REFRESH = "POST /hub/api/dsh-model/provider/myproxy/refresh"
+
+
+def _pick_row(mid, in_list, in_fetched, manual, checked):
+    return {"id": mid, "contextWindow": None, "in_list": in_list, "in_fetched": in_fetched,
+            "manual": manual, "default_checked": checked}
+
+
+#: 预览的六行与各自该显示的标记（从上到下先命中先用）
+PICK_ROWS = [
+    (_pick_row("kept", True, True, False, True), ""),
+    (_pick_row("kept-manual", True, True, True, True), "手动"),
+    (_pick_row("new", False, True, False, False), "新"),
+    (_pick_row("new-ghost", False, True, True, False), "新"),
+    (_pick_row("gone-manual", True, False, True, True), "手动、对方这次没返回"),
+    (_pick_row("gone", True, False, False, True), "对方这次没返回"),
+]
+PICK_IDS = ("pickDialog", "pickCount", "pmsg")
+
+
+def _pick_steps(preview_body, *after):
+    """切到供应商页签，点「刷新模型列表」，放行预览，再接后面的步骤。"""
+    return [{"op": "click", "id": "tab-providers"},
+            {"op": "click", "in": "prows", "row": 0, "text": "刷新模型列表"},
+            _respond(PICK_PREVIEW, 200, preview_body), *after]
+
+
+def _pick_preview(list_rev="rev-0001"):
+    body = {"ok": True, "count": 4, "models": [row for row, _ in PICK_ROWS]}
+    if list_rev is not None:
+        body["list_rev"] = list_rev
+    return body
+
+
+def test_勾选弹窗_每行的标记按约定的先后_默认勾选照用网关给的(tmp_path):
+    out = _run(tmp_path, MODEL, _pick_steps(_pick_preview(), _snap("open", *PICK_IDS, rows=["pickList"])),
+               auto=[_model_list("bota")])
+    rows = out["open"]["rows"]["pickList"]
+    # 每行三个 span：模型名、标记、上下文。没有标记的那一格是空的
+    assert [(r["pills"][0]["text"], r["pills"][1]["text"]) for r in rows] == [
+        (row["id"], mark) for row, mark in PICK_ROWS]
+    assert out["open"]["els"]["pickDialog"]["open"] is True
+    assert out["open"]["els"]["pickCount"]["text"] == "已选中 4 个"
+
+
+def test_勾选弹窗_确定时把预览拿到的清单指纹带回去_勾的是默认勾上的那几个(tmp_path):
+    out = _run(tmp_path, MODEL, _pick_steps(_pick_preview("rev-0001"),
+                                           {"op": "click", "id": "pickConfirm"}, _snap("sent")),
+               auto=[_model_list("bota")])
+    assert _posts(out["sent"])[-1] == {"req": PICK_REFRESH, "body": {
+        "only": ["kept", "kept-manual", "gone-manual", "gone"], "rev": "rev-0001"}}
+
+
+def test_勾选弹窗_预览没给清单指纹时_确定的请求体里没有rev这个键(tmp_path):
+    out = _run(tmp_path, MODEL, _pick_steps(_pick_preview(None),
+                                           {"op": "click", "id": "pickConfirm"}, _snap("sent")),
+               auto=[_model_list("bota")])
+    assert _posts(out["sent"])[-1]["body"] == {"only": ["kept", "kept-manual", "gone-manual", "gone"]}
+
+
+def test_勾选弹窗_清单被别处改过回409_弹窗关闭_显示返回的话_列表重拉(tmp_path):
+    said = "清单刚被别处改过，这次没保存，请重新刷新模型列表。"
+    out = _run(tmp_path, MODEL, _pick_steps(
+        _pick_preview(), {"op": "click", "id": "pickConfirm"}, {"op": "clear"},
+        _respond(PICK_REFRESH, 409, {"ok": False, "error": "list_changed", "text": said}),
+        _snap("done", *PICK_IDS)), auto=[_model_list("bota")])
+    assert out["done"]["els"]["pickDialog"]["open"] is False
+    assert out["done"]["els"]["pmsg"]["text"] == "myproxy：" + said
+    assert [r["req"] for r in out["done"]["requests"]] == ["GET /hub/api/dsh-model"]
+
+
 # ============================================================ §13c 编辑弹窗：读
 
 def test_编辑弹窗_读取没返回时保存是禁用的_点了也不发请求(edit):
