@@ -103,13 +103,11 @@ type ChatState = { running: boolean; timer: ReturnType<typeof setTimeout> | null
 type Outcome = (
   | { type: 'ok'; stopReason: string }
   | { type: 'cancelled' }
-  | { type: 'error'; err: string; fatal: boolean }
+  | { type: 'error'; err: string; kind: TurnErrorKind }
   | { type: 'crashed'; err: string }
 ) & { used?: number | null; text?: string }
 
 const LOCKED = { text: '现在是整理记忆的时间，不能调用工具，也不会发给对方。请直接输出摘要正文。', isError: true }
-
-const FATAL_RE = /MISSING_CREDENTIAL|INVALID_CREDENTIAL|QUOTA|UNKNOWN_MODEL|unauthori[sz]ed|authentication|invalid api key|insufficient|balance|\b40[123]\b/i
 
 export function brainKey(b: Brain): string {
   return `${b.provider}/${b.model}/${b.reasoningEffort ?? ''}`
@@ -124,12 +122,32 @@ export function identityOf(key: string): string {
 /** 换段/超长重试要用的重试原因 */
 type RollReason = 'provider-changed' | 'context-overflow' | 'thinking-history'
 
-/** 从一轮的错误文字里认出"上游因上下文超长/历史思考被拒而拒绝"（方案 3.2 第 10、11 条；只看文字，不以状态码为条件） */
-export function classifyUpstreamError(text: string): RollReason | null {
-  const t = text.toLowerCase()
-  if (['context length', 'context_length', 'maximum context', 'prompt is too long', 'too many tokens', 'context_window'].some(k => t.includes(k))) return 'context-overflow'
-  if (t.includes('reasoning_content') || t.includes('thinking')) return 'thinking-history'
-  return null
+/** 一轮报错归成哪一类。other 是普通失败，走补救 */
+export type TurnErrorKind = 'empty-response' | 'fatal' | 'context-overflow' | 'thinking-history' | 'other'
+
+/**
+ * 报错归类的规则表：有先后，先命中先算。dsh 或上游多了新句子只改这张表。匹配的是已经去掉模型名的文字（见 classifyTurnError）。
+ * - empty-response：dsh 把"正常结束但没有任何内容"报成这两句（0.2.0-rc.2 实测）。前一句是自建与配置文件路由（三种接口格式同一句），
+ *   后一句是内置 deepseek-official。ACP 的报错和通知里都没有错误码，只能认句子。必须是第一个 `turn failed: ` 之后一直到句尾整句相等，
+ *   前后多一截都不算（`turn failed: 502: upstream returned no content` 是上游的话，不是它）。
+ * - fatal：模型那边拒绝了请求（密钥、余额、模型名），重试没用。
+ * - context-overflow / thinking-history：上游因上下文超长、历史思考被拒而拒绝（方案 3.2 第 10、11 条；只看文字，不以状态码为条件）。
+ */
+const TURN_ERROR_RULES: [Exclude<TurnErrorKind, 'other'>, RegExp][] = [
+  ['empty-response', /^(?:(?!turn failed: ).)*turn failed: (?:model "" returned a completed response with no content|DeepSeek Messages returned no content)$/s],
+  ['fatal', /MISSING_CREDENTIAL|INVALID_CREDENTIAL|QUOTA|UNKNOWN_MODEL|unauthori[sz]ed|authentication|invalid api key|insufficient|balance|\b40[123]\b/i],
+  ['context-overflow', /context length|context_length|maximum context|prompt is too long|too many tokens|context_window/i],
+  ['thinking-history', /reasoning_content|thinking/i],
+]
+
+/**
+ * 从一轮的报错文字认出它是哪一类。紧跟在 `model `、`provider ` 后面那对引号里的名字先去掉，不参与匹配：
+ * 模型名叫 x-thinking-401-quota 时，报错不会因为名字被当成"历史思考被拒"或"上游拒绝"。
+ * 只去这两处，不去所有引号内容：上游的报错常是一段 JSON，关键词都在引号里。
+ */
+export function classifyTurnError(text: string): TurnErrorKind {
+  const t = text.replace(/(model|provider) "[^"]*"/g, '$1 ""')
+  return TURN_ERROR_RULES.find(([, re]) => re.test(t))?.[0] ?? 'other'
 }
 
 export class Engine {
@@ -839,7 +857,7 @@ export class Engine {
         this.ledger.finishTurn(turn.id, 'error', { error: outcome.err, usedTokens: outcome.used })
         if (done) { this.ledger.settleInbound(ids, 'done', 'replied before error'); return 0 }
         // 上下文超长 / 历史思考被拒（方案 3.2 第 10、11 条）：立即换段（账本流水写摘要）并重试一次
-        const reason = outcome.fatal ? null : classifyUpstreamError(outcome.err)
+        const reason: RollReason | null = outcome.kind === 'context-overflow' || outcome.kind === 'thinking-history' ? outcome.kind : null
         if (reason && !recovered) {
           recovered = true
           if (reason === 'thinking-history') this.log.info('segment.thinking_history_rejected', { chat: chatId, segment: seg.id })
@@ -862,7 +880,7 @@ export class Engine {
           blocks = contentBlocks
           continue
         }
-        if (outcome.fatal) {
+        if (outcome.kind === 'fatal') {
           this.ledger.settleInbound(ids, 'dead', outcome.err.slice(0, 200))
           void this.notifyOwner('fatal', `模型那边拒绝了请求（${outcome.err.slice(0, 160)}），可能是密钥、余额或模型名的问题。${ids.length} 条消息没处理。`)
           return 0
@@ -951,7 +969,7 @@ export class Engine {
       if (e instanceof AcpExited || !this.dsh.running) return { type: 'crashed', err: safeError(e) }
       if (at.cancelledAt !== null) return { type: 'cancelled', used }
       const err = e instanceof AcpError ? `${e.code} ${e.message}` : safeError(e)
-      return { type: 'error', err, fatal: FATAL_RE.test(err), used }
+      return { type: 'error', err, kind: classifyTurnError(err), used }
     } finally {
       clearInterval(typing)
       clearInterval(watchdog)
