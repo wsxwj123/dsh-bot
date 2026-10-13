@@ -4,7 +4,7 @@
 // 假模型服务只在 127.0.0.1 上，密钥是测试自己编的。
 import { describe, expect, setDefaultTimeout, test } from 'bun:test'
 import { readFileSync } from 'fs'
-import { OWNER, findSecret, providerAdd, providersPath, readProviders, seedCreds, seedProviders, waitSentText, withModels, type BotEnv } from './_acc'
+import { OWNER, fakeKey, findSecret, labels, providerAdd, providersPath, readProviders, seedCreds, seedProviders, waitSentText, withModels, wizardCreate, type BotEnv } from './_acc'
 import { FakeModels, type Handler, json, openaiBody, openaiOk } from './fake-models'
 
 setDefaultTimeout(60_000)
@@ -12,6 +12,7 @@ setDefaultTimeout(60_000)
 const PREVIEW = '/v1/provider/preview'
 const REFRESH = '/v1/provider/refresh'
 const TEST = '/v1/provider/test'
+const SAVE = '/v1/provider/save'
 const PAGE_MARK = 'welcome-page-marker-5c1d'
 
 /** 一张状态码 200 的网页（不是模型清单） */
@@ -177,5 +178,64 @@ describe('密钥与对方回包不外泄', () => {
       expect(findSecret(b, key, { gw, extra: { '预览的响应': pv.text } })).toEqual([])
       expect(findSecret(b, PAGE_MARK, { gw, extra: { '预览的响应': pv.text } })).toEqual([])
     })
+  })
+})
+
+describe('补充（验收后补的盲区）：另外两个入口的补地址，与第二次请求的跳转', () => {
+  test('引导新建只写域名、/models 回 200 的网页、/v1/models 回清单：先后各发一次（同一把密钥），供应商建好、模型是第二次拉到的，保存的地址补上 /v1，结果里写明「地址补成了 …」', async () => {
+    await withModels({ handler: split(page, openaiOk(['gpt-a', 'gpt-b'])) }, async ({ tg, b, fm, key }) => {
+      const { result } = await wizardCreate(tg, { name: 'myproxy', fmt: 'openai', url: fm.url, key })
+      expect(paths(fm)).toEqual(TWO)
+      expect(fm.requests.map(r => [r.authKind, r.authOk])).toEqual([['bearer', true], ['bearer', true]])
+      expect(entry(b), `providers.json 里应出现 myproxy；结果消息：${JSON.stringify(result.text)}`).toBeTruthy()
+      expect(entry(b).route.baseURL).toBe(`${fm.url}/v1`)
+      expect(entry(b).route.models.map((m: any) => m.id)).toEqual(['gpt-a', 'gpt-b'])
+      expect(result.text!).toContain(`（地址补成了 ${fm.url}/v1）`)
+      expect(result.text!).not.toContain('没拉到模型')
+      // 「刷新模型」按钮只在新建时没拉到模型才有（INTERFACE-dsh修补 5.1）
+      expect(labels(tg, result.messageId)).not.toContain('刷新模型')
+    })
+  })
+
+  test('本机接口保存一个新供应商、同样的地址与对方行为：200，先后各发一次（同一把密钥），保存的地址补上 /v1、模型是第二次拉到的，text 里写明「地址补成了 …」；按新建处理（applied 为 full，没有对账的两个键）', async () => {
+    await withModels({ handler: split(page, openaiOk(['gpt-a', 'gpt-b'])) }, async ({ gw, b, fm, key }) => {
+      const r = await gw.call(SAVE, { name: 'myproxy', api: 'openai-completions', baseURL: fm.url, key, mode: 'create' })
+      expect(r.status, `应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
+      expect(r.json).toMatchObject({ ok: true, applied: 'full' })
+      expect(Object.keys(r.json).filter(k => k === 'not_in_list' || k === 'not_returned')).toEqual([])
+      expect(String(r.json.text)).toContain(`（地址补成了 ${fm.url}/v1）`)
+      expect(paths(fm)).toEqual(TWO)
+      expect(fm.requests.map(q => [q.authKind, q.authOk])).toEqual([['bearer', true], ['bearer', true]])
+      expect(entry(b), 'providers.json 里应出现 myproxy').toBeTruthy()
+      expect(entry(b).route.baseURL).toBe(`${fm.url}/v1`)
+      expect(entry(b).route.models.map((m: any) => m.id)).toEqual(['gpt-a', 'gpt-b'])
+      expect(r.text, '响应里不该有密钥').not.toContain(key)
+    })
+  })
+
+  test('不带勾选的刷新、第二次请求（/v1/models）回 302：502 redirect，保存的地址与清单不变；跳转的目标（同一台假服务上的另一个路径、另一台假服务，各试一遍）一个请求都没收到，密钥没被带过去', async () => {
+    const MOVED = '/moved/v1/models'
+    for (const where of ['同一台假服务上的另一个路径', '另一台假服务'] as const) {
+      const key = fakeKey('redir')
+      // 另一台假服务认的也是同一把密钥：万一请求真的跟了过去，记录里能看出带没带密钥
+      const other = new FakeModels(key, openaiOk(['leaked']))
+      try {
+        await withModels({ key, handler: page, before: seed({ models: ['a'] }) }, async ({ gw, b, fm }) => {
+          const location = `${where === '另一台假服务' ? other.url : fm.url}${MOVED}`
+          // /models 回网页；/v1/models 回 302；其余路径（含跳转的目标）回一份看上去正常的清单——真跟过去就会"成功"
+          fm.setHandler((r, n, raw) => r.path === '/models' ? page(r, n, raw)
+            : r.path === '/v1/models' ? new Response('', { status: 302, headers: { location } })
+            : openaiOk(['leaked'])(r, n, raw))
+          const r = await gw.call(REFRESH, { name: 'myproxy' })
+          expect(r.status, `${where}：应 502，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(502)
+          expect(r.json, where).toMatchObject({ ok: false, error: 'fetch_failed', reason: 'redirect' })
+          expect(paths(fm), `${where}：主人填的那台只该收到这两个请求`).toEqual(TWO)
+          const reached = [...fm.requests.filter(q => q.path === MOVED), ...other.requests]
+          expect(reached.map(q => `${q.method} ${q.path} 带对了密钥=${q.authOk}`), `${where}：跳转的目标不该收到任何请求`).toEqual([])
+          expect([entry(b).route.baseURL, entry(b).route.models.map((m: any) => m.id)], `${where}：保存的地址与清单不变`).toEqual([fm.url, ['a']])
+          expect(r.text, `${where}：响应里不该有密钥`).not.toContain(key)
+        })
+      } finally { other.stop() }
+    }
   })
 })
