@@ -5,6 +5,7 @@ import { join } from 'path'
 import { buildDshEnv } from '../../src/dsh/process'
 import { buildPatchRows, escapePersona, restartFingerprint, RETRY_POLICY } from '../../src/dsh/profile'
 import { parseBrain } from '../../src/config'
+import { unverifiedDshVersion } from '../../src/engine/engine'
 import { escapeUserText, formatMessages, formatSeed } from '../../src/engine/format'
 import type { InboundRow } from '../../src/ledger'
 import { classifySendError, TgApiError, TgNetworkError } from '../../src/telegram/api'
@@ -152,4 +153,13 @@ test('补丁层的重试策略：没写的路由补固定值，自己写的原�
   const builtin = buildPatchRows({ ...input, brain: parseBrain({}) }) as any[]
   expect(builtin.some(r => r.id === 'llm-pi-ai')).toBe(false)
   expect(builtin.filter(r => r.id === 'llm-deepseek')).toEqual([{ id: 'llm-deepseek', config: { retryPolicy: policy } }])
+})
+
+test('dsh 版本核对：只有读得到、不是核对过的那一版、也没用自定义启动命令时才提醒', () => {
+  expect(unverifiedDshVersion('9.9.9', false)).toBe('9.9.9')
+  expect(unverifiedDshVersion('0.2.0-rc.3', false)).toBe('0.2.0-rc.3')
+  expect(unverifiedDshVersion('0.2.0-rc.2', false)).toBe(null)
+  expect(unverifiedDshVersion('', false)).toBe(null)          // 读不到版本号
+  expect(unverifiedDshVersion('9.9.9', true)).toBe(null)      // 自定义启动命令
+  expect(unverifiedDshVersion('9'.repeat(200), false)).toBe('9'.repeat(40)) // 离谱的版本号截短，不整段塞进通知
 })
