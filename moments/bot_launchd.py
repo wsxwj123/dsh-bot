@@ -580,6 +580,25 @@ def _join(summary, lines):
 
 # ---------------------------------------------------------------- 编组
 
+def start_and_wait(bot_id, seams=None, budget=None):
+    """启用方向的整段动作：发命令（``_start_one``）再等 §5 存活。返回 ``(ok, reason, pid, age_s)``。
+
+    ``sync_one`` 的启用分支与适配服务的单只重启共用这一段：要结构化结果（原因是一句不带
+    路径的话）的调用方直接用它，不必去拆 ``sync_one`` 那份带日志路径的 tail。
+
+    ``budget`` 缺省：等活上限照旧读 ``RESTART_WAIT``，发命令花的时间不计在内（原行为）。
+    给了就是**从发命令那一刻算起**的总时限（秒），等活只用剩下的 —— 调用方自己有对外的
+    超时要守时用，launchctl 卡住的那几秒不会把总时长顶过去。
+    """
+    began = time.monotonic()
+    started = time.time() * 1000        # 判活的起始时刻 = 动作开始时刻（§5 第 2 条）
+    ok, reason = _start_one(bot_id, seams)
+    if not ok:
+        return False, reason, None, None
+    timeout = None if budget is None else max(0.0, budget - (time.monotonic() - began))
+    return wait_alive(bot_id, since_ms=started, timeout=timeout, seams=seams)
+
+
 def sync_one(bot_id, enabled=None, seams=None):
     """**单只同步**的 job 执行体，返回 ``(state, exit_code, tail)``。
 
@@ -594,13 +613,9 @@ def sync_one(bot_id, enabled=None, seams=None):
     if enabled is None:
         enabled = enabled_of(bot_id)
     if enabled:
-        started = time.time() * 1000        # 判活的起始时刻 = 动作开始时刻（§5 第 2 条）
-        ok, reason = _start_one(bot_id, seams)
-        if ok:
-            alive, why, pid, age = wait_alive(bot_id, since_ms=started, seams=seams)
-            if alive:
-                return "done", None, _join(_summary(1, 1), [_ok_line(bot_id, False, pid, age)])
-            reason = why
+        alive, reason, pid, age = start_and_wait(bot_id, seams)
+        if alive:
+            return "done", None, _join(_summary(1, 1), [_ok_line(bot_id, False, pid, age)])
         return "failed", None, _join(_summary(1, 0), [_fail_line(bot_id, reason, seams)])
     ok, reason = _stop_one(bot_id, seams)
     if ok:
