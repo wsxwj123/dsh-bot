@@ -9,7 +9,7 @@ import type { Logger } from '../log'
 import { registerSecret, safeError } from '../log'
 import { deleteMessageWithRetry, isNotModified, type TelegramApi, type TgCallbackQuery, type TgInlineKeyboard, type TgMessage } from '../telegram/api'
 import { formatProviders, type ModelChoice, type ProviderView } from '../engine/commands'
-import { refreshResultText, saveResultText } from '../providers/commands'
+import { reconText, refreshResultText, saveResultText } from '../providers/commands'
 import { checkBaseURL, checkProviderName, cleanModelId, cleanSecret, hostOf, normName, providersPath, type ProviderApi } from '../providers/store'
 import type { ProviderService, SaveResult } from '../providers/service'
 import { fetchFailText } from '../providers/models'
@@ -515,7 +515,8 @@ export class Wizard {
       const verb = `【系统】已更新「${r.name}」的${o.field}`
       let text: string
       if (r.reason === null) {
-        text = `${verb}，拉到 ${r.count} 个模型。`
+        // 没换一家、清单不为空：清单没动，改报对账句（与 saveResultText 同一条规则）
+        text = r.applied === 'kept' ? `${verb}。${reconText(r)}` : `${verb}，拉到 ${r.count} 个模型。`
       } else {
         text = `${verb}，但没拉到模型：${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}。模型列表保持不变。`
       }
@@ -598,7 +599,7 @@ export class Wizard {
     st.step = MF.M.done
     if (!r.ok) { await this.editMenu(chatId, st, T.modelEditError(r.why, r.why === 'gone' ? name : id), []); return }
     let text = `【系统】已从「${name}」删掉模型 ${id}。`
-    if (!manual) text += '下次「刷新模型」时，对方列表里还有的话它会重新出现。'
+    if (!manual) text += T.MODEL_REMOVED_NOTE
     const after = this.customBy(name)
     if (!after || after.models.length === 0) text += `「${name}」没有模型了，暂时不会出现在可选模型里。`
     if (before.provider === name && before.model === id) {
