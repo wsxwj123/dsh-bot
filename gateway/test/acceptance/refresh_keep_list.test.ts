@@ -5,7 +5,7 @@
 // 聊天刷新成功后的文案与落盘（清单 [m1, m2, man1] 的那一组）在 provider_refresh.test.ts，这里是其余各格。
 import { describe, expect, setDefaultTimeout, test } from 'bun:test'
 import { readFileSync, writeFileSync } from 'fs'
-import { DISJOINT_NOTE, OWNER, botTexts, dshStarts, labels, providerAdd, providersPath, readCreds, readProviders, reconLine, seedCreds, seedProviders, sleep, until, waitSentText, warmUp, withModels, wizardCreate, type BotEnv, type SeedModel } from './_acc'
+import { DISJOINT_NOTE, OWNER, RESULT_RE, botTexts, dshStarts, labels, providerAdd, providersPath, readCreds, readProviders, reconLine, seedCreds, seedProviders, sleep, toNameStep, until, waitSent, waitSentText, warmUp, withModels, wizardCreate, type BotEnv, type SeedModel } from './_acc'
 import { type FakeModels, type Handler, json, openaiOk, sleep as fsleep } from './fake-models'
 
 setDefaultTimeout(60_000)
@@ -187,6 +187,34 @@ describe('本机接口 POST /v1/provider/refresh 的 full', () => {
       const ok = await gw.call(REFRESH, { name: 'myproxy', full: false })
       expect([ok.status, ok.json?.applied]).toEqual([200, 'kept'])
       expect(listing(b)).toBe(before)
+    })
+  })
+})
+
+describe('补充（验收后补的盲区）：引导新建时同名选「更新它」', () => {
+  test('新地址与旧地址是同一台主机、同一格式，清单不为空：清单的成员、先后、上下文、手填名单都不变，密钥照常更新，回「已更新供应商「myproxy」。」接对账句', async () => {
+    await withModels({ handler: openaiOk(FETCHED), before: seed({ key: OLD_KEY }) }, async ({ tg, b, fm, key }) => {
+      const before = listing(b)
+      await toNameStep(tg)
+      tg.pushText(OWNER, 'myproxy')
+      const c = await until(() => tg.lastMenu(OWNER)?.buttons.some(x => x.text === '更新它') ? tg.lastMenu(OWNER) : null, '同名确认（带「更新它」按钮）')
+      tg.clickButton(OWNER, OWNER, c.messageId, '更新它')
+      const f = await until(() => tg.lastMenu(OWNER)?.text.includes('（第 2/4 步）') ? tg.lastMenu(OWNER) : null, '第 2 步')
+      tg.clickButton(OWNER, OWNER, f.messageId, 'OpenAI 格式')
+      await until(() => tg.textOf(OWNER, f.messageId)?.includes('（第 3/4 步）'), '第 3 步')
+      tg.pushText(OWNER, `${fm.url}/v1`)
+      await until(() => tg.lastMenu(OWNER)?.text.includes('（第 4/4 步）'), '第 4 步')
+      const k = tg.sentTo(OWNER).length
+      tg.pushText(OWNER, key)
+      const s = await waitSent(tg, OWNER, x => RESULT_RE.test(x.text ?? ''), '同名更新的结果消息', k, 20_000)
+      expect(s.text!).toContain(`【系统】已更新供应商「myproxy」。${reconLine(3, 2, 2)}`)
+      expect(s.text!).not.toContain('拉到 3 个模型')
+      expect(s.text!).not.toContain(DISJOINT_NOTE)
+      expect(ids(b)).toEqual(['m1', 'm2', 'man1'])
+      expect(entry(b).meta.manualModels).toEqual(['man1'])
+      expect(listing(b)).toBe(before)
+      expect(readCreds(b.root)).toContain(key)
+      expect(readCreds(b.root)).not.toContain(OLD_KEY)
     })
   })
 })
