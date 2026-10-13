@@ -369,6 +369,62 @@ test('testConn：列表为空 no_models（不发请求）；失败记 provider.t
   expect(readFileSync(providersPathOf(root), 'utf8'), 'testConn 只读：providers.json 逐字节不变').toBe(after)
 })
 
+test('testConn 失败：OpenAI 格式且保存的地址只有域名时 bareHost 为真；地址带路径或 Anthropic 格式为假', async () => {
+  const CASES: [string, string, boolean][] = [
+    ['openai-completions', 'https://p.example.com', true], ['openai-responses', 'https://p.example.com', true],
+    ['openai-completions', 'https://p.example.com/v1', false], ['anthropic-messages', 'https://p.example.com', false],
+  ]
+  for (const [api, baseURL, bareHost] of CASES) {
+    const root = tmp()
+    writeFileSync(providersPathOf(root), JSON.stringify({ version: 1, providers: { p1: {
+      route: { api, baseURL, apiKeyEnv: 'PROVIDER_P1_KEY', models: [{ id: 'm1', contextWindow: 131072 }] },
+      meta: { createdAt: 1, updatedAt: 1, epoch: 1, keyRev: 1, guessedContext: [], ownerContext: [], manualModels: [], lastRefresh: null },
+    } }, pendingKeyRemovals: [] }))
+    setCredentialRef(credPathOf(root), 'PROVIDER_P1_KEY', 'test-key-7abcdefghij')
+    const { s } = svc(root, () => okModels([], baseURL), { probe: async () => ({ ok: false, reason: 'bad_response', status: 200 }) })
+    expect(await s.testConn('p1'), `${api} ${baseURL}`).toMatchObject({ status: 'failed', reason: 'bad_response', bareHost })
+  }
+})
+
+// ─── INTERFACE-dsh修补 第二节：刷新时这次是在 /v1 下才拉到的，把保存的地址一并补上 ───
+
+/** 预置一家地址只有域名的自建 [a]，凭据齐 */
+function seedBareHost(root: string) {
+  writeFileSync(providersPathOf(root), JSON.stringify({ version: 1, providers: { myproxy: {
+    route: { api: 'openai-completions', baseURL: 'https://p.example.com', apiKeyEnv: 'PROVIDER_MYPROXY_KEY', models: [{ id: 'a', contextWindow: 5000 }], timeoutMs: 9000 },
+    meta: { createdAt: 1, updatedAt: 1, epoch: 1, keyRev: 1, guessedContext: [], ownerContext: [], manualModels: [], lastRefresh: null },
+  } }, pendingKeyRemovals: [] }))
+  setCredentialRef(credPathOf(root), 'PROVIDER_MYPROXY_KEY', 'test-key-7abcdefghij')
+}
+const viaV1 = (ids: string[]): FetchModelsResult => ({ ok: true, models: ids.map(id => ({ id, contextWindow: null })), truncated: false, baseURL: 'https://p.example.com/v1', v1Added: true })
+
+test('刷新时在 /v1 下才拉到：保存的地址补成 <地址>/v1，结果里 v1Added 为真并带补后的地址；文件里不认识的字段不丢', async () => {
+  const root = tmp()
+  seedBareHost(root)
+  const { s, calls } = svc(root, () => viaV1(['a', 'b']))
+  const r = await s.refresh('myproxy', ['a', 'b'])
+  expect(r).toMatchObject({ status: 'ok', v1Added: true, baseURL: 'https://p.example.com/v1' })
+  expect(calls[0]!.baseURL, '拉取用的是保存的原地址').toBe('https://p.example.com')
+  expect(read(root).valid.myproxy!.route.baseURL).toBe('https://p.example.com/v1')
+  expect(JSON.parse(readFileSync(providersPathOf(root), 'utf8')).providers.myproxy.route.timeoutMs).toBe(9000)
+  // 地址已经带 /v1：下一次不再补，也不再说
+  const again = svc(root, req => okModels([{ id: 'a', contextWindow: null }], req.baseURL))
+  expect(await again.s.refresh('myproxy', ['a'])).toMatchObject({ status: 'ok', v1Added: false, baseURL: 'https://p.example.com/v1' })
+  expect(again.calls[0]!.baseURL).toBe('https://p.example.com/v1')
+})
+
+test('不补地址的三种：预览只读；带勾选时对方在 /v1 下回的是空目录；刷新失败', async () => {
+  const root = tmp()
+  seedBareHost(root)
+  const before = readFileSync(providersPathOf(root), 'utf8')
+  expect((await svc(root, () => viaV1(['a', 'b'])).s.preview('myproxy')).status).toBe('ok')
+  expect(readFileSync(providersPathOf(root), 'utf8'), '预览不写文件').toBe(before)
+  expect(await svc(root, () => ({ ok: false, reason: 'empty', status: null })).s.refresh('myproxy', ['a'])).toMatchObject({ status: 'ok', v1Added: false, baseURL: 'https://p.example.com' })
+  expect(read(root).valid.myproxy!.route.baseURL).toBe('https://p.example.com')
+  expect((await svc(root, () => ({ ok: false, reason: 'bad_response', status: null })).s.refresh('myproxy')).status).toBe('failed')
+  expect(read(root).valid.myproxy!.route.baseURL).toBe('https://p.example.com')
+})
+
 test('模型管理：加手动模型（记入 manualModels）、改上下文（记入 ownerContext）、删模型；不存在返回 not_found', async () => {
   const root = tmp()
   const { s } = svc(root, () => okModels([{ id: 'm1', contextWindow: 8000 }], 'https://p.example.com/v1'))
