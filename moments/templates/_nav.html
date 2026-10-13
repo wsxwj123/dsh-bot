@@ -57,8 +57,10 @@ th{color:var(--ink-faint);font-weight:500;font-size:12.5px;}
 {# 导航按系统分三组（方案 3.1）。两处刻意的取舍：
    - cliproxy 的「模型来源」（/hub/provider）撤出导航，只在门户留一张卡（决定三）；
      它那颗 chip 撤掉后 /hub/provider 页不再亮任何一项，这是已知的小瑕疵。
-   - 「旧系统供应商」指向 /provider（旧仓的 provider 管理页），那页自带顶栏、
-     不共用这条导航，所以这颗 chip 永远不会亮 —— 加它是为了把入口放回手边。 #}
+   - 「旧系统供应商」指向站内的 /provider，由它把人带到旧系统那边自己的供应商页
+     （本仓那份页面已下线，这里只是入口；跳到哪个地址由那一处按打开方式与配置定，
+     模板里不写外部地址）。那是另一套系统的页面、没有回管理台的导航，所以在新标签页
+     打开，并且不把管理台的窗口与地址带给它。它不是本站的页面，这颗 chip 永远不会亮。 #}
 <nav class="hubnav">
   <div class="hubnav-inner">
     <span class="navgroup">新系统</span>
@@ -69,7 +71,7 @@ th{color:var(--ink-faint);font-weight:500;font-size:12.5px;}
     <a class="chip{% if nav_active == 'setup' %} on{% endif %}" id="nav-setup" href="/hub/setup">密钥</a>
     <a class="chip{% if nav_active == 'params' %} on{% endif %}" href="/hub/params">系统参数</a>
     <span class="navgroup">旧系统</span>
-    <a class="chip" href="/provider">旧系统供应商</a>
+    <a class="chip" href="/provider" target="_blank" rel="noopener noreferrer">旧系统供应商</a>
     <span class="navgroup">其他</span>
     <a class="chip" href="/">朋友圈</a>
     <a class="chip" href="/styles">画风</a>
