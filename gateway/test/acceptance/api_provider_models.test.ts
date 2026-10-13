@@ -67,7 +67,7 @@ describe('POST /v1/provider/model 的 remove', () => {
       const r = await gw.call(MODEL, { name: 'myproxy', action: 'remove', id: 'm1' })
       expect(r.status, `应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
       expect(String(r.json.text), `text 应说已删掉，实得 ${JSON.stringify(r.json.text)}`).toContain('已从「myproxy」删掉模型 m1。')
-      expect(String(r.json.text), `拉到的模型应提醒会重新出现，实得 ${JSON.stringify(r.json.text)}`).toContain('重新出现')
+      expect(String(r.json.text), `拉到的模型应提醒会重新出现，实得 ${JSON.stringify(r.json.text)}`).toContain('以后在管理台刷新模型列表时，对方列表里还有的话它会重新出现在候选里，勾上才会回到清单。')
       expect(entry(b).route.models.map((m: any) => m.id), '落盘应只剩 m2').toEqual(['m2'])
     })
   })
