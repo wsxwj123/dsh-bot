@@ -52,9 +52,12 @@ if importlib.util.find_spec("moments.hub_routes") is not None:
 # 挑一个，换不出第三个地址（防任意跳转）。
 LEGACY_PROVIDER_LOCAL = "HUB_LEGACY_PROVIDER_URL_LOCAL"
 LEGACY_PROVIDER_PUBLIC = "HUB_LEGACY_PROVIDER_URL_PUBLIC"
+# 公网入口没有通用的默认值：各人的隧道域名不同，要在 hub.env 里用
+# HUB_LEGACY_PROVIDER_URL_PUBLIC 自己配。这里放一个解析不到的占位地址（.invalid 是保留的
+# 顶级域），没配的人经隧道点进来会看到浏览器的「找不到站点」，而不是被带去别人的地址。
 LEGACY_PROVIDER_DEFAULTS = {
     LEGACY_PROVIDER_LOCAL: "http://127.0.0.1:8767/provider",
-    LEGACY_PROVIDER_PUBLIC: "https://8767.wsxwj123.top/provider",
+    LEGACY_PROVIDER_PUBLIC: "https://legacy-provider.invalid/provider",
 }
 LEGACY_PROVIDER_URL_MAX = 2048
 # 隧道与反向代理把请求转到本机时会带上的头。那时 Host 可能已经被改写成回环地址，
