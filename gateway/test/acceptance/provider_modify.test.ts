@@ -1,6 +1,6 @@
 // 验收：/provider 引导的「修改」（INTERFACE 3.4.3、3.1.1 的 epoch/keyRev/键名规则、3.2-4 只改密钥不重启 dsh）
 import { describe, expect, test } from 'bun:test'
-import { OWNER, defaultKeyEnv, dshStarts, findSecret, warmUp, labels, openProviderMenu, readCreds, readProviders, seedCreds, seedProviders, sleep, until, waitSentText, waitText, withModels, type BotEnv } from './_acc'
+import { OWNER, defaultKeyEnv, dshStarts, findSecret, warmUp, labels, openProviderMenu, readCreds, readProviders, reconLine, seedCreds, seedProviders, sleep, until, waitSentText, waitText, withModels, type BotEnv } from './_acc'
 import { FakeModels, anthropicOk, openaiOk, sleep as fsleep } from './fake-models'
 
 const IDS = ['m1', 'm2']
@@ -62,10 +62,10 @@ async function changeKey(tg: any, mid: number, key: string) {
 }
 
 describe('修改：密钥', () => {
-  test('改密钥：删除那条消息，用新密钥拉列表，回「已更新「myproxy」的密钥，拉到 2 个模型。」附删除说明，按钮「切过去」「关闭」', async () => {
+  test('改密钥：删除那条消息，用新密钥拉列表，回「已更新「myproxy」的密钥。」接对账句（清单不为空，不改清单），附删除说明，按钮「切过去」「关闭」', async () => {
     await withModels({ handler: openaiOk(IDS), before: SEEDED() }, async ({ tg, fm, key }) => {
       const { r, msg } = await changeKey(tg, await toWhat(tg), key)
-      expect(r.text!).toContain('【系统】已更新「myproxy」的密钥，拉到 2 个模型。')
+      expect(r.text!).toContain(`【系统】已更新「myproxy」的密钥。${reconLine(2, 0, 0)}`)
       expect(r.text!).toContain('（你发的密钥消息已删除。）')
       expect(tg.isDeleted(OWNER, msg)).toBe(true)
       expect(fm.requests.length).toBeGreaterThan(0)
@@ -118,7 +118,8 @@ describe('修改：地址', () => {
       await waitText(tg, OWNER, mid, t => t.includes('请输入接口地址'), '地址步')
       const k = tg.sentTo(OWNER).length
       tg.pushText(OWNER, `${fm.url}/api/v1`)
-      const r = await waitSentText(tg, OWNER, '【系统】已更新「myproxy」的地址，拉到 2 个模型。', k, 20_000)
+      const r = await waitSentText(tg, OWNER, `【系统】已更新「myproxy」的地址。${reconLine(2, 0, 0)}`, k, 20_000)
+      expect(readProviders(b.root).providers.myproxy.route.models.map((m: any) => m.id)).toEqual(IDS)
       expect(r.text!).not.toContain(ROLL_NOTE)
       const all = tg.sentTo(OWNER).slice(k).map(s => s.text ?? '').join('\n')
       expect(all).not.toContain('需要重新输入密钥')
