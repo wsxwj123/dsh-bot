@@ -3,8 +3,14 @@
 // "空完成" = 上游正常停止、没有任何内容块。两种形状：empty 完全不带 content 字段；empty-string 的 content 是空字符串。
 // reply-then-empty（只支持 OpenAI 对话格式）：还没有工具结果时先调一次 mcp__tg__reply，工具结果回来之后回空完成。
 // 只记收到的路径与请求体，不记请求头。
-export type UpstreamMode = 'empty' | 'empty-string' | 'reply-then-empty'
+// http-500 / http-429（三种格式都一样）：每个"让模型生成"的请求都直接回这个状态码和一段 OpenAI 样子的报错，不带 Retry-After。
+export type UpstreamMode = 'empty' | 'empty-string' | 'reply-then-empty' | 'http-500' | 'http-429'
 export type UpstreamReq = { n: number; path: string; body: any }
+
+const HTTP_ERRORS: Partial<Record<UpstreamMode, { status: number; error: Record<string, string> }>> = {
+  'http-500': { status: 500, error: { message: 'fake upstream: internal server error', type: 'server_error', code: 'internal_error' } },
+  'http-429': { status: 429, error: { message: 'fake upstream: rate limit reached, slow down', type: 'rate_limit_error', code: 'rate_limit_exceeded' } },
+}
 
 const sse = (events: { event?: string; data: unknown }[]) => new Response(
   events.map(e => `${e.event ? `event: ${e.event}\n` : ''}data: ${typeof e.data === 'string' ? e.data : JSON.stringify(e.data)}\n\n`).join(''),
@@ -59,6 +65,8 @@ export function startFakeUpstream(mode: UpstreamMode, replyText = '真dsh发出�
       let body: any = null
       try { body = await req.json() } catch {}
       requests.push({ n: requests.length + 1, path, body })
+      const httpError = HTTP_ERRORS[mode]
+      if (httpError && /\/(chat\/completions|responses|messages)$/.test(path)) return Response.json({ error: httpError.error }, { status: httpError.status })
       if (path.endsWith('/chat/completions')) return completions(body, mode, replyText)
       if (path.endsWith('/responses')) return responses(body)
       if (path.endsWith('/messages')) return messages(body)
