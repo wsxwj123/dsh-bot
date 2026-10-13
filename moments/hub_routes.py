@@ -1814,6 +1814,23 @@ def _dm_only_or_400(body):
     return None, only
 
 
+_DM_REV_MAX = 100
+
+
+def _dm_rev_or_400(body):
+    """`(错误响应, rev)`：清单指纹 rev 的校验，同样在转发之前（形状不对零转发）。
+
+    请求体里没有这个键才算没带（不转发，网关不核对）；键在而值不是 1 到 100 个字符的
+    字符串（含 null）一律 400 —— 没带就不核对清单，写错的值不能悄悄走到那条路。
+    """
+    if "rev" not in body:
+        return None, None
+    rev = body["rev"]
+    if not (isinstance(rev, str) and 0 < len(rev) <= _DM_REV_MAX):
+        return _dm_bad(400, "bad_rev", "rev 不合法"), None
+    return None, rev
+
+
 @hub_bp.post("/hub/api/dsh-model/provider/<name>/refresh")
 @_api
 def dsh_model_provider_refresh(name):
@@ -1823,7 +1840,9 @@ def dsh_model_provider_refresh(name):
     否则原样返回网关的状态码 + 正文（第 4 稿起 200 体带 count/added/removed/kept_manual/
     selected/text，一律透传，不在这里重新拼）。
 
-    `only` 的校验在管理台这侧、转发之前：形状不对 **零转发**（stub 网关记录不到任何请求）。
+    `only` 与 `rev` 的校验在管理台这侧、转发之前：形状不对 **零转发**（stub 网关记录不到任何请求）。
+    转发的只有 name、only、rev 三样。请求体里的 `full`（把清单整份重铺）不认也不转发：
+    不带 `only` 打这个端点，清单不为空时网关只对账、不改清单。
     """
     body = _require_json_object(request.get_json(silent=True))
     bad = _dm_provider_or_400(name)
@@ -1832,7 +1851,10 @@ def dsh_model_provider_refresh(name):
     bad, only = _dm_only_or_400(body)
     if bad:
         return bad
-    return _dm_forward(lambda ch: gateway_client.provider_refresh(ch, name, only=only))
+    bad, rev = _dm_rev_or_400(body)
+    if bad:
+        return bad
+    return _dm_forward(lambda ch: gateway_client.provider_refresh(ch, name, only=only, rev=rev))
 
 
 class _DmNameConverter(BaseConverter):
