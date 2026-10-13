@@ -149,7 +149,7 @@ describe('按钮回调的判定', () => {
       tg.clickButton(OWNER, OWNER, m.messageId, '刷新模型')
       await waitText(tg, OWNER, m.messageId, t => t.includes('刷新哪个自建供应商'), '刷新哪个')
       const cb = tg.clickButton(OWNER, OWNER, m.messageId, 'myproxy')
-      await waitText(tg, OWNER, m.messageId, t => t.includes('拉到 1 个模型'), '刷新结果', 20_000)
+      await waitText(tg, OWNER, m.messageId, t => t.includes('对方现在有 1 个模型'), '刷新结果', 20_000)   // 清单不为空：回的是对账句（INTERFACE-dsh修补 5.2）
       const answers = tg.calls.filter(c => c.method === 'answerCallbackQuery' && String(c.params.callback_query_id) === cb)
       expect(answers.length).toBe(1)
       expect(answers[0]!.at).toBeLessThanOrEqual(fm.requests[0]!.at)
