@@ -28,8 +28,22 @@ export type ServiceDeps = {
   onChanged?: () => void
 }
 
+/**
+ * 拉到的模型并进清单的三种做法，是封闭的（INTERFACE-dsh修补 第五节）：
+ * selection = 按勾选；kept = 清单不动、只对账；full = 重铺成对方返回的全部加手填的。
+ */
+export type ListApplied = 'selection' | 'kept' | 'full'
+
+/**
+ * 对账数字，按保存那一刻文件里的清单算：notInList = 对方这次返回而不在清单里的个数，notReturned = 清单里对方
+ * 这次没返回的个数（手填的也算），disjoint = 对方返回了模型、而清单里的一个都没返回。只在 applied 为 kept 时给主人看。
+ */
+export type ListRecon = { notInList: number; notReturned: number; disjoint: boolean }
+
 export type SaveResult =
-  | { status: 'saved'; kind: 'created' | 'updated' | 'collided'; name: string; api: ProviderApi; baseURL: string; count: number; reason: FetchFailReason | null; status2: number | null; seconds?: number; v1Added: boolean; truncated: boolean; guessed: boolean; epochChanged: boolean }
+  /** count：applied 为 kept 时是对方这次返回的个数，否则是落盘后清单的个数。保存不按勾选，applied 只有两种 */
+  | ({ status: 'saved'; kind: 'created' | 'updated' | 'collided'; name: string; api: ProviderApi; baseURL: string; count: number; reason: FetchFailReason | null; status2: number | null; seconds?: number; v1Added: boolean; truncated: boolean; guessed: boolean; epochChanged: boolean
+      applied: Exclude<ListApplied, 'selection'> } & ListRecon)
   | { status: 'save_failed'; why: string }
   | { status: 'cred_failed'; name: string; why: string }
   | { status: 'lock_timeout' }
@@ -41,13 +55,13 @@ export type SaveResult =
 export type RefreshFailure = { status: 'failed'; name: string; reason: FetchFailReason; status2: number | null; seconds?: number }
 
 export type RefreshResult =
-  | { status: 'ok'; name: string; count: number; added: number; removed: string[]; keptManual: number
+  | ({ status: 'ok'; name: string; count: number; added: number; removed: string[]; keptManual: number
       /** 落盘后列表长度（INTERFACE §11b：缺省 only 时也给） */
       selected: number
-      /** 这次落盘走的哪种做法：selection = 带 only 按勾选（文案尾部追加「（按勾选保留 S 个）」、响应 removed 给数组），full = 重铺成对方返回的全部加手填的 */
-      applied: 'selection' | 'full'
+      /** 这次落盘走的哪种做法（selection 时文案尾部追加「（按勾选保留 S 个）」、响应 removed 给数组；kept 时文案是对账句） */
+      applied: ListApplied
       /** 这次是在 /v1 下才拉到的：落盘时把保存的地址一并补成了 baseURL（文案尾部追加「（地址补成了 …）」） */
-      v1Added: boolean; baseURL: string }
+      v1Added: boolean; baseURL: string } & ListRecon)
   | RefreshFailure
   | { status: 'not_found' }
   | { status: 'disabled' }
@@ -101,6 +115,9 @@ function isFetchFailure(res: FetchModelsResult, emptyIsOk: boolean): res is Extr
   return !res.ok && !(emptyIsOk && res.reason === 'empty')
 }
 
+/** 文件里的原样内容当对象用：不是对象（没写、写坏了）就当空对象 */
+const asObject = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? v : {}) as Record<string, unknown>
+
 /**
  * 清单指纹（INTERFACE-dsh修补 3.3）：预览给出，确定时带回，保存那一刻对不上就不保存。
  * 只看模型名序列和手填名单。上下文长度、时间戳、刷新记录不算进去，所以聊天里的一次对账不会让已经打开的弹窗作废。
@@ -122,10 +139,9 @@ export class ProviderService {
    * 只覆盖本次真正要改的 route 已知字段与 meta（方案 3.1.1「其它字段留在文件里」、store.ts 头注释）。
    * 不这么做会把主人手写字段静默丢掉。
    */
-  private withKnownEntry(prev: unknown, known: { route: ProviderRoute; meta: ProviderMeta }): Record<string, unknown> {
-    const p = (prev && typeof prev === 'object' && !Array.isArray(prev) ? prev : {}) as Record<string, unknown>
-    const pr = (p.route && typeof p.route === 'object' && !Array.isArray(p.route) ? p.route : {}) as Record<string, unknown>
-    return { ...p, route: { ...pr, ...known.route }, meta: known.meta }
+  private withKnownEntry(prev: unknown, known: { route: Omit<ProviderRoute, 'models'> & { models?: ProviderModel[] }; meta: ProviderMeta }): Record<string, unknown> {
+    const p = asObject(prev)
+    return { ...p, route: { ...asObject(p.route), ...known.route }, meta: known.meta }
   }
 
   private read(): ProvidersSnapshot { return readProviders(this.providersPath()) }
@@ -222,11 +238,14 @@ export class ProviderService {
       keyEnv = apiKeyEnvFor(entryName, taken)
     }
 
-    const built = this.buildModels(o.models, entry, o.failReason)
+    // 换了一家（或新建）才把清单按对方返回的重铺；落到同一家上时由合并函数决定，清单不为空就不动
+    const built = this.mergeList(entry, o.models, { full: epochChanged, failReason: o.failReason })
+    const kept = built.applied === 'kept'
     const meta: ProviderEntry['meta'] = entry
       ? { ...entry.meta, updatedAt: t, epoch: epochChanged ? t : entry.meta.epoch, keyRev: (entry.meta.keyRev ?? 0) + 1, guessedContext: built.guessed }
       : { createdAt: t, updatedAt: t, epoch: t, keyRev: 1, guessedContext: built.guessed, ownerContext: [], manualModels: [], lastRefresh: null }
-    const route = { api: o.api, baseURL: o.baseURL, apiKeyEnv: keyEnv, models: built.models }
+    // 清单不动时不写 models 这个键：文件里原来的模型条目原样留着，地址和键名照常更新
+    const route = { api: o.api, baseURL: o.baseURL, apiKeyEnv: keyEnv, ...(kept ? {} : { models: built.models }) }
     const pending: PendingKeyRemoval[] = [...snap.pendingKeyRemovals]
     if (entry && epochChanged && isProviderKeyEnv(entry.route.apiKeyEnv)) pending.push({ key: entry.route.apiKeyEnv, after: t + this.d.keyGraceMs })
     writeProviders(this.providersPath(), { ...snap.raw, providers: { ...providers, [entryName]: this.withKnownEntry(providers[entryName], { route, meta }) }, pendingKeyRemovals: pending })
@@ -245,9 +264,36 @@ export class ProviderService {
       return { status: 'cred_failed', name: entryName, why: `写文件失败（${(e as Error)?.name ?? 'Error'}）` }
     }
     return {
-      status: 'saved', kind, name: entryName, api: o.api, baseURL: route.baseURL, count: built.models.length,
+      status: 'saved', kind, name: entryName, api: o.api, baseURL: o.baseURL, count: kept ? built.fetched : built.models.length,
       reason: o.failReason, status2: o.failStatus, ...(o.failSeconds !== undefined ? { seconds: o.failSeconds } : {}), v1Added: o.v1Added, truncated: o.truncated, guessed: built.guessed.length > 0, epochChanged,
+      applied: kept ? 'kept' : 'full', notInList: built.notInList, notReturned: built.notReturned, disjoint: built.disjoint,
     }
+  }
+
+  /**
+   * 拉到的模型怎么并进清单——刷新与保存共用的唯一一处（INTERFACE-dsh修补 第五节）。三种做法是封闭的：
+   * - selection：给了 only，按勾选（buildSelected）；
+   * - kept：没给 only、没要求全量、清单不为空、这次拉成功了——清单、手填名单、猜的上下文名单一个字不动，只算对账数字；
+   * - full：其余——重铺成对方返回的全部加手填的（buildModels；拉失败时保持原清单也是它的规则）。
+   * 「清单不为空就不动」只在这里判断：调用方只说明要不要全量（刷新是显式带 full，保存是换了一家），不各自去看清单空不空。
+   * entry 要取锁里重读的那一份，这样拉取期间清单被别处清空或填上，都按保存那一刻算。
+   */
+  private mergeList(entry: ProviderEntry | undefined, fetched: FetchedModel[], how: { only?: string[]; full?: boolean; failReason?: FetchFailReason | null }):
+    { applied: ListApplied; models: ProviderModel[]; guessed: string[]; manual: string[]; fetched: number } & ListRecon {
+    const list = entry?.route.models ?? []
+    const fetchedIds = new Set(fetched.map(f => f.id))
+    const listIds = new Set(list.map(m => m.id))
+    const notReturned = list.filter(m => !fetchedIds.has(m.id)).length
+    const recon = {
+      fetched: fetchedIds.size, notInList: [...fetchedIds].filter(id => !listIds.has(id)).length, notReturned,
+      disjoint: fetchedIds.size > 0 && list.length > 0 && notReturned === list.length,
+    }
+    const failReason = how.failReason ?? null
+    if (entry && how.only !== undefined) return { applied: 'selection', ...this.buildSelected(fetched, entry, how.only), ...recon }
+    if (entry && !how.full && list.length > 0 && failReason === null) {
+      return { applied: 'kept', models: list, guessed: entry.meta.guessedContext, manual: entry.meta.manualModels, ...recon }
+    }
+    return { applied: 'full', ...this.buildModels(fetched, entry, failReason), manual: entry?.meta.manualModels ?? [], ...recon }
   }
 
   /** 由拉列表结果 + 已有条目的手工/主人上下文，算出要落盘的模型列表 */
@@ -375,11 +421,12 @@ export class ProviderService {
 
   /**
    * 刷新模型列表：锁外拉（key 从凭据现读，读不到 = key_missing）→ 锁内比对 baseURL/api/keyRev 后写。
-   * only 给出时按勾选落盘（buildSelected）；only 缺省时重铺成对方返回的全部加手填的。
+   * 落盘走哪种做法由 mergeList 定：only 给出时按勾选；否则清单不为空就不动、只对账；要把清单重铺成
+   * 对方返回的全部加手填的，必须显式带 full（清单为空时不带也是全部收下）。
    * rev 给出时（预览拿到的清单指纹）在锁里和保存那一刻的清单比，对不上就不保存（list_changed）。
-   * 上游回空目录：带 only 时按「拉到 0 个」照勾选落盘、记成成功；only 缺省时仍是失败（reason 为 empty）。
+   * 上游回空目录：带 only 时按「拉到 0 个」照勾选落盘、记成成功；only 缺省时仍是失败（reason 为 empty，带不带 full 都一样）。
    */
-  async refresh(name: string, o: { only?: string[]; rev?: string } = {}): Promise<RefreshResult> {
+  async refresh(name: string, o: { only?: string[]; rev?: string; full?: boolean } = {}): Promise<RefreshResult> {
     const { only } = o
     const key = normName(name)
     let snap: ProvidersSnapshot
@@ -429,25 +476,30 @@ export class ProviderService {
         }
         // 预览之后清单被别处改过：这次的勾选是照旧清单挑的，不保存
         if (o.rev !== undefined && o.rev !== listRev(e.entry)) return { status: 'list_changed', name: found.name } as RefreshResult
-        // only 缺省：与扩展前同一套（拉到的 + 手动加的，manual 不动）；带 only：按勾选集合算（§11b）
-        const built: { models: ProviderModel[]; guessed: string[]; manual: string[] } = only === undefined
-          ? { ...this.buildModels(fetched, e.entry, null), manual: e.entry.meta.manualModels }
-          : this.buildSelected(fetched, e.entry, only)
+        const built = this.mergeList(e.entry, fetched, { only, full: o.full })
         const beforeIds = new Set(e.entry.route.models.map(m => m.id))
         const afterIds = new Set(built.models.map(m => m.id))
         // <N> 和 lastRefresh.count 都指"拉到的个数"（手动加的另算保留），新增/去掉按落盘集合与旧列表比
         const fetchedCount = fetched.length
         const added = built.models.filter(m => !beforeIds.has(m.id)).length
         const removed = e.entry.route.models.filter(m => !afterIds.has(m.id)).map(m => m.id)
-        const meta = { ...e.entry.meta, updatedAt: this.now(), guessedContext: built.guessed, manualModels: built.manual, lastRefresh: { at: this.now(), ok: true, count: fetchedCount, reason: null } }
-        const route = { ...e.entry.route, baseURL: storedURL, models: built.models }
+        const stamp = { updatedAt: this.now(), lastRefresh: { at: this.now(), ok: true, count: fetchedCount, reason: null } }
         const rawList = cur.raw.providers as Record<string, unknown>
-        const raw = { ...cur.raw, providers: { ...rawList, [e.name]: this.withKnownEntry(rawList[e.name], { route, meta }) } }
-        writeProviders(this.providersPath(), raw)
+        const rawEntry = asObject(rawList[e.name])
+        // 只对账：在文件里的原条目上只换刷新记录和更新时间（补地址时另换地址），别的一个字不动——不拿整理后的条目去重写，
+        // 免得改掉键的先后、手写的字段、读取时被丢掉的模型条目。其余两种做法照常重写清单与两份名单
+        const written = built.applied === 'kept'
+          ? { ...rawEntry, route: v1Added ? { ...asObject(rawEntry.route), baseURL: storedURL } : rawEntry.route ?? e.entry.route, meta: { ...asObject(rawEntry.meta), ...stamp } }
+          : this.withKnownEntry(rawEntry, {
+              route: { ...e.entry.route, baseURL: storedURL, models: built.models },
+              meta: { ...e.entry.meta, ...stamp, guessedContext: built.guessed, manualModels: built.manual },
+            })
+        writeProviders(this.providersPath(), { ...cur.raw, providers: { ...rawList, [e.name]: written } })
         this.d.onChanged?.()
         return {
           status: 'ok', name: e.name, count: fetchedCount, added, removed,
-          keptManual: built.manual.length, selected: built.models.length, applied: only !== undefined ? 'selection' : 'full',
+          keptManual: built.manual.length, selected: built.models.length, applied: built.applied,
+          notInList: built.notInList, notReturned: built.notReturned, disjoint: built.disjoint,
           v1Added, baseURL: storedURL,
         } as RefreshResult
       })
