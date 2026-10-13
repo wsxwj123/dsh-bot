@@ -29,8 +29,8 @@ OAUTH_CALLBACK_PORTS = {"codex": 1455, "antigravity": 51121}
 OAUTH_PROVIDER_LABELS = {"codex": "ChatGPT", "antigravity": "Google（Antigravity）"}
 OAUTH_WAIT_SECONDS = 300        # §4.4 服务端授权等待窗口，页面按它显示倒计时
 
-# DeepSeek 官方（Anthropic 兼容）的预置值 —— **/hub/provider 的快捷卡与 /hub/setup 的
-# 「同一把 key 也当对话模型」联动共用这一份**，两处各写各的就会漂移成两套端点。
+# DeepSeek 官方（Anthropic 兼容）的预置值 —— /hub/provider 的快捷卡用这一份
+# （原来的密钥页也用过它，那一页已下线）。
 # 它只是一份模板常量：cliproxy 配置里**不预埋半残 entry**（一期契约禁止无 key 残留），
 # 用户填了 key 才走 §3.3 创建 + §3.6 激活这两个既有端点。
 #
@@ -1343,129 +1343,20 @@ def bots_create():
 
 
 # ======================================================================
-# 第 7 段 · 三把密钥的网页初始化向导（/hub/setup）
+# 第 7 段 · 已下线：三把密钥的网页初始化向导
 #
-# 为什么有这一段：装完之后必填的三把密钥（Telegram bot token / 你的数字 user_id /
-# DeepSeek key）原本只能在终端里 `bash scripts/setup_keys.sh` 填。不想开终端的人
-# 就卡在这一步，bot 装好了也不会动。这段把同一件事搬到管理台网页上。
-#
-# 写盘逻辑**一行都不在这里**：全部复用 `scripts/setup_keys.py`（YAML 行级替换 /
-# dotenv 行替换 / JSON allowFrom 各按格式写，还保留原文件的注释）。格式校验用它的
-# FIELD_RE —— 那是从 `scripts/setup_keys.sh` 的 ask 正则逐字搬过去的，终端向导和
-# 网页向导一个口径。
-#
-# 🔴 本段红线（同 hub_addbot.py 顶部第 1 条）：**响应体、日志、异常文案里一个字节的
-#    密钥值都不许出现**。校验失败只回错误码 + FIELD_FMT 里的形状说明；意外异常只回
-#    `type(e).__name__`。页面也只显示"填了没"，从不回读已填的值。
-#
-# 鉴权不在这里写：`/hub/setup` 与 `/hub/api/setup/*` 都在 `/hub` 前缀下，
-# hub_auth.py 的 before_request 门自动管到（见 hub_auth._is_hub_path）。
-#
-# 段内辅助一律 `_sk` 前缀（段界规矩见第 6 段抬头）。
+# 这一段原来是「密钥待填」页和它的两条接口。它检查的是旧示例 bot 的三个位置，新系统的
+# bot 用不到，导航上的提示对新系统用户永远消不掉，又与添加 bot 的表单重复，所以整段下线：
+# 三条路径现在都没有路由，页面走框架默认的 404，接口走统一的 not_found。
+# 终端里的 `bash scripts/setup_keys.sh` 与 `scripts/setup_keys.py` 不受影响。
 # ======================================================================
 
-# scripts/ 是隐式命名空间包，仓库根在 sys.path 上才 import 得到。moments 本身就在
-# 仓库根下，正常启动一定满足；这里仍显式兜一手 —— 这个 import 在 `import moments.web`
-# 顶层执行，抛 ImportError 会把 bot 进程一起打死（同 hub_addbot 的 record_once 教训）。
+# 把仓库根放进搜索路径。这几行原来是给本段那条 `from scripts import …` 兜底的，路由下线后
+# 先留着：后面第 9 段还在模块顶层 `import config_loader`、`import gateway_client`，它们同样
+# 在仓库根下、同样在 `import moments.web` 时执行，某些启动方式下找不到会把整个进程打死。
 _SK_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # noqa: E402
 if _SK_REPO_ROOT not in sys.path:                                             # noqa: E402
     sys.path.insert(0, _SK_REPO_ROOT)
-
-from scripts import setup_keys                       # noqa: E402  本段自己的依赖
-
-
-def _sk_paths():
-    """三把密钥的落点。单独包一层是为了单测能把它指到 tmp 沙箱——否则用例会去
-    改机主真实的 configs/_global.yml 和 ~/.claude/channels/。"""
-    return setup_keys.key_paths(setup_keys.DEFAULT_BOT)
-
-
-@hub_bp.get("/hub/setup")
-def hub_setup_page():
-    # §2 铁律：恒 200 HTML，"填了没"由前端调 /hub/api/setup/status 取 —— 这里不碰磁盘。
-    return render_template("hub_setup.html", nav_active="setup")
-
-
-@hub_bp.get("/hub/api/setup/status")
-@_api
-def setup_status():
-    """三项各自填了没。**只回布尔，不回值**。"""
-    return jsonify(setup_keys.status(_sk_paths()))
-
-
-def _sk_deepseek_provider(key):
-    """同一把 DeepSeek key 也建成对话 provider 并切过去（`as_provider` 勾选时走这里）。
-
-    **不新写任何 provider 逻辑**：校验/建/切全是第 2 段那三个既有函数，
-    等价于用户自己去 /hub/provider 填一遍再点「切换到它」。
-    同名条目已存在（四元组由 DEEPSEEK_PRESET 钉死，id 因此是定值）→ **只换 key，不重复建**。
-
-    🔴 本函数**不返回、不抛出**任何带 key 的东西：调用方只会拿到 §7 的机读错误码。
-    """
-    p = _validated(dict(DEEPSEEK_PRESET, api_key=key))
-    client = cliproxy_client.from_env()
-    pid = provider_model.provider_id(p)
-    with hold_activate_lock():
-        entries = client.entries()
-        e = client.find(pid, entries)
-        if e is None:
-            _create_locked(client, p)
-        else:
-            # 管理 API 是整条替换语义（§3.0d），所以拿原条目做底、只把我们管的字段盖上去：
-            # weight / 用户手改的 disabled / excluded-models 不能被这次换 key 顺手删掉。
-            client.replace_entry(e.kind, e.index, dict(e.raw, **provider_model.to_block_entry(
-                p, disabled=e.view["disabled"])))
-    # 锁不可重入，必须出了上面的 with 再切（_activate 自己会再抢一次，同 §3.4 的注释）。
-    _activate(client, pid)
-
-
-@hub_bp.post("/hub/api/setup/keys")
-@_api
-def setup_write_key():
-    """`{"field": "token"|"userid"|"deepseek", "value": "…"}` → 校验 + 写进对应文件。
-
-    成功回 `{"ok": true, "filled": {…新的三项状态}}`；失败只回错误码与形状说明。
-
-    `deepseek` 项可带 `"as_provider": true`（页面默认勾着）：写完 jiwen 那把 key 之后，
-    **再用同一把 key** 建一条 DeepSeek 官方 provider 并切成对话模型。
-    这一步失败**不回滚已经写好的 jiwen key**（那是两件独立的事，为切模型失败而把
-    用户刚填对的 key 抹掉才是坑），如实在 `provider_error` 里回机读码。
-    """
-    body = _require_json_object(request.get_json(silent=True))
-    field = body.get("field")
-    value = body.get("value")
-    if not isinstance(field, str) or field not in setup_keys.FIELD_RE:
-        raise HubError(400, "bad_field", "field 只能是 token / userid / deepseek")
-    if not isinstance(value, str):
-        raise HubError(400, "bad_body", "value 必须是字符串")
-    paths = _sk_paths()
-    try:
-        setup_keys.write_key(field, value, paths)
-    except FileNotFoundError as e:
-        # 只带路径，不带值。装到一半（没跑过 install.sh）时走这里。
-        raise HubError(409, "not_provisioned",
-                       "%s 还不存在，先跑一次 bash install.sh 铺配置" % e)
-    except ValueError as e:
-        code = str(e)
-        if code == "bad_format":
-            raise HubError(400, "bad_format", setup_keys.FIELD_FMT[field])
-        # set_deepseek 找不到 jiwen.delta_llm.api_key 那一行（文件结构被改过）
-        raise HubError(409, "write_failed", code)
-    except OSError as e:
-        # 权限/磁盘等意外：只报类型名，异常消息可能带上不该出站的东西
-        raise HubError(500, "write_failed", type(e).__name__)
-    resp = {"ok": True, "filled": setup_keys.status(paths)}
-    if field == "deepseek" and body.get("as_provider"):
-        try:
-            _sk_deepseek_provider(value.strip())
-        except HubError as e:
-            resp["provider_error"] = e.error          # §7 机读码，detail 里可能有路径，不回
-        except Exception as e:                        # noqa: BLE001
-            # 兜底同上：异常消息可能带上不该出站的东西，只报类型名。
-            # 兜得这么宽是有意的 —— key 已经写进 _global.yml 了，这一步再怎么炸也
-            # 不该让整个请求变成 500，那会让用户以为 key 没填成、再填一遍。
-            resp["provider_error"] = type(e).__name__
-    return jsonify(resp)
 
 
 # ======================================================================
