@@ -946,6 +946,12 @@ export class Engine {
       }
     }, Math.max(50, Math.min(1_000, g.stallCancelMs / 4)))
 
+    // reply 先回了"在发了"、后台还在发：等它们有了结果再收尾，最多 5 分钟（到点仍在发的，发送记录里是"还在发"，按已有动作算）
+    const settleSends = async (): Promise<void> => {
+      const deadline = Date.now() + 5 * 60_000
+      while (at.toolsInFlight > 0 && Date.now() < deadline) await sleep(200)
+    }
+
     this.ledger.markTurnSent(turnId)
     if (seg.needs_seed) { this.ledger.segmentSeeded(seg.id); seg.needs_seed = 0 }
     try {
@@ -960,14 +966,16 @@ export class Engine {
         this.log.warn('prompt.images_unsupported', { model: this.brain.model })
         res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: promptItems(blocks, true) }, 0)
       }
-      // reply 先回了"在发了"、后台还在发：等发完再收尾，不然这一轮会被当成"没回"去提醒，又发一遍
-      const sendDeadline = Date.now() + 5 * 60_000
-      while (at.toolsInFlight > 0 && Date.now() < sendDeadline) await sleep(200)
+      // 不等的话这一轮会被当成"没回"去提醒，又发一遍
+      await settleSends()
       if (at.cancelledAt !== null || res?.stopReason === 'cancelled') return { type: 'cancelled', used }
       return { type: 'ok', stopReason: String(res?.stopReason ?? ''), used, text: at.textOut }
     } catch (e) {
       if (e instanceof AcpExited || !this.dsh.running) return { type: 'crashed', err: safeError(e) }
       if (at.cancelledAt !== null) return { type: 'cancelled', used }
+      // 报错可能比发送先到。不等的话，还在发的段先被算成"已有动作"直接结案，最后它没发出去，对方就什么都收不到。
+      // 调用方（runChat）还没返回，这个聊天仍占着，等的这段时间不会开新的一轮
+      await settleSends()
       const err = e instanceof AcpError ? `${e.code} ${e.message}` : safeError(e)
       return { type: 'error', err, kind: classifyTurnError(err), used }
     } finally {
