@@ -281,13 +281,14 @@ describe('新建后交给 dsh', () => {
     })
   })
 
-  test('交给 dsh 的路由只有白名单字段（没有 meta，没有密钥）', async () => {
+  test('交给 dsh 的路由只有白名单的五个键（含网关补上的 retryPolicy；没有 meta，没有密钥）', async () => {
     await withModels({ handler: openaiOk(IDS) }, async ({ tg, b, fm, key }) => {
       await warmUp(tg)
       const starts = dshStarts(b)
       await wizardCreate(tg, { name: 'myproxy', fmt: 'openai', url: `${fm.url}/v1`, key })
       const r = await until(() => dshStarts(b) > starts && patchRoutes(b).myproxy, 'dsh 带新路由重启', 20_000)
-      expect(Object.keys(r).sort()).toEqual(['api', 'apiKeyEnv', 'baseURL', 'models'])
+      expect(Object.keys(r).sort()).toEqual(['api', 'apiKeyEnv', 'baseURL', 'models', 'retryPolicy'])
+      expect(r.retryPolicy).toEqual({ mode: 'normal', retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'] })
       for (const m of r.models) expect(Object.keys(m).every((k: string) => ['id', 'contextWindow', 'reasoningEfforts'].includes(k))).toBe(true)
       expect(JSON.stringify(r)).not.toContain(key)
     })
