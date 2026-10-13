@@ -23,6 +23,13 @@
 //   !voice             用语音回复两段（as_voice）
 //   !voicetext         回复两段中文，带两段朗读稿（voice_text）
 //   !tool:名字|JSON     先调用这个工具；一行一个指令（同一条消息里写多行 = 连续调多次），JSON 里不能有换行
+//   !emptyafter       照常调用 reply 发出回复，然后这次请求以"空内容报错"失败
+//                     （-32603，message = Internal error: turn failed: model "<当前模型>" returned a completed response with no content，没有 data）
+//   !silentempty      调用 stay_silent，然后同样以空内容报错失败
+//   !empty:N:tag      这个会话接下来 N 次请求不调任何工具，直接以空内容报错失败；补救提示也算，计数方式同 !err。
+//                     和 !err 写在同一条消息里时先用完 !empty 的次数，再轮到 !err
+//   !emptyrace:MS     发起 reply 但不等它的结果，MS 毫秒后（默认 150）这次请求就以空内容报错失败（演"消息还在发，这一轮先报错了"）
+//   !failafter:文字    照常调用 reply 发出回复，然后以 Internal error: turn failed: <文字> 失败（下划线换成空格）
 // 程序发来的"⟦系统·承诺到期⟧"：回复一句；state 目录里 due-mode=mute 时改为 stay_silent（模拟没兑现），=cancel 时取消这件承诺
 // 程序发来的"⟦系统·整理记忆⟧"：先试着调一次 react（应被锁）；state 目录里有 sticker-probe 文件时再试调一次
 // sticker（也别指望成功），然后输出一份假摘要（state 目录里 summary-mode=empty 时输出空）
@@ -121,6 +128,23 @@ async function callTool(s: Sess, sessionId: string, name: string, args: object):
   return text
 }
 
+/** 空内容报错：真 dsh 0.2.0-rc.2 的原样（code -32603、没有 data），引号里是当前模型名 */
+const emptyError = (s: Sess) => ({ code: -32603, message: `Internal error: turn failed: model "${splitModel(s.model)[1]}" returned a completed response with no content` })
+
+/** 发起一次工具调用但不等结果：结果回来只落盘，不再发通知 */
+function fireTool(s: Sess, sessionId: string, name: string, args: object): void {
+  if (!s.mcp) return
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  for (const h of s.mcp.headers) headers[h.name] = h.value
+  update(sessionId, { sessionUpdate: 'tool_call', toolCallId: `t${mcpSeq}`, title: name, status: 'pending' })
+  void fetch(s.mcp.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: mcpSeq++, method: 'tools/call', params: { name, arguments: args } }) })
+    .then(async res => {
+      const body = await res.json() as any
+      log('tool-results.jsonl', { sessionId, name, args, text: String(body?.result?.content?.[0]?.text ?? body?.error?.message ?? `http ${res.status}`), isError: body?.result?.isError === true, late: true })
+    })
+    .catch(() => {})
+}
+
 function directive(text: string, name: string): string[] | null {
   const m = text.match(new RegExp(`!${name}(?![a-z])(?::([^\\s:]+))?(?::([^\\s]+))?`))
   return m ? [m[1] ?? '', m[2] ?? ''] : null
@@ -196,6 +220,15 @@ async function prompt(id: number, sessionId: string, all0: { type: string; text?
   // !err 和真上游一样"粘"在会话上：一旦触发，这个会话接下来的 N 次请求都失败（包括补救提示）
   const errD = directive(last, 'err')
   if (errD && !counters[`err-armed:${errD[1]}`]) { counters[`err-armed:${errD[1]}`] = 1; counters[`err-left:${sessionId}`] = Number(errD[0] || 1); writeJson('counters.json', counters) }
+  // !empty 同样"粘"在会话上：接下来 N 次请求什么工具都不调，直接以空内容报错失败（先于 !err 用完）
+  const emptyD = directive(last, 'empty')
+  if (emptyD && !counters[`empty-armed:${emptyD[1]}`]) { counters[`empty-armed:${emptyD[1]}`] = 1; counters[`empty-left:${sessionId}`] = Number(emptyD[0] || 1); writeJson('counters.json', counters) }
+  if ((counters[`empty-left:${sessionId}`] ?? 0) > 0) {
+    counters[`empty-left:${sessionId}`]!--
+    writeJson('counters.json', counters)
+    log('errors.jsonl', { sessionId, kind: 'empty' })
+    return send({ id, error: emptyError(s) })
+  }
   if ((counters[`err-left:${sessionId}`] ?? 0) > 0) {
     counters[`err-left:${sessionId}`]!--
     writeJson('counters.json', counters)
@@ -210,6 +243,11 @@ async function prompt(id: number, sessionId: string, all0: { type: string; text?
   if (firstN(last, 'noreply')) { update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '（自言自语）' } }); return send({ id, result: { stopReason: 'end_turn' } }) }
   const slow = directive(last, 'slow')
   if (slow) await sleep(Number(slow[0]) || 500)
+  if (directive(last, 'silentempty')) {
+    await callTool(s, sessionId, 'stay_silent', { reason: 'test' })
+    log('errors.jsonl', { sessionId, kind: 'empty-after-silent' })
+    return send({ id, error: emptyError(s) })
+  }
   if (directive(last, 'silent')) {
     await callTool(s, sessionId, 'stay_silent', { reason: 'test' })
     return send({ id, result: { stopReason: 'end_turn' } })
@@ -248,7 +286,23 @@ async function prompt(id: number, sessionId: string, all0: { type: string; text?
   // 文件路径里可能有冒号（Windows 的盘符），不能用通用的指令解析
   const file = last.match(/!file:(\S+)/)
   if (file) args.files = [file[1]]
+  const race = directive(last, 'emptyrace')
+  if (race) {
+    fireTool(s, sessionId, 'reply', args)
+    await sleep(Number(race[0]) || 150)
+    log('errors.jsonl', { sessionId, kind: 'empty-race' })
+    return send({ id, error: emptyError(s) })
+  }
   await callTool(s, sessionId, 'reply', args)
+  if (directive(last, 'emptyafter')) {
+    log('errors.jsonl', { sessionId, kind: 'empty-after-reply' })
+    return send({ id, error: emptyError(s) })
+  }
+  const failAfter = last.match(/!failafter:(\S+)/)
+  if (failAfter) {
+    log('errors.jsonl', { sessionId, kind: 'fail-after-reply' })
+    return send({ id, error: { code: -32603, message: `Internal error: turn failed: ${failAfter[1]!.replace(/_/g, ' ')}` } })
+  }
   if (directive(last, 'dup')) await callTool(s, sessionId, 'reply', args)
   if (directive(last, 'dupsome')) await callTool(s, sessionId, 'reply', { text: `${base}（第1段）\n\n新的一段甲\n\n新的一段乙` })
   if (directive(last, 'silentafter')) await callTool(s, sessionId, 'stay_silent', { reason: 'test' })
