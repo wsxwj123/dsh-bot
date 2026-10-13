@@ -26,6 +26,11 @@ from moments import redact
 
 app = Flask(__name__,
             template_folder=os.path.join(os.path.dirname(__file__), "templates"))
+# 全站 JSON 响应里的键照各接口自己给出的顺序输出，不按键名重排（Flask 默认会排）。
+# 这一句原先由旧供应商那个蓝图在注册时顺带给整个应用设（moments/provider_routes.py 的
+# record_once），朋友圈、画风、新系统各页的接口其实都靠它。设在应用创建处，就不再依赖
+# 任何一个蓝图在不在：那个蓝图下线之后，全站的字段顺序与以前逐字相同。
+app.json.sort_keys = False
 app.register_blueprint(styles_bp)
 
 # 管理台蓝图挂载点（M1 落地 moments/hub_routes.py 后自动生效）。
