@@ -11,7 +11,8 @@ import time
 import secrets
 import subprocess
 from datetime import datetime, timezone
-from flask import Flask, render_template, send_from_directory, request, jsonify, current_app
+from urllib.parse import urlsplit
+from flask import Flask, render_template, send_from_directory, request, jsonify, current_app, redirect
 from werkzeug.exceptions import HTTPException
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -40,35 +41,84 @@ if importlib.util.find_spec("moments.hub_routes") is not None:
     from moments import hub_routes as _hub_routes
     app.register_blueprint(_hub_routes.hub_bp)
 
-# ── 旧 provider 管理页（管 8770 provider-proxy 的那套）──────────────────────────
-# 从旧仓原样搬入（moments/provider_routes.py + provider_config + scripts/restart_bot_worker）：
-# URL 与旧仓一字不差（/provider、/api/providers…），与新版 /hub/provider **并存**、各自前缀
-# 不同、互不覆盖。provider_config 的接缝成组判据只由两个新接缝（CHANNELS_ROOT /
-# PROVIDER_PATH）触发：设了其一却没设全 → 导入期 RuntimeError。那种环境下不能让整个面板
-# 起不来 —— provider 面板降级为不可用（生产不设任何接缝，永远走正常分支）。
-try:
-    from moments.provider_routes import provider_bp
-    from provider_config import SeamsNotConfigured as _SeamsNotConfigured
-except RuntimeError as _seam_err:  # pragma: no cover - 仅部分重定向接缝的测试环境
-    provider_bp = None
-    _SeamsNotConfigured = None
-    sys.stderr.write("[moments.web] provider 面板未启用: %s\n" % _seam_err)
+# ── 旧系统供应商：只留一个入口（INTERFACE-旧系统供应商入口）────────────────────
+# 旧系统那边把它自己的供应商页单独跑起来了。本仓那份页面连同它的十五条接口已经从管理台上
+# 摘掉：这里不再导入 moments.provider_routes，它背后那一串模块（provider_config、
+# provider_proxy、provider_paths、legacy_config_loader、scripts.restart_bot_worker）也就不在
+# 管理台进程里，进程里没有任何路径还能重启旧系统的 bot、或写旧系统的供应商清单。那些文件
+# 都留在原处，只是没有人导入。/provider 只做一件事：把人带到那边的页面。
+#
+# 目的地只来自下面两个配置项。请求里的查询串、请求体都不参与；请求头只用来在两个值里
+# 挑一个，换不出第三个地址（防任意跳转）。
+LEGACY_PROVIDER_LOCAL = "HUB_LEGACY_PROVIDER_URL_LOCAL"
+LEGACY_PROVIDER_PUBLIC = "HUB_LEGACY_PROVIDER_URL_PUBLIC"
+LEGACY_PROVIDER_DEFAULTS = {
+    LEGACY_PROVIDER_LOCAL: "http://127.0.0.1:8767/provider",
+    LEGACY_PROVIDER_PUBLIC: "https://8767.wsxwj123.top/provider",
+}
+LEGACY_PROVIDER_URL_MAX = 2048
+# 隧道与反向代理把请求转到本机时会带上的头。那时 Host 可能已经被改写成回环地址，
+# 靠这几个头认出它不是从本机来的。
+_FORWARD_HEADERS = ("X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host",
+                    "Forwarded", "CF-Connecting-IP")
 
-if provider_bp is not None:
-    app.register_blueprint(provider_bp)
 
-    # 只读模式下的写路由不能回裸 500/HTML（「/api/* 错误体一律 {"error": ...}」）：
-    # 只捕 SeamsNotConfigured 这一类（RuntimeError 的子类），**不** catch 宽 RuntimeError。
-    from provider_config import SafetyGateTripped as _SafetyGateTripped
+def _legacy_url_ok(value: str) -> bool:
+    """配置里的入口地址合不合法（INTERFACE §1 的四条；value 已去掉首尾空白）。"""
+    if not value or len(value) > LEGACY_PROVIDER_URL_MAX:
+        return False
+    if not value.startswith(("http://", "https://")):
+        return False
+    # 反斜杠与 @：两边对主机名的认法可能不同；空白与控制字符：不许原样进响应头
+    if any(ch in "\\@" or ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value):
+        return False
+    try:
+        return bool(urlsplit(value).hostname)
+    except ValueError:              # 方括号不成对之类，解析不出主机名
+        return False
 
-    @app.errorhandler(_SafetyGateTripped)
-    def _safety_gate_500(e):   # 9.4：测试态安全闸，写端点 500 零写入
-        return jsonify({"ok": False, "error": str(e)}), 500
 
-    @app.errorhandler(_SeamsNotConfigured)
-    def _seams_read_only_503(_e):
-        return jsonify({"error": "测试接缝未成组设置，写操作已拒绝（只读模式）",
-                        "code": "seams_read_only"}), 503
+def _legacy_url(key: str) -> str:
+    """读一个入口配置项：先进程环境、后 hub.env，每次现读。没设、为空、不合法都用默认值。"""
+    value = env_file.get(key)
+    if not value:
+        return LEGACY_PROVIDER_DEFAULTS[key]
+    if _legacy_url_ok(value):
+        return value
+    # 配错了不报错、不回 5xx，只留一行提示。提示里不带配置的原值。
+    sys.stderr.write("[moments.web] %s 不是合法的 http(s) 地址，已改用默认入口\n" % key)
+    return LEGACY_PROVIDER_DEFAULTS[key]
+
+
+def _host_name(host_header: str) -> str:
+    """Host 头里的主机名：去掉端口与方括号。解析不出来回空串。"""
+    h = (host_header or "").strip()
+    if h.startswith("["):
+        return h[1:h.index("]")] if "]" in h else ""
+    return h.split(":", 1)[0]
+
+
+def legacy_provider_target() -> str:
+    """这次请求该去旧系统的哪个入口（INTERFACE §2）。
+
+    用本机入口，当且仅当两条同时成立：Host 头里的主机名是 localhost 或回环地址；请求里没有
+    任何一个转发头（值为空的不算有）。其余一律公网入口，包括没有 Host、解析不出主机名。
+    读的是原始的 Host 头，不用 request.host：后者在没有 Host 头时会回落到服务器自己绑的地址。
+    Host 与这些头都能伪造，后果只是拿到两个固定地址中的另一个。
+    """
+    local = hub_auth.is_loopback(_host_name(request.headers.get("Host")))
+    forwarded = any((request.headers.get(name) or "").strip() for name in _FORWARD_HEADERS)
+    return _legacy_url(LEGACY_PROVIDER_LOCAL if local and not forwarded else LEGACY_PROVIDER_PUBLIC)
+
+
+@app.route("/provider")
+def legacy_provider_entry():
+    """旧页面的地址只回一个跳转。用 302 加 no-store：目的地随打开方式与配置而变，
+    不能让浏览器记死。"""
+    resp = redirect(legacy_provider_target(), code=302)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
 
 # 安审 S4：隧道（cloudflare tunnel / frp / nginx）到本进程是明文 http，Flask 默认不信
 # 转发头，于是 request.scheme 恒为 "http" —— 浏览器侧明明是 https，签出去的
