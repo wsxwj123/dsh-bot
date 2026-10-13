@@ -166,7 +166,7 @@ async function main(): Promise<void> {
     // （与 Telegram 同一套存储、同一把锁、同一套校验），ApiServer 只做 HTTP 转发
     provider: {
       views: () => engine!.providerViews(),
-      refresh: (name, only) => commands.apiRefresh(name, only),
+      refresh: (name, o) => commands.apiRefresh(name, o),
       preview: name => commands.apiPreview(name),
       test: name => commands.apiTest(name),
       detail: () => commands.apiDetail(),
