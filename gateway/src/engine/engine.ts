@@ -817,10 +817,15 @@ export class Engine {
     for (;;) {
       const turn = this.ledger.startTurn({ chatId, segmentId: seg.id, kind, inboundIds: ids, attempt, rootId })
       rootId ??= turn.id
-      const outcome = await this.runPrompt(turn.id, rootId, seg, blocks)
+      let outcome = await this.runPrompt(turn.id, rootId, seg, blocks)
       const delivered = this.ledger.deliveredInChain(rootId)
       const silent = this.ledger.silentInChain(rootId)
       const done = delivered > 0 || silent
+      // 已有动作之后模型回了空内容：话早已送达（或她已决定不回），模型只是照运行规则"发完就结束"。这一轮按正常结束记，不算报错
+      if (outcome.type === 'error' && outcome.kind === 'empty-response' && done) {
+        this.log.info('turn.empty_response', { turn: turn.id, delivered, silent })
+        outcome = { type: 'ok', stopReason: 'empty_response', used: outcome.used }
+      }
       this.log.info('turn.end', { turn: turn.id, kind, attempt, outcome: outcome.type, delivered, silent })
 
       if (outcome.type === 'ok') {
@@ -855,7 +860,12 @@ export class Engine {
       } else {
         this.lastTurnErrored.add(chatId)
         this.ledger.finishTurn(turn.id, 'error', { error: outcome.err, usedTokens: outcome.used })
-        if (done) { this.ledger.settleInbound(ids, 'done', 'replied before error'); return 0 }
+        if (done) {
+          // 空内容报错在上面已经转成正常结束，走到这里的是别的报错。记一条：dsh 改了空内容的句子、网关认不出来时，从这里看得出来
+          this.log.warn('turn.error_after_action', { turn: turn.id, delivered, silent })
+          this.ledger.settleInbound(ids, 'done', 'replied before error')
+          return 0
+        }
         // 上下文超长 / 历史思考被拒（方案 3.2 第 10、11 条）：立即换段（账本流水写摘要）并重试一次
         const reason: RollReason | null = outcome.kind === 'context-overflow' || outcome.kind === 'thinking-history' ? outcome.kind : null
         if (reason && !recovered) {
@@ -888,7 +898,7 @@ export class Engine {
       }
       if (attempt >= g.maxTurnRetries) {
         this.ledger.settleInbound(ids, 'dead', 'retries exhausted')
-        void this.notifyOwner('dead', `有 ${ids.length} 条消息重试 ${attempt} 次后仍然失败，已放弃（${outcome.type === 'error' ? outcome.err.slice(0, 120) : '一直卡住'}）。`)
+        void this.notifyOwner('dead', `有 ${ids.length} 条消息重试 ${attempt} 次后仍然失败，已放弃（${outcome.type !== 'error' ? '一直卡住' : outcome.kind === 'empty-response' ? '模型回了空内容' : outcome.err.slice(0, 120)}）。`)
         return 0
       }
       const wait = g.retryBackoffMs[Math.min(attempt, g.retryBackoffMs.length - 1)] ?? 0
