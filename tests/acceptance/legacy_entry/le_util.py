@@ -22,7 +22,7 @@ from werkzeug.test import EnvironBuilder, run_wsgi_app
 LOCAL_ENV = "HUB_LEGACY_PROVIDER_URL_LOCAL"
 PUBLIC_ENV = "HUB_LEGACY_PROVIDER_URL_PUBLIC"
 DEFAULT_LOCAL = "http://127.0.0.1:8767/provider"
-DEFAULT_PUBLIC = "https://8767.wsxwj123.top/provider"
+DEFAULT_PUBLIC = "https://legacy-provider.invalid/provider"
 DEFAULT_OF = {LOCAL_ENV: DEFAULT_LOCAL, PUBLIC_ENV: DEFAULT_PUBLIC}
 
 #: §1「可断言」点名的六个不合法值
