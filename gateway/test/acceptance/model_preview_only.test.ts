@@ -4,13 +4,14 @@
 // - preview 只读：不写 providers.json、不更新 lastRefresh、不占 refreshing 去重；
 // - 行恒 6 键 {id, contextWindow, in_list, in_fetched, manual, default_checked}；
 //   顺序 = 先 in_fetched（上游顺序）后 in_list（当前列表顺序）；count 只数 in_fetched；
-// - default_checked = in_fetched or manual；
-// - refresh 带 only：落盘 =（拉到的 ∩ only）∪（当前列表 ∩ only）；被勾上而拉取没有的
-//   并入 manualModels（粘性）；only: [] 全清；未知 id 静默忽略。
+// - default_checked = in_list or（清单为空 and in_fetched）（INTERFACE-dsh修补 3.1，替换了原来的 in_fetched or manual）；
+// - refresh 带 only（INTERFACE-dsh修补 3.2）：先是原来就在清单、这次被勾上的（保持原来的先后），再是新勾上的（按对方返回的先后）；
+//   勾上而对方这次没返回的不再因此变成手填；原来就在清单的上下文长度保持原值；only: [] 全清；未知 id 静默忽略；
+// - refresh 不带 only、清单不为空：只对账不改清单（INTERFACE-dsh修补 5.4）。
 // 实现未落地时本文件红（404），那是红基线，不是测试坏了。
 import { describe, expect, test } from 'bun:test'
 import { writeFileSync } from 'fs'
-import { defaultKeyEnv, providersPath, readProviders, seedCreds, seedProviders, sleep, withModels, type BotEnv } from './_acc'
+import { defaultKeyEnv, providersPath, readProviders, reconLine, seedCreds, seedProviders, sleep, withModels, type BotEnv } from './_acc'
 import { type FakeModels, type Handler, json, openaiOk, sleep as fsleep } from './fake-models'
 
 const PREVIEW = '/v1/provider/preview'
@@ -44,7 +45,7 @@ describe('POST /v1/provider/preview', () => {
       const by = Object.fromEntries(r.json.models.map((m: any) => [m.id, m]))
       expect(by.a).toMatchObject({ in_fetched: true, in_list: true, manual: false, default_checked: true, contextWindow: 8000 })
       expect(by.b).toMatchObject({ in_fetched: true, in_list: true, manual: false, default_checked: true })
-      expect(by.d).toMatchObject({ in_fetched: true, in_list: false, manual: false, default_checked: true })
+      expect(by.d).toMatchObject({ in_fetched: true, in_list: false, manual: false, default_checked: false })
       expect(by.c).toMatchObject({ in_fetched: false, in_list: true, manual: true, default_checked: true })
       expect(by.c.contextWindow, '仅本地的行取列表里的值（恒为整数）').toBe(5000)
       expect(by.b.contextWindow, '上游没给上下文就是 null').toBeNull()
@@ -59,7 +60,7 @@ describe('POST /v1/provider/preview', () => {
       expect(r.json.count).toBe(0)
       expect(r.json.models.map((m: any) => m.id)).toEqual(['a', 'b', 'c'])
       for (const m of r.json.models) expect(m.in_fetched).toBe(false)
-      expect(r.json.models.map((m: any) => m.default_checked)).toEqual([false, false, true])
+      expect(r.json.models.map((m: any) => m.default_checked), '在清单里的都默认打勾，不分是不是手填').toEqual([true, true, true])
     })
   })
 
@@ -173,13 +174,14 @@ describe('POST /v1/provider/preview', () => {
 })
 
 describe('POST /v1/provider/refresh 的 only 扩展', () => {
-  test('示例一（照抄契约）：拉 [a,b,d]、勾 [a,d,c] → 落盘 [a,d,c]，c 留在 manual', async () => {
-    await withModels({ handler: openaiOk(FETCHED), before: seed() }, async ({ gw, b }) => {
+  test('示例一（照抄契约）：清单 [a(8000), b(8000), 手填 c(5000)]、拉 [a(32000), b, d]、勾 [a,d,c] → 落盘 [a(8000), c(5000), d(1048576)]，c 留在 manual', async () => {
+    const list = [{ id: 'a', contextWindow: 8000 }, { id: 'b', contextWindow: 8000 }, { id: 'c', contextWindow: 5000 }]
+    await withModels({ handler: openaiOk([{ id: 'a', context_length: 32000 }, 'b', 'd']), before: seed({ models: list }) }, async ({ gw, b }) => {
       const r = await gw.call(REFRESH, { name: 'myproxy', only: ['a', 'd', 'c'] })
       expect(r.status, `应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
-      expect(r.json).toMatchObject({ ok: true, count: 3, added: 1, removed: ['b'], kept_manual: 1, selected: 3 })
+      expect(r.json).toMatchObject({ ok: true, count: 3, added: 1, removed: ['b'], kept_manual: 1, selected: 3, applied: 'selection' })
       expect(String(r.json.text)).toContain('（按勾选保留 3 个）')
-      expect(ids(b)).toEqual(['a', 'd', 'c'])
+      expect(entry(b).route.models, '先是原来就在清单的（原来的先后、原来的上下文），再是新勾上的').toEqual([{ id: 'a', contextWindow: 8000 }, { id: 'c', contextWindow: 5000 }, { id: 'd', contextWindow: 1048576 }])
       expect(entry(b).meta.manualModels).toEqual(['c'])
     })
   })
@@ -217,22 +219,24 @@ describe('POST /v1/provider/refresh 的 only 扩展', () => {
     })
   })
 
-  test('粘性：列表里被勾上而上游没有的，并入 manualModels', async () => {
+  test('示例二（照抄契约）：清单 [a, b]（都不是手填）、对方只返回 [a]、勾 [a, b] → 仍是 [a, b]，b 不会因此变成手填', async () => {
     await withModels({ handler: openaiOk(['a']), before: seed({ models: ['a', 'b'], manual: [] }) }, async ({ gw, b }) => {
       const r = await gw.call(REFRESH, { name: 'myproxy', only: ['a', 'b'] })
       expect(r.status).toBe(200)
-      expect([...ids(b)].sort()).toEqual(['a', 'b'])
-      expect(entry(b).meta.manualModels, 'b 被勾上、拉取没有 → 粘成手动').toContain('b')
-      expect(r.json.selected).toBe(2)
+      expect(ids(b)).toEqual(['a', 'b'])
+      expect(entry(b).meta.manualModels, 'b 被勾上、对方这次没返回：手填名单仍是空的').toEqual([])
+      expect(r.json).toMatchObject({ kept_manual: 0, selected: 2 })
     })
   })
 
-  test('缺省 only：行为与响应不退化，selected 照给、text 不带「按勾选保留」', async () => {
+  test('缺省 only（清单不为空）：只对账不改清单，selected 照给、text 是对账句、不带「按勾选保留」', async () => {
     await withModels({ handler: openaiOk(FETCHED), before: seed() }, async ({ gw, b }) => {
       const r = await gw.call(REFRESH, { name: 'myproxy' })
       expect(r.status).toBe(200)
-      expect(r.json).toMatchObject({ ok: true, count: 3, added: 1, kept_manual: 1 })
-      expect(r.json.selected, '缺省 only 时 selected 也给，等于落盘后列表长度').toBe(ids(b).length)
+      expect(r.json).toMatchObject({ ok: true, count: 3, added: 0, removed: 0, kept_manual: 1, applied: 'kept', not_in_list: 1, not_returned: 1 })
+      expect(ids(b)).toEqual(['a', 'b', 'c'])
+      expect(r.json.selected, '缺省 only 时 selected 也给，等于清单的个数').toBe(3)
+      expect(String(r.json.text)).toBe(`「myproxy」${reconLine(3, 1, 1)}`)
       expect(String(r.json.text)).not.toContain('按勾选保留')
     })
   })
