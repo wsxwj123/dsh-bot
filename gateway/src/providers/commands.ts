@@ -17,6 +17,8 @@ export type ApiRefreshResult = { status: number; body: {
   ok: boolean; error?: string; reason?: string; count?: number; added?: number
   /** only 缺省：去掉的个数（既有形状）；带 only：被去掉的 id 数组（INTERFACE §11b） */
   removed?: number | string[]; kept_manual?: number; selected?: number; text: string
+  /** 这次落盘走的哪种做法（所有 200 都有） */
+  applied?: 'selection' | 'full'
 } }
 
 /** 本机接口（INTERFACE-管理台UI 第 3 节）的统一返回：HTTP 状态码 + 契约里的正文 */
@@ -495,19 +497,21 @@ export class ProviderCommands {
   /**
    * 本机接口的 `POST /v1/provider/refresh`（方案 3.8；only 扩展见 INTERFACE §11b）：与 `/provider refresh`
    * 同一套流程，但把结果翻成 HTTP 状态码 + 机读错误码的契约。text 去掉「【系统】」前缀，其余同 3.6 的回复。
-   * only 缺省时响应与扩展前一字不变（removed 仍是数字）；带 only 时 removed 给被去掉的 id 数组。
+   * only 缺省时 removed 是数字；带 only 时 removed 给被去掉的 id 数组。rev 是预览拿到的清单指纹，对不上回 409 list_changed。
    */
-  async apiRefresh(name: string, only?: string[]): Promise<ApiRefreshResult> {
+  async apiRefresh(name: string, o: { only?: string[]; rev?: string } = {}): Promise<ApiRefreshResult> {
     const noPrefix = (t: string) => t.replace(/^【系统】/, '')
     const pre = this.apiResolve(name)
     if ('err' in pre) return pre.err as ApiRefreshResult
-    const r = await this.d.service.refresh(pre.found.name, only)
+    const r = await this.d.service.refresh(pre.found.name, o)
     const t = noPrefix(this.refreshText(pre.found.name, r))
     switch (r.status) {
       case 'ok':
-        return { status: 200, body: { ok: true, count: r.count, added: r.added, removed: r.bySelection ? r.removed : r.removed.length, kept_manual: r.keptManual, selected: r.selected, text: t } }
+        return { status: 200, body: { ok: true, count: r.count, added: r.added, removed: r.applied === 'selection' ? r.removed : r.removed.length, kept_manual: r.keptManual, selected: r.selected, text: t, applied: r.applied } }
       case 'failed':
         return { status: 502, body: { ok: false, error: 'fetch_failed', reason: r.reason, text: t } }
+      case 'list_changed':
+        return { status: 409, body: { ok: false, error: 'list_changed', text: t } }
       case 'gone':
       case 'changed':
         return { status: 409, body: { ok: false, error: 'changed', text: t } }
@@ -536,7 +540,7 @@ export class ProviderCommands {
     const r: PreviewResult = await this.d.service.preview(pre.found.name)
     switch (r.status) {
       case 'ok':
-        return { status: 200, body: { ok: true, count: r.count, models: r.models } }
+        return { status: 200, body: { ok: true, count: r.count, models: r.models, list_rev: r.listRev } }
       case 'failed':
         // 文案与 refresh 的 502 同源：r 在这一支的形状就是 RefreshResult 的失败支
         return { status: 502, body: { ok: false, error: 'fetch_failed', reason: r.reason, text: noPrefix(refreshResultText(this.root(), r.name, r as RefreshResult)) } }
@@ -689,13 +693,14 @@ export function refreshResultText(root: string, name: string, r: RefreshResult):
     case 'ok': {
       let t = `【系统】「${name}」拉到 ${r.count} 个模型（新增 ${r.added} 个，去掉 ${r.removed.length} 个；手动加的 ${r.keptManual} 个保留）。`
       if (r.removed.length) t += `\n去掉了：${r.removed.slice(0, 10).join('、')}`
-      if (r.bySelection) t += `（按勾选保留 ${r.selected} 个）`
+      if (r.applied === 'selection') t += `（按勾选保留 ${r.selected} 个）`
       if (r.v1Added) t += `（地址补成了 ${r.baseURL}）`
       return t
     }
     case 'failed': return `【系统】「${name}」没拉到模型：${fetchFailText({ reason: r.reason, status: r.status2, seconds: r.seconds })}。模型列表保持不变。`
     case 'gone': return `【系统】「${name}」已经不在了，这次结果没保存。`
     case 'changed': return `【系统】「${name}」刚被别处改过，这次结果没保存，请再刷新一次。`
+    case 'list_changed': return '【系统】清单刚被别处改过，这次没保存，请重新刷新模型列表。'
     case 'busy': return `【系统】「${name}」正在刷新，请稍候。`
     case 'key_missing': return `【系统】「${name}」缺密钥，先用 /provider →「修改」→「密钥」补上。`
     case 'lock_timeout': return '【系统】别的 bot 正在改供应商，请稍后再试。'
