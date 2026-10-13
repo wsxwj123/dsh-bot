@@ -1,7 +1,7 @@
 // 供应商命令与纯函数（方案 3.6、3.7）：/provider add 的识别、刷新文案、上游错误归类、NO_PROXY 追加、身份键。
 import { expect, test } from 'bun:test'
 import { classifyTurnError, brainKey, identityOf } from '../../src/engine/engine'
-import { isProviderAdd, ProviderCommands } from '../../src/providers/commands'
+import { isProviderAdd, ProviderCommands, reconText, saveResultText } from '../../src/providers/commands'
 import { Logger } from '../../src/log'
 import { addNoProxyHosts } from '../../src/util'
 import type { Brain } from '../../src/config'
@@ -20,8 +20,8 @@ function commands(): ProviderCommands {
   })
 }
 
-/** 没有补地址的刷新结果（多数用例） */
-const NO_V1 = { v1Added: false, baseURL: 'https://p.example.com/v1' }
+/** 没有补地址的刷新结果（多数用例）；对账数字只在 applied 为 kept 时用得上，这里填零 */
+const NO_V1 = { v1Added: false, baseURL: 'https://p.example.com/v1', notInList: 0, notReturned: 0, disjoint: false }
 
 test('刷新结果文案（3.4.5/3.6）：成功带统计与去掉了、失败保持原列表、忙/缺密钥/被改/已不在', () => {
   const c = commands()
@@ -33,7 +33,7 @@ test('刷新结果文案（3.4.5/3.6）：成功带统计与去掉了、失败�
   expect(c.refreshText('p1', { status: 'ok', name: 'p1', count: 3, added: 1, removed: ['m2'], keptManual: 1, selected: 3, applied: 'selection', ...NO_V1 }))
     .toBe('【系统】「p1」拉到 3 个模型（新增 1 个，去掉 1 个；手动加的 1 个保留）。\n去掉了：m2（按勾选保留 3 个）')
   // 这次是在 /v1 下才拉到的：末尾再接「（地址补成了 …）」，排在「（按勾选保留 S 个）」之后
-  const V1 = { v1Added: true, baseURL: 'https://p.example.com/v1' }
+  const V1 = { ...NO_V1, v1Added: true }
   expect(c.refreshText('p1', { status: 'ok', name: 'p1', count: 2, added: 1, removed: [], keptManual: 0, selected: 2, applied: 'selection', ...V1 }))
     .toBe('【系统】「p1」拉到 2 个模型（新增 1 个，去掉 0 个；手动加的 0 个保留）。（按勾选保留 2 个）（地址补成了 https://p.example.com/v1）')
   expect(c.refreshText('p1', { status: 'ok', name: 'p1', count: 2, added: 2, removed: [], keptManual: 0, selected: 2, applied: 'full', ...V1 }))
@@ -124,7 +124,7 @@ test('NO_PROXY 追加：保留原有值、去重、NO_PROXY 与 no_proxy 都写'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import type { PreviewResult, RefreshResult, ProviderService, TestConnResult } from '../../src/providers/service'
+import type { PreviewResult, RefreshResult, ProviderService, SaveResult, TestConnResult } from '../../src/providers/service'
 
 /** 一个带 providers.json 的临时根，测完删掉 */
 function withRoot(fn: (root: string, put: (providers: unknown) => void) => Promise<void>, opts: { raw?: string } = {}): Promise<void> {
@@ -140,7 +140,7 @@ const entry = (name: string, apiKeyEnv = 'PROVIDER_P1_KEY') => ({
 })
 const snapOf = (...entries: [string, unknown][]) => ({ version: 1, providers: Object.fromEntries(entries), pendingKeyRemovals: [] })
 
-function apiCmd(o: { root: string; refresh?: (name: string, how: { only?: string[]; rev?: string }) => Promise<RefreshResult>; preview?: () => Promise<PreviewResult>; testConn?: () => Promise<TestConnResult>; credential?: (env: string) => string | null; configRoutes?: string[] }): ProviderCommands {
+function apiCmd(o: { root: string; refresh?: (name: string, how: { only?: string[]; rev?: string; full?: boolean }) => Promise<RefreshResult>; preview?: () => Promise<PreviewResult>; testConn?: () => Promise<TestConnResult>; credential?: (env: string) => string | null; configRoutes?: string[] }): ProviderCommands {
   const service = { credential: o.credential ?? (() => 'sekret'), refresh: o.refresh ?? (async () => ({ status: 'ok', name: 'p1', count: 3, added: 2, removed: ['m2'], keptManual: 1, selected: 4, applied: 'full', ...NO_V1 })), preview: o.preview, testConn: o.testConn } as unknown as ProviderService
   return new ProviderCommands({ service, api: {} as never, log: new Logger({}), root: o.root, isOwner: () => true, botUsername: () => 'b', configRouteNames: () => o.configRoutes ?? [], reply: () => {}, recordUpdate: () => {} })
 }
@@ -182,6 +182,54 @@ test('apiRefresh：only 与 rev 原样交给服务层；带 only 时 removed 是
     expect(r).toMatchObject({ status: 200, body: { ok: true, removed: ['m2'], selected: 2, applied: 'selection' } })
     expect(await apiCmd({ root, refresh: async () => ({ status: 'list_changed', name: 'p1' }) }).apiRefresh('p1', { only: ['m1'], rev: 'old' }))
       .toEqual({ status: 409, body: { ok: false, error: 'list_changed', text: '清单刚被别处改过，这次没保存，请重新刷新模型列表。' } })
+  })
+})
+
+// ─── INTERFACE-dsh修补 第五节：清单没动时的对账句 ───
+
+const RECON = '对方现在有 3 个模型，其中 2 个不在清单里，清单里有 1 个对方这次没返回。清单没有改动，要挑选请到管理台的「供应商与模型」页。'
+const DISJOINT = '清单里的模型对方一个都没返回，这个地址上的内容可能换了，建议到管理台重新挑。'
+/** 一次只对账的刷新结果 */
+const kept = (o: Partial<Extract<RefreshResult, { status: 'ok' }>> = {}): RefreshResult => ({ status: 'ok', name: 'p1', count: 3, added: 0, removed: [], keptManual: 1, selected: 2, applied: 'kept', ...NO_V1, notInList: 2, notReturned: 1, ...o })
+
+test('对账句：三个数照填，是 0 也照写 0；清单里的一个都没返回时后面多接一句', () => {
+  expect(reconText({ count: 3, notInList: 2, notReturned: 1, disjoint: false })).toBe(RECON)
+  expect(reconText({ count: 2, notInList: 0, notReturned: 0, disjoint: false })).toBe('对方现在有 2 个模型，其中 0 个不在清单里，清单里有 0 个对方这次没返回。清单没有改动，要挑选请到管理台的「供应商与模型」页。')
+  expect(reconText({ count: 3, notInList: 2, notReturned: 1, disjoint: true })).toBe(RECON + DISJOINT)
+})
+
+test('刷新结果文案：只对账时是「「名」」接对账句，不写新增去掉了什么；补了地址的说明排在最后', () => {
+  const c = commands()
+  expect(c.refreshText('p1', kept())).toBe(`【系统】「p1」${RECON}`)
+  expect(c.refreshText('p1', kept({ disjoint: true }))).toBe(`【系统】「p1」${RECON}${DISJOINT}`)
+  expect(c.refreshText('p1', kept({ disjoint: true, v1Added: true }))).toBe(`【系统】「p1」${RECON}${DISJOINT}（地址补成了 https://p.example.com/v1）`)
+})
+
+test('保存结果文案：落到已有的同一家上、清单没动时，「，拉到 N 个模型。」换成句号加对账句，后面的附加句不变', () => {
+  const saved = (o: Partial<Extract<SaveResult, { status: 'saved' }>>): SaveResult => ({
+    status: 'saved', kind: 'updated', name: 'p1', api: 'openai-completions', baseURL: 'https://p.example.com/v1', count: 3, reason: null, status2: null,
+    v1Added: false, truncated: false, guessed: false, epochChanged: false, applied: 'kept', notInList: 2, notReturned: 1, disjoint: false, ...o,
+  })
+  expect(saveResultText(saved({}), 'p1')).toBe(`【系统】已更新供应商「p1」。${RECON}`)
+  expect(saveResultText(saved({ disjoint: true, v1Added: true, truncated: true }), 'p1')).toBe(`【系统】已更新供应商「p1」。${RECON}${DISJOINT}（地址补成了 https://p.example.com/v1）（只取了前 1000 个）`)
+  expect(saveResultText(saved({ kind: 'collided' }), 'p1')).toBe(`【系统】「p1」刚被别处新建，已改为更新它。${RECON}`)
+  // 清单被重铺的（新建、换了一家、清单原来是空的）与原来一字不差
+  expect(saveResultText(saved({ applied: 'full' }), 'p1')).toBe('【系统】已更新供应商「p1」，拉到 3 个模型。')
+  expect(saveResultText(saved({ applied: 'full', kind: 'created' }), 'p1')).toBe('【系统】已添加供应商「p1」，拉到 3 个模型。')
+  expect(saveResultText(saved({ applied: 'full', kind: 'collided' }), 'p1')).toBe('【系统】「p1」刚被别处新建，已改为更新它，拉到 3 个模型。')
+  expect(saveResultText(saved({ applied: 'full', reason: 'server_error', status2: 500 }), 'p1')).toBe('【系统】已更新供应商「p1」，但没拉到模型：对方接口出错（HTTP 500）。之后可以在 /provider 里点「刷新模型」，或用 /model →「管理模型」手动加。')
+})
+
+test('apiRefresh：只对账时 removed 是 0、applied 为 kept，多出 not_in_list 与 not_returned，text 是对账句；full 原样交给服务层，全量时没有这两个键', async () => {
+  await withRoot(async (root, put) => {
+    put(snapOf(['p1', entry('p1')]))
+    const r = await apiCmd({ root, refresh: async () => kept() }).apiRefresh('p1')
+    expect(r).toEqual({ status: 200, body: { ok: true, count: 3, added: 0, removed: 0, kept_manual: 1, selected: 2, text: `「p1」${RECON}`, applied: 'kept', not_in_list: 2, not_returned: 1 } })
+    const seen: unknown[] = []
+    const full = await apiCmd({ root, refresh: async (_n, how) => { seen.push(how); return { status: 'ok', name: 'p1', count: 3, added: 2, removed: ['m2'], keptManual: 1, selected: 4, applied: 'full', ...NO_V1 } } }).apiRefresh('p1', { full: true })
+    expect(seen).toEqual([{ full: true }])
+    expect(Object.keys(full.body).sort()).toEqual(['added', 'applied', 'count', 'kept_manual', 'ok', 'removed', 'selected', 'text'])
+    expect(full.body).toMatchObject({ applied: 'full', removed: 1 })
   })
 })
 
