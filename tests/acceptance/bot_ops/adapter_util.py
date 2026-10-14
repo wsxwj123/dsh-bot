@@ -533,3 +533,115 @@ def run_cli(env_over, timeout=20.0):
     text = (out + b"\n" + err).decode("utf-8", "replace").strip()
     return SimpleNamespace(code=proc.returncode, output=text, timed_out=timed_out,
                            leftover=leftover)
+
+
+# ---------------------------------------------------------------- v0.6、v0.7（补充文件第 9 节）
+# 依据：INTERFACE-适配服务.md 第 9 节、INTERFACE-适配约定-v0.7摘录.md。下面是第 9 节几份用例共用的小件。
+GW_HEALTH = "/v1/health"      # 9.4、9.5：网关健康接口，返回里有 telegram.conflict、telegram.username
+GW_INJECT = "/v1/inject"      # 6.2：投递通知
+
+#: 9.1：v0.4 的十个键，加 bot.enable、bot.switch_in、bot.group_chat，都报 true，共十三个键
+CAPABILITIES_V07 = dict(CAPABILITIES, **{
+    "bot.notify": True, "bot.life_settings": True,
+    "bot.enable": True, "bot.switch_in": True, "bot.group_chat": True})
+
+#: 约定 5.12.1：群设置的六个键
+GROUP_KEYS = ("requireMention", "allowFrom", "selfAliases", "otherBotUsernames",
+              "otherBotAliases", "intro")
+
+
+def enabled_url(bot_id):
+    return "%s/%s/enabled" % (BOTS, bot_id)
+
+
+def groups_url(bot_id):
+    return "%s/%s/groups" % (BOTS, bot_id)
+
+
+def notify_url(bot_id):
+    return "%s/%s/notify" % (BOTS, bot_id)
+
+
+def serve_health(gw, conflict=False, username=None):
+    """让假网关应答 GET /v1/health。接口文件只写了 telegram.conflict 与 telegram.username。"""
+    return gw.on("GET", GW_HEALTH, 200,
+                 {"ok": True, "telegram": {"conflict": conflict, "username": username}})
+
+
+def set_cfg(bot, **fields):
+    """改假 bot 配置文件的顶层键；值给 None 就删掉这个键（服务改写过的 YAML 也能读）。"""
+    cfg = read_cfg(bot)
+    for k, v in fields.items():
+        if v is None:
+            cfg.pop(k, None)
+        else:
+            cfg[k] = v
+    bot.yml.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+
+
+def read_cfg(bot):
+    """读回配置（服务可能写成 YAML；JSON 是 YAML 的子集，两种都能读）。"""
+    import yaml
+    return yaml.safe_load(bot.yml.read_text(encoding="utf-8")) or {}
+
+
+# -- 启动项文件（照管理台 §5c 的说法：装着 = <名>.plist，收起 = <名>.plist.disabled）
+def unit_labels(bot_id):
+    """主单元与主动消息定时单元。"""
+    return ("com.dsh-bot.%s" % bot_id, "com.dsh-bot.self-initiate.%s" % bot_id)
+
+
+def put_plists(sandbox, bot_id, stashed=False):
+    for label in unit_labels(bot_id):
+        name = label + (".plist.disabled" if stashed else ".plist")
+        (sandbox.agents / name).write_text(
+            '<?xml version="1.0"?>\n<plist><!-- %s --></plist>\n' % label, encoding="utf-8")
+
+
+def plist_state(sandbox, label):
+    on = (sandbox.agents / (label + ".plist")).exists()
+    off = (sandbox.agents / (label + ".plist.disabled")).exists()
+    return {(True, False): "装着", (False, True): "收起", (False, False): "没装"}.get((on, off), "两份都在")
+
+
+def print_text(label, running):
+    """假 launchctl 的 print 原文（照 fakes/fake_launchctl.py 的两种写法）。"""
+    if running:
+        return ("%s = {\n\tactive count = 1\n\tstate = running\n\tpid = 4242\n"
+                "\tpath = /tmp/fake.plist\n}\n" % label)
+    return "%s = {\n\tstate = not running\n\tpath = /tmp/fake.plist\n}\n" % label
+
+
+# -- access.json（9.5：这只 bot 频道目录下的那一份）
+def access_path(bot):
+    return bot.botdir / "channel" / "access.json"
+
+
+def write_access(bot, data, mode=0o600):
+    p = access_path(bot)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    p.chmod(mode)
+    return p
+
+
+def read_access(bot):
+    return json.loads(access_path(bot).read_text(encoding="utf-8"))
+
+
+class InjectInbox:
+    """假网关 POST /v1/inject 的应答（同 test_adapter_v04_notify 的 Inbox）：按 key 前 120 个字符去重。"""
+
+    def __init__(self):
+        self.seen = set()
+        self.delivered = []
+
+    def __call__(self, rec):
+        body = rec["json"]
+        if not isinstance(body, dict) or not isinstance(body.get("key"), str):
+            return 400, {"ok": False}
+        k = body["key"][:120]
+        if k in self.seen:
+            return 200, {"ok": True, "duplicate": True}
+        self.seen.add(k)
+        self.delivered.append(body)
+        return 200, {"ok": True, "duplicate": False}
