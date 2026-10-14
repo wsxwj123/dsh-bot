@@ -60,8 +60,11 @@ th{color:var(--ink-faint);font-weight:500;font-size:12.5px;}
    - 「旧系统供应商」指向站内的 /provider，由它把人带到旧系统那边自己的供应商页
      （本仓那份页面已下线，这里只是入口；跳到哪个地址由那一处按打开方式与配置定，
      模板里不写外部地址）。那是另一套系统的页面、没有回管理台的导航，所以在新标签页
-     打开，并且不把管理台的窗口与地址带给它。它不是本站的页面，这颗 chip 永远不会亮。 #}
-<nav class="hubnav">
+     打开，并且不把管理台的窗口与地址带给它。它不是本站的页面，这颗 chip 永远不会亮。
+   console_nav（页面服务，INTERFACE-页面服务 §3）：适配服务那个进程渲染时设它，整个 <nav> 换成
+   一行占位注释，由壳换成它的导航；上面的样式与下面的脚本两边都留着。8765 不设它，输出逐字不变，
+   所以 if/else/endif 都贴着 <nav> 的头尾写，不另起行。 #}
+{% if console_nav %}<!-- console-nav -->{% else %}<nav class="hubnav">
   <div class="hubnav-inner">
     <span class="navgroup">新系统</span>
     <a class="chip{% if nav_active == 'hub' %} on{% endif %}" href="/hub">管理台</a>
@@ -75,7 +78,7 @@ th{color:var(--ink-faint);font-weight:500;font-size:12.5px;}
     <a class="chip" href="/">朋友圈</a>
     <a class="chip" href="/styles">画风</a>
   </div>
-</nav>
+</nav>{% endif %}
 <script>
 // 三页共用的 fetch 包装。两件事：
 // 1) 401 + Hub-Gate:1 → 跳登录（§1.4 的判别位，不带该头的 401 是业务鉴权失败，不跳）；
