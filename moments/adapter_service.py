@@ -58,6 +58,7 @@ CAPABILITIES = {
     "provider.subscription": False,
     "provider.per_session": False,
     "provider.switch_new_segment": True,
+    "bot.notify": True,
 }
 DEFAULT_LABEL = "各 bot 配置文件里写的那一组"
 
@@ -75,6 +76,15 @@ PROVIDER_BUDGET = 55.0
 #: 读清单、读原强度最多用掉时限的这一份，写请求至少留下其余的时间（PLAN-v04 第 1 节）：
 #: 读拖到最后才回的话，写请求刚发出就到点，只能回「还没确认」。
 READ_SHARE = 0.4
+
+#: 投递通知（补充文件 6.2）：source 的三种取值、text 按 UTF-8 的字节上限、key 的字符数上限
+NOTIFY_SOURCES = ("user_moment", "moment_reply", "moment_image")
+NOTIFY_MAX_TEXT = 16 * 1024
+NOTIFY_MAX_KEY = 200
+#: 网关把 key 截到前 120 个字符再去重（第 8 节），超过的改交摘要
+GATEWAY_KEY_MAX = 120
+#: 等网关的硬上限：壳只等 10 秒，留出余量
+NOTIFY_TIMEOUT = 8.0
 MAX_ROW_WORKERS = 8
 
 #: 配置文件没写 brain 时网关自己用的默认值（gateway/src/config.ts 的 parseBrain）。
@@ -198,16 +208,18 @@ def _dispatch():
     head = PREFIX + "/bots/"
     if path.startswith(head):
         parts = path[len(head):].split("/")
-        if len(parts) == 2 and parts[1] in _WRITE_ROUTES:
-            _require_method(method, "POST")
+        if len(parts) == 2 and parts[1] in _BOT_ROUTES:
+            methods = _BOT_ROUTES[parts[1]]
+            _require_method(method, ", ".join(methods))
             if not _valid_bot_id(parts[0]):
                 raise _invalid("bot 编号不合规：只能用字母、数字、点、下划线、横线，1 到 64 个字符")
-            return _WRITE_ROUTES[parts[1]](parts[0])
+            return methods[method](parts[0])
     raise Refuse(404, "not_found", "没有这个接口")
 
 
 def _require_method(method, allowed):
-    if method != allowed:
+    """``allowed`` 是 ``Allow`` 头的写法：一个方法，或逗号加空格隔开的几个。"""
+    if method not in allowed.split(", "):
         raise Refuse(405, "method_not_allowed", "这个接口不支持这种请求方式",
                      headers={"Allow": allowed})
 
@@ -744,8 +756,66 @@ def _restart(bot_id):
     return {"ok": False, "status": "failed", "message": "重启命令发了，但没起来：%s" % reason}
 
 
+def _utf8_size(text):
+    """按 UTF-8 算的字节数。JSON 能解出落单的代理码（``\\ud800``），那种串编不成 UTF-8，回 None。"""
+    try:
+        return len(text.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+
+
+def _gateway_key(key):
+    """交给网关的去重键。网关（JS）把 key 截到前 120 个 UTF-16 码元再去重，两个前 120 个字相同的长 key
+    会被当成同一条漏投；超过的改交摘要，同一个 key 永远得到同一个摘要（补充文件第 8 节）。"""
+    if len(key.encode("utf-16-le")) // 2 <= GATEWAY_KEY_MAX:
+        return key
+    return "sha256:" + hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _notify(bot_id):
+    """投递通知（约定 5.7，补充文件 6.2）：形状 → 名单 → 停用 → 这只 bot 的网关 ``POST /v1/inject``。"""
+    body = _json_object()
+    source, text, key = body.get("source"), body.get("text"), body.get("key")
+    if not isinstance(source, str) or source not in NOTIFY_SOURCES:
+        raise _invalid("source 只能是 user_moment、moment_reply、moment_image 之一")
+    size = _utf8_size(text) if isinstance(text, str) else None
+    if size is None or not text.strip() or size > NOTIFY_MAX_TEXT:
+        raise _invalid("text 要是一段不全是空白的文字，不超过 16 KiB")
+    if not isinstance(key, str) or not 1 <= len(key) <= NOTIFY_MAX_KEY or _utf8_size(key) is None:
+        raise _invalid("key 要是 1 到 200 个字符")
+    bot = _require_bot(bot_id)
+    _require_enabled(bot)
+    # 投进这只 bot 与主人的私聊：聊天号取它自己 yml 顶层写的（不读 life_config 指过去的那份）
+    chat_id = bot["cfg"].get("chat_id")
+    if not (_text(chat_id) or type(chat_id) is int):
+        raise Refuse(500, "internal", "这只 bot 的配置里没有主人的聊天号，投不了")
+    channel = bot["channel"]
+    if not gateway_client.available(channel):
+        raise Refuse(503, "unavailable", "这只 bot 的进程现在连不上，这条通知没有投出去")
+    text = gateway_client.for_dsh(text)     # 旧系统的工具用法换成本系统的（同朋友圈投给网关的那份规则）
+    deadline = time.monotonic() + NOTIFY_TIMEOUT
+    try:
+        code, got = _gateway(lambda t: gateway_client.inject_result(
+            channel, chat_id, text, source, _gateway_key(key), timeout=t), deadline)
+    except _NoReply:
+        # 网关可能已经收下了：壳用同一个 key 重试时网关去重，只会投一次
+        raise Refuse(503, "unavailable", "这只 bot 的进程没有及时回应，这条通知不一定投到了") from None
+    except Refuse as r:                     # 连不上：没投出去
+        raise Refuse(r.status, r.code, "这只 bot 的进程现在连不上，这条通知没有投出去") from None
+    if code == 200 and isinstance(got, dict) and got.get("ok") is True:
+        return {"ok": True, "status": "duplicate" if got.get("duplicate") is True else "delivered"}
+    if code == 403:                         # 不带 Origin 时，网关的 inject 只在聊天号不在允许名单里回 403
+        raise Refuse(500, "internal", "这只 bot 的进程拒收了这条通知：它配置里主人的聊天号不在允许名单里")
+    raise RuntimeError("unexpected gateway reply")
+
+
 _READ_ROUTES = {PREFIX + "/meta": _meta, PREFIX + "/bots": _bots, PREFIX + "/providers": _providers}
-_WRITE_ROUTES = {"provider": _set_provider, "restart": _restart}
+#: ``/bots/<bot_id>/<这一段>`` 上的接口：方法 → 处理函数（键的先后就是 405 的 Allow 头）
+_BOT_ROUTES = {
+    "provider": {"POST": _set_provider},
+    "restart": {"POST": _restart},
+    "notify": {"POST": _notify},
+}
 
 
 # ---------------------------------------------------------------- 管理台三页（页面服务）
