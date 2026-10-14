@@ -415,8 +415,25 @@ def _live_brain(channel):
             "effort": effort}
 
 
+def _person(bot):
+    """约定 5.2 的 ``person``（v0.6）：朋友圈里记这只 bot 的名字，与 ``config_sources.person_id`` 同一口径。
+
+    只看 bot 自己 yml 里的键：先 ``life_id``，再 ``life_config`` 的文件名去掉扩展名，都没有就是 bot 编号。
+    不打开 life 文件（归属边界），所以 life 文件里写的 ``life_id`` 不算；现有配置都没写这个键。
+    """
+    cfg = bot["cfg"]
+    if _text(cfg.get("life_id")):
+        return cfg["life_id"].strip()
+    life = cfg.get("life_config")
+    if _text(life):
+        stem = os.path.splitext(os.path.basename(life.strip()))[0]
+        if stem:
+            return stem
+    return bot["id"]
+
+
 def _bot_row(bot, seams):
-    """列表里的一行（约定 5.2 的八个键）。在线程池里跑：只用传进来的值，不读环境与配置。"""
+    """列表里的一行（约定 5.2 的八个键，v0.6 起加 ``person``）。在线程池里跑：只用传进来的值，不读环境与配置。"""
     bot_id = bot["id"]
     brain = _config_brain(bot["cfg"])
     live = None
@@ -441,7 +458,7 @@ def _bot_row(bot, seams):
         config_pair = (live["config_provider"] or brain["provider"],
                        live["config_model"] or brain["model"])
         source = "override" if (provider, model) != config_pair else "default"
-    return {"bot_id": bot_id, "display_name": bot["display_name"],
+    return {"bot_id": bot_id, "display_name": bot["display_name"], "person": _person(bot),
             "state": state, "state_text": state_text,
             "provider": {"id": provider, "name": provider, "model": model, "effort": effort},
             "provider_source": source, "pending": None, "detail": {}}
