@@ -131,3 +131,28 @@ def test_只读字段原样交回不算错_改了才按只读拒(env):
         life.save(bot, bots, {"city": "苏州", "user_address": "阿测"})
     assert (e.value.status, e.value.fields) == (422, {"city": life.RO_OWN_YML})
     assert path.read_text(encoding="utf-8") == "city: 杭州\nuser_address: 小测\n"
+
+
+def test_备份_同一秒轮换删掉较早的之后_新的一份仍接在最后_不拿回删掉的名字(monkeypatch, tmp_path):
+    """6.5 与适配服务 10.2：同一秒连存 7 次、只留 5 份，留下的应是最近 5 份（人设备份：persona 目录、不带后缀）。
+
+    从头找第一个空名字的话，轮换删掉这一秒的第一份之后，第 7 份会拿回那个名字，排到最前、随即被删。
+    """
+    import datetime
+    import re
+    monkeypatch.setenv("DSH_BOT_HOME", str(tmp_path))
+    frozen = datetime.datetime(2026, 10, 15, 9, 30, 0)
+    monkeypatch.setattr(life, "datetime", SimpleNamespace(datetime=SimpleNamespace(now=lambda: frozen)))
+    name_re = re.compile(r"^[0-9]{8}-[0-9]{6}(-[0-9]{2})?\Z")
+    for i in range(7):
+        folder = life._backup("botalpha", b"v%d" % i, kind="persona", suffix="")
+        life._rotate(folder, name_re)
+    assert os.path.realpath(folder) == os.path.realpath(str(tmp_path / "backups" / "persona" / "botalpha"))
+    names = sorted(os.listdir(folder))
+    assert names == ["20261015-093000-%02d" % i for i in range(2, 7)]
+    contents = []
+    for name in names:
+        with open(os.path.join(folder, name), "rb") as f:
+            contents.append(f.read())
+    assert contents == [b"v%d" % i for i in range(2, 7)]
+    assert all(os.stat(os.path.join(folder, n)).st_mode & 0o777 == 0o600 for n in names)
