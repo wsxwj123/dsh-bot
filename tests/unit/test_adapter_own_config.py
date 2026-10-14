@@ -168,3 +168,57 @@ def test_旧配置里的显示名_供应商_停用_频道目录_一个都不顶�
     assert _get(world, "/providers")[0] == 503
     assert _post_effort(world)[0] == 503
     assert _touched_other(world, opens) == [], "碰了另一套系统那边：%r" % _touched_other(world, opens)
+
+
+# ---------------------------------------------------------------- 找网关（安审 I1）
+
+def test_找网关_本系统那份没写频道目录_用bot家下的channel_不用旧配置里写的(world):
+    world.put_yml()
+    world.life.write_text(json.dumps({"bot_channel_path": "~/.claude/channels/oldname"}),
+                          encoding="utf-8")
+    opens = world.opens()
+    assert _post_effort(world)[0] == 503                     # 替身一律拒连
+    assert world.calls == [os.path.realpath(str(world.botdir / "channel"))], world.calls
+    assert _touched_other(world, opens) == []
+
+
+def _written_to_other(w):
+    """本系统那份自己把频道目录写到另一套系统的频道目录。"""
+    w.put_yml(bot_channel_path="~/.claude/channels/oldname")
+
+
+def _written_as_bot_home(w):
+    """频道目录写成 bot 家本身：旁边的 state 是 bots/state，不是这只 bot 的。"""
+    shared = w.botdir.parent / "state"
+    shared.mkdir()
+    (shared / "api.key").write_text("not-this-bot\n", encoding="utf-8")
+    (shared / "api.port").write_text("9\n", encoding="utf-8")
+    w.put_yml(bot_channel_path=str(w.botdir))
+
+
+def _state_linked_out(w):
+    """频道目录写得没毛病，但 bot 家里的 state 是指到另一套系统那边的软链。"""
+    for f in (w.botdir / "state").iterdir():
+        f.unlink()
+    (w.botdir / "state").rmdir()
+    (w.botdir / "state").symlink_to(w.legacy_state, target_is_directory=True)
+    w.put_yml(bot_channel_path=str(w.botdir / "channel"))
+
+
+OUTSIDE = {"写到另一套系统的频道目录": _written_to_other, "写成bot家本身": _written_as_bot_home,
+           "state经软链出去": _state_linked_out}
+
+
+@pytest.mark.parametrize("make", list(OUTSIDE.values()), ids=list(OUTSIDE))
+def test_找网关_口令所在的state落在bot家外面_当网关不可用_不去那里读(world, make):
+    if make is _state_linked_out and sys.platform == "win32":
+        pytest.skip("Windows 上建软链要特权")
+    make(world)
+    opens = world.opens()
+    status, got = _post_effort(world)
+    assert (status, got["code"]) == (503, "unavailable"), got
+    assert _get(world, "/providers")[0] == 503
+    assert _touched_other(world, opens) == []
+    # 列表另外还读 bot 家里的心跳（state 下，管理台共用的读法，不归这里管），所以只看找没找网关
+    assert _get(world, "/bots")[0] == 200
+    assert world.calls == [], "不该按这个频道目录去找网关：%r" % world.calls
