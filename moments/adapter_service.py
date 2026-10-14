@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""dsh 这一半的适配服务：把本系统的 bot 用五个本机 HTTP 接口交给另一套系统的管理台（壳）。
+"""dsh 这一半的适配服务：把本系统的 bot 用本机 HTTP 接口交给另一套系统的管理台（壳）。
 
-契约：``.devflow/INTERFACE-适配约定-v0.3.md``（两边定稿）与 ``INTERFACE-适配服务.md``（本系统补充）。
+契约：``.devflow/INTERFACE-适配约定-v0.4.md``（两边定稿）与 ``INTERFACE-适配服务.md``（本系统补充）；
+生活设定的做法在 ``INTERFACE-生活设定.md``，逻辑在 ``moments/life_settings.py``。
 起服务：仓库根执行 ``python3 -m moments.adapter_service``；测试用 ``create_app()``。
 只支持这一种启动方式：监听地址只许回环、令牌文件不在就拒绝启动，这两道检查都在 ``main()`` 里。
 ``flask run`` 等别的方式拉起 ``create_app()`` 会绕过它们（例如对外监听），不要这样起。
@@ -40,7 +41,7 @@ from flask import Flask, Response, current_app, jsonify, request
 from werkzeug.exceptions import HTTPException, InternalServerError, RequestEntityTooLarge
 
 import gateway_client
-from moments import bot_launchd, bots_client, config_sources, hub_addbot, hub_routes, redact
+from moments import bot_launchd, bots_client, config_sources, hub_addbot, hub_routes, life_settings, redact
 
 PREFIX = "/adapter/v1"
 DEFAULT_HOST = "127.0.0.1"
@@ -59,6 +60,7 @@ CAPABILITIES = {
     "provider.per_session": False,
     "provider.switch_new_segment": True,
     "bot.notify": True,
+    "bot.life_settings": True,
 }
 DEFAULT_LABEL = "各 bot 配置文件里写的那一组"
 
@@ -85,6 +87,8 @@ NOTIFY_MAX_KEY = 200
 GATEWAY_KEY_MAX = 120
 #: 等网关的硬上限：壳只等 10 秒，留出余量
 NOTIFY_TIMEOUT = 8.0
+#: 生活设定 PUT 的请求体上限（约定 5.6：256 KiB），比别的接口的 MAX_BODY 大
+LIFE_MAX_BODY = 256 * 1024
 MAX_ROW_WORKERS = 8
 
 #: 配置文件没写 brain 时网关自己用的默认值（gateway/src/config.ts 的 parseBrain）。
@@ -113,11 +117,15 @@ _restart_locks_guard = threading.Lock()
 
 
 class Refuse(Exception):
-    """按约定的失败形状回给调用方的拒绝：HTTP 状态码、``code``、给人看的一句话。"""
+    """按约定的失败形状回给调用方的拒绝：HTTP 状态码、``code``、给人看的一句话。
 
-    def __init__(self, status, code, message, headers=None):
+    ``fields`` 不为 None 时一并放进响应体（生活设定的 422 一律带它，INTERFACE-生活设定 第 1 节）。
+    """
+
+    def __init__(self, status, code, message, headers=None, fields=None):
         super().__init__(code)
         self.status, self.code, self.message, self.headers = status, code, message, headers
+        self.fields = fields
 
 
 class _NoReply(Exception):
@@ -212,7 +220,8 @@ def _dispatch():
             methods = _BOT_ROUTES[parts[1]]
             _require_method(method, ", ".join(methods))
             if not _valid_bot_id(parts[0]):
-                raise _invalid("bot 编号不合规：只能用字母、数字、点、下划线、横线，1 到 64 个字符")
+                raise Refuse(422, "invalid", "bot 编号不合规：只能用字母、数字、点、下划线、横线，1 到 64 个字符",
+                             fields={} if parts[1] == "life" else None)     # 生活设定的 422 一律带 fields
             return methods[method](parts[0])
     raise Refuse(404, "not_found", "没有这个接口")
 
@@ -238,26 +247,34 @@ def _respond():
             return _hub_respond(path)       # 名单外的 404、错方法的 405 也从这里以 Refuse 抛出来
         return _json(_dispatch())
     except Refuse as r:
-        return _json({"ok": False, "code": r.code, "message": r.message}, r.status, r.headers)
+        payload = {"ok": False, "code": r.code, "message": r.message}
+        if r.fields is not None:
+            payload["fields"] = r.fields
+        return _json(payload, r.status, r.headers)
     except Exception as e:                  # noqa: BLE001  异常消息可能带路径，只记类名
         _log.error("adapter internal error: %s", type(e).__name__)
         return _json(INTERNAL, 500)
 
 
-def _json_object(allow_empty=False):
-    """请求体必须是一个 JSON 对象；``allow_empty`` 时空体等同 ``{}``。只在过了鉴权之后才读。"""
+def _json_object(allow_empty=False, limit=MAX_BODY, too_big=None):
+    """请求体必须是一个 JSON 对象；``allow_empty`` 时空体等同 ``{}``。只在过了鉴权之后才读。
+
+    ``limit`` 是字节上限，超了回 422，话是 ``too_big``（没给就同「不是 JSON 对象」）。
+    上限不是 ``MAX_BODY`` 的，调用方先把 ``request.max_content_length`` 设成 ``limit + 1``。
+    """
     bad = _invalid("请求体必须是一个 JSON 对象")
+    big = _invalid(too_big) if too_big else bad
     length = request.content_length
-    if length is not None and length > MAX_BODY:
-        raise bad
-    # 分块传输没有 Content-Length：靠应用的 MAX_CONTENT_LENGTH（MAX_BODY + 1，见 create_app）
-    # 让框架最多读这么多就停，读满了就是超了。框架某些情况下改为抛 413，同样按不合规拒绝。
+    if length is not None and length > limit:
+        raise big
+    # 分块传输没有 Content-Length：靠 max_content_length（上限加 1，见 create_app）
+    # 让框架最多读这么多就停，读满了就是超了。框架某些情况下改为抛 413，同样按超了拒绝。
     try:
         raw = request.get_data(cache=False)
     except RequestEntityTooLarge:
-        raise bad from None
-    if len(raw) > MAX_BODY:
-        raise bad
+        raise big from None
+    if len(raw) > limit:
+        raise big
     if not raw.strip():
         if allow_empty:
             return {}
@@ -329,9 +346,12 @@ def _gateway_channel(bot_id, cfg):
     return channel if state.startswith(home + os.sep) else ""
 
 
-def _require_bot(bot_id):
-    """名单里有这只 bot 才往下走（精确匹配，不拿 bot_id 去拼任何路径），返回它那一条。"""
-    for bot in _own_bots():
+def _require_bot(bot_id, bots=None):
+    """名单里有这只 bot 才往下走（精确匹配，不拿 bot_id 去拼任何路径），返回它那一条。
+
+    ``bots`` 是已经读好的名单（生活设定还要用整份名单查共用），没给就现读。
+    """
+    for bot in _own_bots() if bots is None else bots:
         if bot["id"] == bot_id:
             return bot
     raise Refuse(404, "unknown_bot", "没有这只 bot")
@@ -809,12 +829,47 @@ def _notify(bot_id):
     raise RuntimeError("unexpected gateway reply")
 
 
+def _life_refuse(err):
+    return Refuse(err.status, err.code, err.message, fields=err.fields)
+
+
+def _life_get(bot_id):
+    """生活设定 GET（约定 5.6，INTERFACE-生活设定 第 4 节）：不看请求体与查询串；bot 停用时照常返回。"""
+    bots = _own_bots()
+    bot = _require_bot(bot_id, bots)
+    try:
+        return dict(ok=True, **life_settings.view(bot, bots))
+    except life_settings.LifeError as e:
+        raise _life_refuse(e) from None
+
+
+def _life_put(bot_id):
+    """生活设定 PUT（INTERFACE-生活设定 第 5 节）：请求体 → 名单 → 交给 life_settings；停用的 bot 照常能改。"""
+    request.max_content_length = LIFE_MAX_BODY + 1      # 分块传输的读到上限多一个字节即停
+    try:
+        body = _json_object(limit=LIFE_MAX_BODY, too_big="请求体太大，上限 256 KiB")
+    except Refuse as r:
+        r.fields = {}
+        raise
+    values = body.get("values")
+    if not isinstance(values, dict):
+        raise Refuse(422, "invalid", "请求体里要有 values，而且是一个对象", fields={})
+    bots = _own_bots()
+    bot = _require_bot(bot_id, bots)
+    try:
+        message = life_settings.save(bot, bots, values)
+    except life_settings.LifeError as e:
+        raise _life_refuse(e) from None
+    return {"ok": True, "applied": True, "queued": False, "message": message}
+
+
 _READ_ROUTES = {PREFIX + "/meta": _meta, PREFIX + "/bots": _bots, PREFIX + "/providers": _providers}
 #: ``/bots/<bot_id>/<这一段>`` 上的接口：方法 → 处理函数（键的先后就是 405 的 Allow 头）
 _BOT_ROUTES = {
     "provider": {"POST": _set_provider},
     "restart": {"POST": _restart},
     "notify": {"POST": _notify},
+    "life": {"GET": _life_get, "PUT": _life_put},
 }
 
 
