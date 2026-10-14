@@ -76,6 +76,9 @@ export type GatewayOpts = {
   replyReturnMs: number
   /** generate_image 先同步等多久（毫秒，默认 10000）：到点还没好就先让模型回话，好了再用系统消息告诉它 */
   imageWaitMs: number
+  /** 主人私聊"刚聊过"标记的中立目录（INTERFACE-适配服务 10.5）：默认 ~/.config/claude-dsh-console/shared/last-user，
+   *  gateway.last_user_dir 可改（测试用） */
+  lastUserDir: string
   /** 语音服务（仓库里的 voice-bridge）地址，只用本机 */
   voiceBridgeUrl: string
   /** 生图：novelai | comfyui | off */
@@ -256,6 +259,7 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     modelFetchTimeoutMs: msNum(g.model_fetch_timeout_ms, 15_000, 'gateway.model_fetch_timeout_ms', 1_000, 120_000),
     providerKeyGraceMs: msNum(g.provider_key_grace_ms, 600_000, 'gateway.provider_key_grace_ms', 0, 86_400_000),
     providerSwitchSummaryMs: msNum(g.provider_switch_summary_ms, 30_000, 'gateway.provider_switch_summary_ms', 1_000, 600_000),
+    lastUserDir: resolve(expandHome(str(g.last_user_dir, join(homedir(), '.config', 'claude-dsh-console', 'shared', 'last-user')))),
   }
 }
 
@@ -346,6 +350,8 @@ export type Access = {
   replyToMode?: 'first' | 'all' | 'off'
   /** Fish Audio 的音色 id；没有就不能发语音（降级成文字） */
   voiceId?: string
+  /** 语音桥的合成模型（约定 v0.8 B.3）；没有就不带，由语音桥按全局设置 */
+  voiceModel?: string
 }
 
 export function readAccess(channelDir: string): Access | null {
