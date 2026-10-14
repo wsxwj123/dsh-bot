@@ -14,7 +14,7 @@ import { TelegramApi } from './telegram/api'
 import { isGroupChat } from './telegram/inbound'
 import { Poller } from './telegram/poller'
 import { Sender } from './telegram/sender'
-import { addNoProxyHosts, ensureSecretFile, sleep, writeAtomic } from './util'
+import { addNoProxyHosts, ensureSecretFile, sleep, writeAtomic, writeLastUser } from './util'
 import { fetchModels, probeModel } from './providers/models'
 import { ProviderService } from './providers/service'
 import { ProviderCommands } from './providers/commands'
@@ -147,12 +147,10 @@ async function main(): Promise<void> {
     onCallback: cq => wizard.onCallback(cq),
     onHumanMessage: (msg, observed) => {
       if (observed) { transcript.observe(msg); return }
-      // 私聊"刚聊过"标记：导演不点正在私聊的 bot 去群里说话（格式同旧系统：整数秒）
-      try {
-        const dir = join(cfg.directorDir, 'last-user')
-        mkdirSync(dir, { recursive: true, mode: 0o700 })
-        writeAtomic(join(dir, `${cfg.id}-${msg.chat.id}.last-user`), String(Math.floor(Date.now() / 1000)))
-      } catch (e) { log.warn('director.marker_failed', { err: safeError(e) }) }
+      // 主人私聊的"刚聊过"标记（INTERFACE-适配服务 10.5）：写中立目录，导演不点正在私聊的 bot 去群里说话。
+      // 群里的、别人的私聊不记；写失败只记一条警告，不影响收消息
+      if (isGroupChat(msg.chat.id) || !cfg.gw.owners.includes(String(msg.chat.id))) return
+      try { writeLastUser(cfg.gw.lastUserDir, cfg.id) } catch (e) { log.warn('director.marker_failed', { err: safeError(e) }) }
     },
   })
   engine.healthSource = () => ({ pollLastOkAt: poller.health.lastOkAt, pollConflict: poller.health.conflict, pollError: poller.health.lastError })
