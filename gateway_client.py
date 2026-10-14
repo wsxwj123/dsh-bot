@@ -215,6 +215,17 @@ def inject(channel_dir: str, chat_id: str, text: str, source: str, key: str,
         return bool(json.loads(r.read().decode("utf-8")).get("ok"))
 
 
+def inject_result(channel_dir: str, chat_id, text: str, source: str, key: str,
+                  timeout: float = 10) -> tuple[int, dict]:
+    """同 inject 写一条系统消息，但把网关的状态码与返回体原样带回（适配服务的投递通知要分
+    「投到了」与「这个 key 投过了」：网关回 ``{"ok": true, "duplicate": 布尔}``）。
+
+    连不上、超时由调用方接住（``net_kind`` 归类）；返回体不是 JSON 抛 ValueError。
+    """
+    body = {"chat_id": str(chat_id), "source": source, "text": text, "key": key}
+    return _call(channel_dir, "POST", "/v1/inject", body, timeout=timeout)
+
+
 # ─── 旧通知里的 Bash 命令 → 新工具的用法 ───
 
 _PY = r'\S*python[\w.]*'
