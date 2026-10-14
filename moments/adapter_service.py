@@ -73,6 +73,7 @@ MAX_BODY = 64 * 1024
 GATEWAY_READ_TIMEOUT = 2.0
 #: 重启从发命令算起的总时限（补充文件 4.5：50 秒内没等到就回 failed；壳等 60 秒）。
 RESTART_BUDGET = 50.0
+MAX_ROW_WORKERS = 8
 #: 换供应商整条请求的时限（补充文件 6.1：55 秒内返回）。测试经 DSH_CONSOLE_PROVIDER_BUDGET 缩短（第 8 节）。
 PROVIDER_BUDGET = 55.0
 #: 读清单、读原强度最多用掉时限的这一份，写请求至少留下其余的时间（PLAN-v04 第 1 节）：
@@ -89,7 +90,6 @@ GATEWAY_KEY_MAX = 120
 NOTIFY_TIMEOUT = 8.0
 #: 生活设定 PUT 的请求体上限（约定 5.6：256 KiB），比别的接口的 MAX_BODY 大
 LIFE_MAX_BODY = 256 * 1024
-MAX_ROW_WORKERS = 8
 
 #: 配置文件没写 brain 时网关自己用的默认值（gateway/src/config.ts 的 parseBrain）。
 CONFIG_DEFAULT_PROVIDER = "deepseek-official"
@@ -220,8 +220,10 @@ def _dispatch():
             methods = _BOT_ROUTES[parts[1]]
             _require_method(method, ", ".join(methods))
             if not _valid_bot_id(parts[0]):
-                raise Refuse(422, "invalid", "bot 编号不合规：只能用字母、数字、点、下划线、横线，1 到 64 个字符",
-                             fields={} if parts[1] == "life" else None)     # 生活设定的 422 一律带 fields
+                refuse = _invalid("bot 编号不合规：只能用字母、数字、点、下划线、横线，1 到 64 个字符")
+                if parts[1] == "life":
+                    refuse.fields = {}      # 生活设定的 422 一律带 fields（INTERFACE-生活设定 第 1 节）
+                raise refuse
             return methods[method](parts[0])
     raise Refuse(404, "not_found", "没有这个接口")
 
