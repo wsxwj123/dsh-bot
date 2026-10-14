@@ -108,24 +108,101 @@ def test_bots_状态与状态文字如约(adapter, setup, state, text):
 
 
 def test_供应商摘要_每项形状如约_不带接口地址和密钥变量名(adapter):
+    """清单是向正在运行的 bot 的网关读来的（补充文件 4.3、第 5 节）。
+
+    假网关给三家：一家模型是字符串、有密钥；一家模型是带 id 的对象、没密钥；一家标了停用。
+    每家都带着醒目的假接口地址、假密钥变量名，前后两家还带着假密钥原文。
+    """
+    gw = adapter.model_gateway()
+    adapter.running_bot("botalpha", gw)
     resp = adapter.call("GET", au.PROVIDERS)
     body = adapter.ok(resp)
     providers = body["providers"]
-    assert isinstance(providers, list) and providers, "供应商摘要应至少列出内置供应商：%r" % (providers,)
+    assert isinstance(providers, list), "providers 应是数组：%r" % (providers,)
     for p in providers:
         assert {"id", "name", "has_key", "models"} <= set(p), p
         assert isinstance(p["id"], str) and p["id"], p
         assert p["name"] == p["id"], "id 应等于 name：%r" % (p,)
         assert type(p["has_key"]) is bool, "has_key 必须是布尔：%r" % (p,)
         assert isinstance(p["models"], list), p
-        assert all(isinstance(m, str) and m for m in p["models"]), p
+        assert all(isinstance(m, str) and m for m in p["models"]), "models 应是模型名的字符串数组：%r" % (p,)
     ids = [p["id"] for p in providers]
-    assert len(ids) == len(set(ids)), "供应商 id 有重复，下拉里分不清：%r" % ids
+    assert sorted(ids) == sorted([au.VENDOR_A, au.VENDOR_B]), \
+        "应恰好列出网关清单里没停用的两家（停用的那家不列、不重复）：%r" % ids
+    by_id = {p["id"]: p for p in providers}
+    assert by_id[au.VENDOR_A]["has_key"] is True, by_id[au.VENDOR_A]
+    assert by_id[au.VENDOR_B]["has_key"] is False, by_id[au.VENDOR_B]
+    assert by_id[au.VENDOR_A]["models"] == au.VENDOR_A_MODELS, "模型应保持网关给的先后"
+    assert by_id[au.VENDOR_B]["models"] == au.VENDOR_B_MODELS, "带 id 的模型对象应取出名字，先后不变"
     assert body["default"] == {"label": au.DEFAULT_LABEL}
     text = resp.get_data(as_text=True)
+    assert au.FAKE_ENDPOINT_HOST not in text, "供应商摘要里带了网关给的接口地址"
+    for env_name in au.FAKE_KEY_ENVS:
+        assert env_name not in text, "供应商摘要里带了网关给的密钥变量名 %s" % env_name
+    assert au.PROVIDER_KEY not in text, "供应商摘要里带了密钥原文"
     assert "://" not in text, "供应商摘要里带了接口地址"
     hit = re.search(r"[A-Z][A-Z0-9_]*_KEY\b", text)
     assert hit is None, "供应商摘要里带了密钥的环境变量名：%r" % (hit and hit.group(0))
+
+
+def _no_bots(a):
+    pass
+
+
+def _all_stopped(a):
+    a.bot("botalpha", enabled=False, gw_port=au.free_port())     # 端口没人听
+    a.bot("botbravo", enabled=False)
+
+
+def _none_listening(a):
+    a.launchctl.set_default(installed=True, running=False, pid=4242)
+    a.bot("botalpha", gw_port=au.free_port())                    # 端口没人听
+    a.bot("botbravo")                                            # 连网关端口文件都没有
+
+
+NO_GATEWAY_CASES = {"一只bot都没有": _no_bots, "都停用了": _all_stopped, "都没在跑": _none_listening}
+
+
+@pytest.mark.parametrize("setup", list(NO_GATEWAY_CASES.values()), ids=list(NO_GATEWAY_CASES))
+def test_供应商摘要_没有任何网关连得上_回503_unavailable_文案如约(adapter, setup):
+    setup(adapter)
+    body = adapter.expect_error(adapter.call("GET", au.PROVIDERS), 503, "unavailable")
+    assert body["message"] == au.NO_RUNNING_BOT
+
+
+_GW_CURRENT = {"provider": au.CFG_PROVIDER, "model": au.CFG_MODEL}
+UNRECOGNIZED_REPLIES = {
+    "不是JSON": "<html><body>gateway is confused</body></html>",
+    "是JSON但是个数组": [1, 2],
+    "对象里没有providers": {"ok": True, "current": _GW_CURRENT},
+    "providers不是数组": {"ok": True, "current": _GW_CURRENT, "providers": "oops"},
+}
+
+
+@pytest.mark.parametrize("reply", list(UNRECOGNIZED_REPLIES.values()), ids=list(UNRECOGNIZED_REPLIES))
+def test_供应商摘要_网关回了认不出的内容_回500_internal_文案固定(adapter, reply):
+    gw = adapter.gateway().on("GET", au.GW_MODEL, 200, reply)
+    adapter.running_bot("botalpha", gw)
+    body = adapter.expect_error(adapter.call("GET", au.PROVIDERS), 500, "internal")
+    assert body["message"] == au.INTERNAL_MESSAGE
+
+
+SOURCE_CASES = {
+    "当前生效的一组与配置文件里的不同_override": ((au.VENDOR_B, au.VENDOR_B_MODELS[0]), "override"),
+    "当前生效的一组与配置文件里的相同_default": ((au.CFG_PROVIDER, au.CFG_MODEL), "default"),
+}
+
+
+@pytest.mark.parametrize("current,source", list(SOURCE_CASES.values()), ids=list(SOURCE_CASES))
+def test_bots_网关连得上_provider_source按当前生效的一组与配置文件是否相同(adapter, current, source):
+    """配置文件里写的是 CFG_PROVIDER / CFG_MODEL；网关说当前生效的是 current。"""
+    gw = adapter.model_gateway(current=current)
+    adapter.running_bot("botalpha", gw)
+    bots = adapter.ok(adapter.call("GET", au.BOTS))["bots"]
+    assert len(bots) == 1, bots
+    reads = [r for r in gw.requests if (r["method"], r["path"]) == ("GET", au.GW_MODEL)]
+    assert reads, "列 bot 时没有向这只 bot 的网关读当前生效的一组（第 5 节），下面的判断就是空转：%r" % gw.requests
+    assert bots[0]["provider_source"] == source, bots[0]
 
 
 def test_泄密_各种成功和失败的响应里都搜不到假密钥假令牌假聊天号(adapter):
