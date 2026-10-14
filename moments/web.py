@@ -644,6 +644,19 @@ import urllib.request  # noqa: E402
 _urlopen = urllib.request.urlopen  # HTTP 注入点（INTERFACE §10.4），测试换成记录器
 
 
+def _dispatcher_token(bot_dir) -> str:
+    """旧系统调度器的本机接口自 2026-10-11 起要口令：``<频道目录>/.api-token``，一行。
+
+    每次现读、不缓存（调度器启动时文件不在会自己生成一份新的）。读不到、是空的就回空串，
+    调用方按"不带口令"发，行为与以前相同。口令只进请求头，不进日志、不进报错。
+    """
+    try:
+        with open(os.path.join(bot_dir, ".api-token"), encoding="utf-8") as f:
+            return f.read().strip()
+    except (OSError, UnicodeError, TypeError):
+        return ""
+
+
 def _ensure_worker_alive(bot_id: str, chat_id: str, bot_dir: str, cfg: dict = None):
     """POST 该 bot dispatcher 的 /ensure_worker：查活+拉起原子完成（跨平台，替代 tmux）。
     session uuid/slug 由 dispatcher 内部算，这里不再猜（旧版按 mtime 猜 uuid + 手拼
@@ -664,8 +677,10 @@ def _ensure_worker_alive(bot_id: str, chat_id: str, bot_dir: str, cfg: dict = No
         sys.stderr.write(f"[ensure_worker] 未知 bot {bot_id}，跳过 spawn\n")
         return
     try:
+        token = _dispatcher_token(bot_dir)
         req = urllib.request.Request(
-            f"http://127.0.0.1:{port}/ensure_worker", method="POST")
+            f"http://127.0.0.1:{port}/ensure_worker", method="POST",
+            headers={"X-Api-Token": token} if token else {})
         _urlopen(req, timeout=5)
     except Exception as e:
         sys.stderr.write(f"[ensure_worker] {bot_id} 失败(dispatcher 未起?): {e}\n")
