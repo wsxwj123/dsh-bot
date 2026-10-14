@@ -105,12 +105,13 @@ export class Media {
     return fetch(`${this.d.bridgeUrl}/transcribe_file`, { method: 'POST', headers: this.headers(), body: JSON.stringify({ path }), signal: AbortSignal.timeout(TRANSCRIBE_TIMEOUT_MS) })
   }
 
-  /** 合成一段语音，存成 ogg 文件返回路径；失败返回 null（调用方改发文字） */
-  async synthesize(text: string, voiceId: string, emotion?: string, instruct?: string): Promise<string | null> {
+  /** 合成一段语音，存成 ogg 文件返回路径；失败返回 null（调用方改发文字）。
+   *  model 是这只 bot 的 access.json 里的 voiceModel（约定 v0.8 B.3）：非空字符串才带上，没有就由语音桥按全局设置 */
+  async synthesize(text: string, voiceId: string, emotion?: string, instruct?: string, model?: string): Promise<string | null> {
     try {
       const res = await fetch(`${this.d.bridgeUrl}/synthesize_voice`, {
         method: 'POST', headers: this.headers(),
-        body: JSON.stringify({ text, voice_id: voiceId, emotion: emotion || 'NEUTRAL', instruct: instruct || '' }),
+        body: JSON.stringify({ text, voice_id: voiceId, emotion: emotion || 'NEUTRAL', instruct: instruct || '', ...(typeof model === 'string' && model ? { model } : {}) }),
         signal: AbortSignal.timeout(90_000),
       })
       if (!res.ok) throw new Error(`voice-bridge ${res.status}`)
