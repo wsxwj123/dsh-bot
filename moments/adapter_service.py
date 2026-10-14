@@ -55,6 +55,7 @@ BOT_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}\Z")
 #: 请求体上限。五个接口的请求体都是几十个字节，超过这个数的不读、直接按不合规拒绝。
 MAX_BODY = 64 * 1024
 #: 列表接口向每只 bot 的网关读一次的超时。壳的读操作只等 5 秒，一只 bot 最多读两次。
+#: 供应商摘要问每一只也用它。
 GATEWAY_READ_TIMEOUT = 2.0
 #: 重启从发命令算起的总时限（补充文件 4.5：50 秒内没等到就回 failed；壳等 60 秒）。
 RESTART_BUDGET = 50.0
@@ -72,6 +73,7 @@ KEY_READY = ("ok", "none")
 NOT_SAVED = "这只 bot 的进程现在连不上，这次没有保存"
 NOT_SAVED_SLOW = "这只 bot 的进程没有及时回应，这次没有保存"
 MAYBE_SAVED = "这只 bot 的进程没有及时回应，这次改动可能已经保存，请刷新后确认"
+NO_RUNNING_BOT = "没有正在运行的 bot，暂时读不到供应商清单"
 
 UNAUTHORIZED = {"ok": False, "code": "unauthorized", "message": "令牌缺失或不对"}
 INTERNAL = {"ok": False, "code": "internal", "message": "内部错误"}
@@ -381,22 +383,33 @@ def _bots():
 
 
 def _provider_catalog():
-    """4.3 的供应商列表 ``[{"id", "name", "has_key", "models"}]``，``models`` 是模型名的数组。
+    """4.3 的供应商列表 ``[{"id", "name", "has_key", "models"}]``，向正在运行的 bot 的网关读来。
 
-    **还没实现，来源要两边定**（见开发交回报告的接口问题）。补充文件 4.4 与验收用例要求
-    「供应商在不在、模型在不在」两项校验对网关零请求、一只 bot 都没有时也要列得出内置供应商，
-    所以这份列表不能经网关读；可离线能读到的只有共用清单 ``<DSH_BOT_HOME>/providers.json``
-    里自建供应商的名字和模型。剩下两样没有离线出处：
+    补充文件 4.3、5.1：所有 bot 共用一份清单，按 bot 编号的字典序问第一只连得上的，读的是
+    ``GET /v1/model``（映射见 ``_catalog``），不读任何本地的凭据文件。停用的 bot、没有网关
+    文件的 bot 跳过，不发请求。
 
-    - 内置供应商有哪些模型：只有 dsh 进程在运行时才回报，网关拿到也只放在内存里；
-    - ``has_key``：密钥有没有只写在凭据文件里。管理台这一侧至今不读凭据文件（都是问网关），
-      让这个服务去读是新开一个读取面，需求说明的敏感面声明里没有这一条。
+    - 没连上、发出后断了或超时：这是只读请求，换下一只问不会多写什么；
+    - 连上了但回的东西认不出（不是 JSON、状态码不对、形状不对）：不再问别的，抛，外层回 500；
+    - 一只都问不到（都停用了、都没在跑、一只 bot 都没有）：503。
 
-    定下来之前这里一律抛：``GET /providers`` 与带 ``provider_id`` 的换供应商都回 500，
-    不向任何网关发请求，不写任何东西。换供应商在这之后的部分（``_require_offered`` 与
-    ``_switch``）已经做完，只认上面那个返回形状，不管它从哪来。
+    换供应商的第 4 步不走这里：它只问那只 bot 自己的网关（见 ``_set_provider``）。
     """
-    raise NotImplementedError("provider catalog source undecided")
+    configs = config_sources.effective_configs()
+    for entry in _bot_entries():
+        if not bot_launchd.enabled_of(entry["id"]):
+            continue
+        channel = config_sources.channel_dir(configs.get(entry["id"]) or {})
+        if not gateway_client.available(channel):
+            continue
+        try:
+            info = gateway_client.model_info(channel, timeout=GATEWAY_READ_TIMEOUT)
+        except Exception as e:              # noqa: BLE001  按类型分流：网络上的事换下一只，别的往外抛
+            if gateway_client.net_kind(e) is None:
+                raise
+            continue
+        return _catalog(info)
+    raise Refuse(503, "unavailable", NO_RUNNING_BOT)
 
 
 def _catalog(info):
