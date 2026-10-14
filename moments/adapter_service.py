@@ -426,9 +426,9 @@ def _set_provider(bot_id):
     if not has_provider and not has_effort:
         raise _invalid("请求里没有要改的内容：给 provider_id 加 model，或者给 effort")
     _require_bot(bot_id)
+    _require_enabled(bot_id)                # 补充文件 4.4 第 3 步：停用先于清单校验，停用时什么都不读
     if has_provider:
         _require_offered(body["provider_id"], body["model"])
-    _require_enabled(bot_id)
     channel = config_sources.channel_dir(config_sources.effective_config(bot_id) or {})
     if not gateway_client.available(channel):
         raise Refuse(503, "unavailable", NOT_SAVED)
