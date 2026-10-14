@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
-"""适配服务换供应商（INTERFACE-适配服务 4.4）前三步的先后：没过时对任何网关零请求。
+"""适配服务换供应商（INTERFACE-适配服务 4.4）五步的先后。
+
+前三步没过时对任何网关零请求；第 4 步向这只 bot 的网关读一次清单，没过时只有那一次读、
+没有写请求；第 5 步都过了才写，强度被拒时把供应商和模型换回去。
 
 bot 照真配置的形状摆在总闸给的临时目录里，名单、启停走真函数。网关不起桩：
 ``gateway_client._call`` 是适配服务到网关的唯一出口，换成记账的替身，谁走到都记下来。
-
-第 4、5 步（读清单、校验、写请求）的单测还没有：清单的字段形状未定，见交回报告。
 """
 import json
 import os
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -105,3 +107,135 @@ def test_第3步_bot停用_回409_stopped_先于读清单_对任何网关零请�
     status, got = _post(client, body)
     assert (status, got["code"]) == (409, "stopped"), got
     assert gateway_calls == [], "停用的 bot 不该为它读清单，也不该发写请求：%r" % gateway_calls
+
+
+# ---------------------------------------------------------------- 第 4、5 步
+
+GW_MODEL, GW_EFFORT = "/v1/model", "/v1/effort"
+CFG_PAIR = {"provider": "deepseek-official", "model": "deepseek-flash"}     # 配置文件里写的那一组
+
+
+def _model_reply(current):
+    """``GET /v1/model`` 的返回体（补充文件 5.1 的形状）。停用那家的模型也在 choices 里。"""
+    choices = [("deepseek-official", "deepseek-flash"), ("fake-vendor-b", "vb-small"),
+               ("deepseek-official", "deepseek-pro"), ("fake-vendor-off", "off-1")]
+    return {"ok": True, "current": dict(current), "config": dict(CFG_PAIR),
+            "choices": [{"provider": p, "model": m} for p, m in choices],
+            "providers": [
+                {"name": "deepseek-official", "models": 2, "key": "ok", "keyEnv": None, "enabled": True},
+                {"name": "fake-vendor-b", "models": 1, "key": "ok", "keyEnv": None, "enabled": True},
+                {"name": "fake-vendor-off", "models": 1, "key": "ok", "keyEnv": None, "enabled": False}]}
+
+
+class FakeGateway:
+    """这只 bot 的网关：照补充文件第 5 节应答四种请求，记下每一次 ``(方法, 路径, 请求体)``。
+
+    起初生效的是配置文件那一组。换模型时清掉单独指定的强度（适配服务正是为此先记下原来的
+    强度）。``refuse_effort`` 里的档位回 409：这只 bot 现在用的模型不支持它。
+    """
+
+    def __init__(self):
+        self.current, self.effort, self.refuse_effort = dict(CFG_PAIR), None, ()
+        self.calls = []
+
+    def __call__(self, _channel_dir, method, path, body=None, timeout=10):
+        self.calls.append((method, path, body))
+        if (method, path) == ("GET", GW_MODEL):
+            return 200, _model_reply(self.current)
+        if (method, path) == ("POST", GW_MODEL):
+            provider, model = body["spec"].split("/", 1)
+            self.current, self.effort = {"provider": provider, "model": model}, None
+            return 200, {"ok": True, "text": "ok", "current": dict(self.current)}
+        if (method, path) == ("GET", GW_EFFORT):
+            return 200, {"ok": True, "current": self.effort}
+        if (method, path) == ("POST", GW_EFFORT):
+            if body["effort"] in self.refuse_effort:
+                return 409, {"ok": False, "error": "unsupported"}
+            self.effort = body["effort"]
+            return 200, {"ok": True}
+        return 404, {}
+
+
+@pytest.fixture
+def gateway(monkeypatch):
+    gw = FakeGateway()
+    monkeypatch.setattr(gateway_client, "_call", gw)
+    return gw
+
+
+READ_CATALOG = ("GET", GW_MODEL, None)
+
+STEP4 = {
+    "没有这家供应商": ({"provider_id": "no-such-vendor", "model": "vb-small"}, 404, "unknown_provider"),
+    "网关标了停用的那家": ({"provider_id": "fake-vendor-off", "model": "off-1"}, 404, "unknown_provider"),
+    "别家才有的模型": ({"provider_id": "fake-vendor-b", "model": "deepseek-flash"}, 422, "invalid"),
+    "哪家都没有的模型": ({"provider_id": "fake-vendor-b", "model": "no-such-model"}, 422, "invalid"),
+}
+
+
+@pytest.mark.parametrize("effort", [None, "high"], ids=["不带强度", "带强度"])
+@pytest.mark.parametrize("body,status,code", list(STEP4.values()), ids=list(STEP4))
+def test_第4步_清单校验没过_只有那一次读清单_没有写请求(client, gateway, body, status, code, effort):
+    _put_bot(enabled=True)
+    if effort:
+        body = {**body, "effort": effort}
+    got_status, got = _post(client, body)
+    assert (got_status, got["code"]) == (status, code), got
+    assert gateway.calls == [READ_CATALOG], "第 4 步没过：只许那一次读，不许写：%r" % gateway.calls
+
+
+READ_FAILS = {"拒连": urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")),
+              "超时": TimeoutError("timed out")}
+
+
+@pytest.mark.parametrize("error", list(READ_FAILS.values()), ids=list(READ_FAILS))
+def test_第4步_读清单时网关连不上或没回应_回503_什么都没写(client, monkeypatch, error):
+    _put_bot(enabled=True)
+    calls = []
+
+    def _call(_channel_dir, method, path, body=None, timeout=10):
+        calls.append((method, path, body))
+        raise error
+
+    monkeypatch.setattr(gateway_client, "_call", _call)
+    status, got = _post(client, SWITCH)
+    assert (status, got["code"]) == (503, "unavailable"), got
+    assert calls == [READ_CATALOG], calls
+
+
+def test_第4步_清单认不出_回500_内部错误_什么都没写(client, monkeypatch):
+    _put_bot(enabled=True)
+    calls = []
+
+    def _call(_channel_dir, method, path, body=None, timeout=10):
+        calls.append((method, path, body))
+        return 200, {"ok": True, "current": dict(CFG_PAIR)}          # 没有 providers
+
+    monkeypatch.setattr(gateway_client, "_call", _call)
+    status, got = _post(client, SWITCH)
+    assert (status, got) == (500, {"ok": False, "code": "internal", "message": "内部错误"})
+    assert calls == [READ_CATALOG], calls
+
+
+def test_第5步_校验过了才写_一次读一次写_换到另一家new_segment为真(client, gateway):
+    _put_bot(enabled=True)
+    status, got = _post(client, SWITCH)
+    assert status == 200 and got["new_segment"] is True, got
+    assert gateway.calls == [READ_CATALOG, ("POST", GW_MODEL, {"spec": "fake-vendor-b/vb-small"})]
+
+
+@pytest.mark.parametrize("prior", ["low", None], ids=["原来单独指定过强度", "原来没有单独指定"])
+def test_第5步_强度被拒_把供应商和模型换回去_原来的强度设回去(client, gateway, prior):
+    _put_bot(enabled=True)
+    gateway.effort, gateway.refuse_effort = prior, ("max",)
+    status, got = _post(client, {**SWITCH, "effort": "max"})
+    assert (status, got["code"]) == (422, "invalid"), got
+    restore = [("POST", GW_EFFORT, {"effort": prior})] if prior else []
+    assert gateway.calls == [
+        READ_CATALOG,
+        ("GET", GW_EFFORT, None),                                     # 先记下原来的强度
+        ("POST", GW_MODEL, {"spec": "fake-vendor-b/vb-small"}),
+        ("POST", GW_EFFORT, {"effort": "max"}),                       # 被拒
+        ("POST", GW_MODEL, {"spec": "deepseek-official/deepseek-flash"}),   # 换回去
+    ] + restore, gateway.calls
+    assert (gateway.current, gateway.effort) == (CFG_PAIR, prior), "没有换回原样"
