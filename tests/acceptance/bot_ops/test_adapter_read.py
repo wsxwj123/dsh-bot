@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """适配服务验收：三个只读接口的返回形状，以及"响应里没有敏感内容"。
 
-依据：INTERFACE-适配约定-v0.3.md 5.1 到 5.3，INTERFACE-适配服务.md 4.1 到 4.3。不读实现。
+依据：INTERFACE-适配约定-v0.3.md 5.1 到 5.3，INTERFACE-适配服务.md 4.1 到 4.3、5.1。不读实现。
 """
+import copy
 import re
 import time
 
@@ -108,10 +109,11 @@ def test_bots_状态与状态文字如约(adapter, setup, state, text):
 
 
 def test_供应商摘要_每项形状如约_不带接口地址和密钥变量名(adapter):
-    """清单是向正在运行的 bot 的网关读来的（补充文件 4.3、第 5 节）。
+    """清单是向正在运行的 bot 的网关读来的（补充文件 4.3、5.1）。
 
-    假网关给三家：一家模型是字符串、有密钥；一家模型是带 id 的对象、没密钥；一家标了停用。
-    每家都带着醒目的假接口地址、假密钥变量名，前后两家还带着假密钥原文。
+    假网关照 5.1 的形状给三家：A 的 key 是 ok；B 的 key 是 missing、keyEnv 是醒目的假变量名、
+    note 里夹着假接口地址；第三家标了停用。模型名只在 choices 里，各家条目交错排列；
+    providers[].models 只是个数（B 的是 null）。
     """
     gw = adapter.model_gateway()
     adapter.running_bot("botalpha", gw)
@@ -124,25 +126,68 @@ def test_供应商摘要_每项形状如约_不带接口地址和密钥变量名
         assert isinstance(p["id"], str) and p["id"], p
         assert p["name"] == p["id"], "id 应等于 name：%r" % (p,)
         assert type(p["has_key"]) is bool, "has_key 必须是布尔：%r" % (p,)
-        assert isinstance(p["models"], list), p
+        assert isinstance(p["models"], list), "models 应是模型名数组，不是网关给的个数：%r" % (p,)
         assert all(isinstance(m, str) and m for m in p["models"]), "models 应是模型名的字符串数组：%r" % (p,)
+        leaked = sorted(set(p) & set(au.GW_ONLY_KEYS))
+        assert not leaked, "网关的 %s 不该往外带：%r" % (leaked, p)
     ids = [p["id"] for p in providers]
     assert sorted(ids) == sorted([au.VENDOR_A, au.VENDOR_B]), \
         "应恰好列出网关清单里没停用的两家（停用的那家不列、不重复）：%r" % ids
     by_id = {p["id"]: p for p in providers}
-    assert by_id[au.VENDOR_A]["has_key"] is True, by_id[au.VENDOR_A]
-    assert by_id[au.VENDOR_B]["has_key"] is False, by_id[au.VENDOR_B]
-    assert by_id[au.VENDOR_A]["models"] == au.VENDOR_A_MODELS, "模型应保持网关给的先后"
-    assert by_id[au.VENDOR_B]["models"] == au.VENDOR_B_MODELS, "带 id 的模型对象应取出名字，先后不变"
+    assert by_id[au.VENDOR_A]["has_key"] is True, "key 为 ok 应映射成 has_key 为真：%r" % by_id[au.VENDOR_A]
+    assert by_id[au.VENDOR_B]["has_key"] is False, "key 为 missing 应映射成 has_key 为假：%r" % by_id[au.VENDOR_B]
+    assert by_id[au.VENDOR_A]["models"] == au.VENDOR_A_MODELS, "应取 choices 里这一家的模型，保持 choices 里的先后"
+    assert by_id[au.VENDOR_B]["models"] == au.VENDOR_B_MODELS, "应取 choices 里这一家的模型，保持 choices 里的先后"
     assert body["default"] == {"label": au.DEFAULT_LABEL}
     text = resp.get_data(as_text=True)
-    assert au.FAKE_ENDPOINT_HOST not in text, "供应商摘要里带了网关给的接口地址"
     for env_name in au.FAKE_KEY_ENVS:
-        assert env_name not in text, "供应商摘要里带了网关给的密钥变量名 %s" % env_name
-    assert au.PROVIDER_KEY not in text, "供应商摘要里带了密钥原文"
+        assert env_name not in text, "供应商摘要里带了网关给的 keyEnv（密钥的环境变量名）%s" % env_name
+    assert au.FAKE_ENDPOINT_HOST not in text, "供应商摘要里带了接口地址（网关 note 里的）"
     assert "://" not in text, "供应商摘要里带了接口地址"
+    assert au.PROVIDER_KEY not in text, "供应商摘要里带了密钥原文"
     hit = re.search(r"[A-Z][A-Z0-9_]*_KEY\b", text)
     assert hit is None, "供应商摘要里带了密钥的环境变量名：%r" % (hit and hit.group(0))
+
+
+HAS_KEY_CASES = {"ok_密钥已配": ("ok", True), "none_这家不需要密钥": ("none", True),
+                 "missing_缺密钥": ("missing", False), "unknown_情况不明": ("unknown", False)}
+
+
+@pytest.mark.parametrize("key,has_key", list(HAS_KEY_CASES.values()), ids=list(HAS_KEY_CASES))
+def test_供应商摘要_网关key的四种取值_has_key按约映射(adapter, key, has_key):
+    """补充文件 5.1：key 为 ok 或 none 时 has_key 为真，为 missing 或 unknown 时为假。"""
+    providers = au.gateway_providers()
+    next(p for p in providers if p["name"] == au.VENDOR_A)["key"] = key       # 只改 A 这一家
+    gw = adapter.model_gateway(providers=providers)
+    adapter.running_bot("botalpha", gw)
+    by_id = {p["id"]: p for p in adapter.ok(adapter.call("GET", au.PROVIDERS))["providers"]}
+    assert au.VENDOR_A in by_id, "摘要里没有 %s：%r" % (au.VENDOR_A, by_id)
+    assert by_id[au.VENDOR_A]["has_key"] is has_key, \
+        "网关说 key 为 %r，has_key 应为 %r：%r" % (key, has_key, by_id[au.VENDOR_A])
+
+
+def test_供应商摘要_网关标了停用的供应商_不出现在摘要里(adapter):
+    """补充文件 4.3、5.1：enabled 为假的不列。停用那家 key 是 ok、choices 里也有它的模型，照样不列。"""
+    gw = adapter.model_gateway()
+    adapter.running_bot("botalpha", gw)
+    resp = adapter.call("GET", au.PROVIDERS)
+    ids = [p["id"] for p in adapter.ok(resp)["providers"]]
+    assert ids, "摘要一家都没列，\"停用的不出现\"就说明不了什么"
+    assert au.VENDOR_OFF not in ids, "网关标了停用的 %s 出现在摘要里：%r" % (au.VENDOR_OFF, ids)
+    text = resp.get_data(as_text=True)
+    for word in [au.VENDOR_OFF] + au.VENDOR_OFF_MODELS:
+        assert word not in text, "摘要里还能搜到停用那家的 %r（名字或模型被归到了别家）" % word
+
+
+@pytest.mark.parametrize("choices", [au.OMIT, None], ids=["没有choices键", "choices是null"])
+def test_供应商摘要_网关没给choices_仍200_各家models为空数组(adapter, choices):
+    """补充文件 5.1：choices 缺失或不是数组时当作空数组，不算认不出（网关刚启动时会这样）。"""
+    gw = adapter.model_gateway(choices=choices)
+    adapter.running_bot("botalpha", gw)
+    providers = adapter.ok(adapter.call("GET", au.PROVIDERS))["providers"]
+    assert sorted(p["id"] for p in providers) == sorted([au.VENDOR_A, au.VENDOR_B]), providers
+    for p in providers:
+        assert p["models"] == [], "没有 choices 时 %s 的 models 应为空数组（不是网关给的个数）：%r" % (p["id"], p)
 
 
 def _no_bots(a):
@@ -170,39 +215,58 @@ def test_供应商摘要_没有任何网关连得上_回503_unavailable_文案�
     assert body["message"] == au.NO_RUNNING_BOT
 
 
-_GW_CURRENT = {"provider": au.CFG_PROVIDER, "model": au.CFG_MODEL}
+#: 除了说明里那一处不对，其余照 5.1 的形状齐全，确保"认不出"只因为那一处
 UNRECOGNIZED_REPLIES = {
     "不是JSON": "<html><body>gateway is confused</body></html>",
     "是JSON但是个数组": [1, 2],
-    "对象里没有providers": {"ok": True, "current": _GW_CURRENT},
-    "providers不是数组": {"ok": True, "current": _GW_CURRENT, "providers": "oops"},
+    "对象里没有providers": au.model_reply(providers=au.OMIT),
+    "providers不是数组": au.model_reply(providers="oops"),
 }
 
 
 @pytest.mark.parametrize("reply", list(UNRECOGNIZED_REPLIES.values()), ids=list(UNRECOGNIZED_REPLIES))
 def test_供应商摘要_网关回了认不出的内容_回500_internal_文案固定(adapter, reply):
-    gw = adapter.gateway().on("GET", au.GW_MODEL, 200, reply)
+    gw = adapter.gateway().on("GET", au.GW_MODEL, 200, copy.deepcopy(reply))
     adapter.running_bot("botalpha", gw)
     body = adapter.expect_error(adapter.call("GET", au.PROVIDERS), 500, "internal")
     assert body["message"] == au.INTERNAL_MESSAGE
 
 
+_A = au.CFG_PAIR                                  # 配置文件里写的那一组
+_B = (au.VENDOR_B, au.VENDOR_B_MODELS[0])
+#: 网关返回里的 current / config（OMIT 表示返回里没有 config）-> 期望的 provider_source
 SOURCE_CASES = {
-    "当前生效的一组与配置文件里的不同_override": ((au.VENDOR_B, au.VENDOR_B_MODELS[0]), "override"),
-    "当前生效的一组与配置文件里的相同_default": ((au.CFG_PROVIDER, au.CFG_MODEL), "default"),
+    "current与config相同_default": (dict(current=_A, config=_A), "default"),
+    "current与config不同_override": (dict(current=_B, config=_A), "override"),
+    "网关的config与配置文件不同_按网关的config比_default": (dict(current=_B, config=_B), "default"),
+    "网关没给config_拿配置文件那一组比_override": (dict(current=_B, config=au.OMIT), "override"),
 }
 
 
-@pytest.mark.parametrize("current,source", list(SOURCE_CASES.values()), ids=list(SOURCE_CASES))
-def test_bots_网关连得上_provider_source按当前生效的一组与配置文件是否相同(adapter, current, source):
-    """配置文件里写的是 CFG_PROVIDER / CFG_MODEL；网关说当前生效的是 current。"""
-    gw = adapter.model_gateway(current=current)
+@pytest.mark.parametrize("reply,source", list(SOURCE_CASES.values()), ids=list(SOURCE_CASES))
+def test_bots_网关连得上_provider_source按current与config是否同一组(adapter, reply, source):
+    """补充文件 5.1：current 与 config 同一组为 default，不同为 override；返回里没有 config 时
+    拿这只 bot 配置文件里那一组比。配置文件里写的是 CFG_PROVIDER / CFG_MODEL。"""
+    gw = adapter.model_gateway(**reply)
     adapter.running_bot("botalpha", gw)
     bots = adapter.ok(adapter.call("GET", au.BOTS))["bots"]
     assert len(bots) == 1, bots
     reads = [r for r in gw.requests if (r["method"], r["path"]) == ("GET", au.GW_MODEL)]
     assert reads, "列 bot 时没有向这只 bot 的网关读当前生效的一组（第 5 节），下面的判断就是空转：%r" % gw.requests
-    assert bots[0]["provider_source"] == source, bots[0]
+    assert bots[0]["provider_source"] == source, \
+        "provider_source 应为 %s，实际 %r：%r" % (source, bots[0]["provider_source"], bots[0])
+
+
+def test_bots_只单独指定了思考强度_current与config相同_provider_source为default(adapter):
+    """补充文件 5.1：只单独指定了思考强度、供应商和模型没变的，仍算 default。"""
+    gw = adapter.model_gateway(effort="high")         # current 与 config 都是配置文件里那一组
+    adapter.running_bot("botalpha", gw)
+    bots = adapter.ok(adapter.call("GET", au.BOTS))["bots"]
+    assert len(bots) == 1, bots
+    effort = (bots[0]["provider"] or {}).get("effort")
+    assert effort == "high", "网关说单独指定了思考强度 high，provider.effort 却是 %r，下面的判断就是空转" % (effort,)
+    assert bots[0]["provider_source"] == "default", \
+        "只改了思考强度，provider_source 应为 default，实际 %r：%r" % (bots[0]["provider_source"], bots[0])
 
 
 def test_泄密_各种成功和失败的响应里都搜不到假密钥假令牌假聊天号(adapter):
