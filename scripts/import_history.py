@@ -76,15 +76,40 @@ def read_old_dialog(old_dir: str, old_bot: str | None, chat: str, days: int,
     import glob
     files = [os.path.join(proj, f"{su}.jsonl")] if su and os.path.exists(os.path.join(proj, f"{su}.jsonl")) \
         else glob.glob(os.path.join(proj, "*.jsonl"))
+    return read_session_files(files, chat, days, since_ms)
+
+
+class ImportTimeout(Exception):
+    """切进导入（switch_in）到了调用方给的时限还没读完旧记录。抛出时账本一条都还没写。"""
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() > deadline:
+        raise ImportTimeout()
+
+
+def read_session_files(files: list[str], chat: str, days: int, since_ms: int = 0,
+                       strict: bool = False, deadline: float | None = None) -> list[tuple[str, str, int]]:
+    """从给定的 Claude Code 会话文件里取这个私聊的 [(who, text, ts_ms)]，取法与时间窗同 read_old_dialog。
+
+    strict 为假（命令行）：读不了的文件跳过，坏字节按替换字符读。strict 为真（适配服务切进时）：
+    文件打不开、读不了、不是 UTF-8 都把异常抛给调用方，由它整次不导。两种模式下个别不是 JSON 的行都跳过。
+    deadline 是 time.monotonic() 的时刻，到了还没读完抛 ImportTimeout。
+    """
     cutoff = time.time() - days * 86400
     out, seen = [], set()
     for path in files:
+        _check_deadline(deadline)
         try:
-            fh = open(path, encoding="utf-8", errors="replace")
+            fh = open(path, encoding="utf-8", errors="strict" if strict else "replace")
         except OSError:
+            if strict:
+                raise
             continue
         with fh:
-            for line in fh:
+            for n, line in enumerate(fh):
+                if n % 1000 == 999:
+                    _check_deadline(deadline)
                 try:
                     o = json.loads(line)
                 except Exception:
@@ -224,26 +249,32 @@ def _read_watermark(bot: str, chat: str) -> int:
     切走前最后一条若是她的回复，回程补料会把这条再数一遍（内容有去重、账不重，但白记数）。
     只读打开（不建目录、不建文件）；账本不在、没有该聊天的行、或读不了，都算取不到。
     """
-    path = _ledger_path(bot)
-    if not os.path.exists(path):
-        raise SystemExit(WM_EXIT)
     try:
-        db = sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True, timeout=5)
-        try:
-            row = db.execute(
-                "SELECT MAX(t) FROM ("
-                " SELECT MAX(ts) AS t FROM inbound WHERE chat_id = ?"
-                " UNION ALL"
-                " SELECT MAX(COALESCE(sent_at, created_at)) AS t FROM outbound"
-                "  WHERE chat_id = ? AND kind = 'text' AND state IN ('sent', 'ambiguous'))",
-                (chat, chat)).fetchone()
-        finally:
-            db.close()
+        mark = _watermark_ms(bot, chat)
     except Exception as e:  # 文件坏了、被锁、不是账本：只报类名，不带路径和内容
         raise SystemExit(f"读不了账本（{type(e).__name__}），拿不到水位线。手动指定：--since <unix 毫秒>")
-    if not row or row[0] is None:
+    if mark is None:
         raise SystemExit(WM_EXIT)
-    return int(row[0])
+    return mark
+
+
+def _watermark_ms(bot: str, chat: str) -> int | None:
+    """水位线（口径见 _read_watermark）；账本不在、里面没有这个聊天的行 → None，读不了照抛。"""
+    path = _ledger_path(bot)
+    if not os.path.exists(path):
+        return None
+    db = sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        row = db.execute(
+            "SELECT MAX(t) FROM ("
+            " SELECT MAX(ts) AS t FROM inbound WHERE chat_id = ?"
+            " UNION ALL"
+            " SELECT MAX(COALESCE(sent_at, created_at)) AS t FROM outbound"
+            "  WHERE chat_id = ? AND kind = 'text' AND state IN ('sent', 'ambiguous'))",
+            (chat, chat)).fetchone()
+    finally:
+        db.close()
+    return int(row[0]) if row and row[0] is not None else None
 
 
 def mark_reseed(db: sqlite3.Connection, chat: str) -> int:
@@ -294,6 +325,35 @@ def run_incremental(a, old: str, promises: str, chat: str) -> None:
     tail = "这个聊天还活着的会话已标成「下一轮重新取前情」，她下一轮就会带上这段。" if marked \
         else "她下一轮开新会话时会照常带上这段前情。"
     print(f"已导入：聊天记录 {n} 条，承诺 {m} 条。{tail}")
+
+
+#: 切进时账本里还没有这个聊天（第一次切进）就导最近这么多天，同命令行 --days 的缺省
+SWITCH_IN_DAYS = 30
+
+
+def switch_in(bot: str, chat: str, promises: str | None, session_files: list[str],
+              deadline: float | None = None) -> tuple[int, int]:
+    """切进新系统时的增量导入（适配服务，约定 5.9）。返回 (聊天记录条数, 承诺条数)。
+
+    调用方已挑好要读的文件（约定只许读 .promises.json 与会话目录下的 *.jsonl，软链已拒）、
+    确认过网关没在跑；promises 为 None 表示没有承诺文件。
+    水位线同 --since auto；账本里还没有这个聊天时导最近 SWITCH_IN_DAYS 天。先读完全部旧记录再写账本：
+    哪个文件读不了、不是 UTF-8，承诺文件解析不出，或者到了 deadline，都在写之前抛出，账本一条不写。
+    写法同 run_incremental，只是没有新记录时承诺照样导：重复的承诺会被去重，所以再导一次条数都是 0。
+    """
+    since = _watermark_ms(bot, chat) or 0
+    rows = read_session_files(session_files, chat, SWITCH_IN_DAYS, since, strict=True, deadline=deadline)
+    items = pending_promises(promises, chat, int(time.time() * 1000)) if promises else []
+    _check_deadline(deadline)
+    db = _open_ledger(bot)
+    try:
+        n = import_dialog(db, chat, rows, allow_existing=True)
+        m = import_promises(db, items)
+        if n:
+            mark_reseed(db, chat)
+    finally:
+        db.close()
+    return n, m
 
 
 # ─── 旧承诺 ───
