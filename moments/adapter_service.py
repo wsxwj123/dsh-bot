@@ -64,6 +64,13 @@ MAX_ROW_WORKERS = 8
 CONFIG_DEFAULT_PROVIDER = "deepseek-official"
 CONFIG_DEFAULT_MODEL = "deepseek-flash"
 
+#: 网关 ``POST /v1/model`` 把 spec 截到 200 个字符（管理台模型页同一个上限）：超了就别发。
+MAX_SPEC = 200
+
+NOT_SAVED = "这只 bot 的进程现在连不上，这次没有保存"
+NOT_SAVED_SLOW = "这只 bot 的进程没有及时回应，这次没有保存"
+MAYBE_SAVED = "这只 bot 的进程没有及时回应，这次改动可能已经保存，请刷新后确认"
+
 UNAUTHORIZED = {"ok": False, "code": "unauthorized", "message": "令牌缺失或不对"}
 INTERNAL = {"ok": False, "code": "internal", "message": "内部错误"}
 
@@ -254,6 +261,18 @@ def _config_brain(cfg):
             "effort": effort if isinstance(effort, str) and effort in EFFORT_LEVELS else None}
 
 
+def _effort_override(channel, timeout=gateway_client.EFFORT_TIMEOUT):
+    """``GET /v1/effort`` 的 current：这只 bot 单独指定的思考强度，没有单独指定是 None。
+
+    网关回的东西认不出就抛；网络上的事原样抛给调用方（各处的容错不一样，由调用方定）。
+    """
+    code, got = gateway_client.effort_get(channel, timeout=timeout)
+    if code != 200 or not isinstance(got, dict):
+        raise RuntimeError("unexpected gateway reply")
+    current = got.get("current")
+    return current if _text(current) else None
+
+
 def _live_brain(channel):
     """经这只 bot 自己的网关读当前生效的那一组；连不上、超时、回的东西认不出 → None。
 
@@ -272,13 +291,11 @@ def _live_brain(channel):
             or not _text(current.get("model")):
         return None
     config = info.get("config") if isinstance(info.get("config"), dict) else {}
-    effort = None
     try:
-        code, got = gateway_client.effort_get(channel, timeout=GATEWAY_READ_TIMEOUT)
-        if code == 200 and isinstance(got, dict) and isinstance(got.get("current"), str) \
-                and got["current"] in EFFORT_LEVELS:
-            effort = got["current"]
+        effort = _effort_override(channel, GATEWAY_READ_TIMEOUT)
     except Exception:                       # noqa: BLE001  思考强度读不到只少这一项
+        effort = None
+    if effort not in EFFORT_LEVELS:         # 聊天里设的别的档位不在约定的四档里，不往外报
         effort = None
     return {"provider": current["provider"], "model": current["model"],
             "config_provider": config.get("provider"), "config_model": config.get("model"),
@@ -361,15 +378,35 @@ def _bots():
 
 
 def _provider_catalog():
-    """4.3 的供应商列表 ``[{"id", "name", "has_key", "models"}]``。
+    """4.3 的供应商列表 ``[{"id", "name", "has_key", "models"}]``，``models`` 是模型名的数组。
 
-    **还没实现，等两边定来源**（开发交回报告里的接口问题第 1 条）：补充文件 4.4 与验收用例
-    要求「供应商在不在、模型在不在」两项校验对网关零请求，可本系统这一侧只有经网关读清单
-    这一种现成读法，内置供应商的模型名更是只有 dsh 运行时才回报、没有任何离线出处。
+    **还没实现，来源要两边定**（见开发交回报告的接口问题）。补充文件 4.4 与验收用例要求
+    「供应商在不在、模型在不在」两项校验对网关零请求、一只 bot 都没有时也要列得出内置供应商，
+    所以这份列表不能经网关读；可离线能读到的只有共用清单 ``<DSH_BOT_HOME>/providers.json``
+    里自建供应商的名字和模型。剩下两样没有离线出处：
+
+    - 内置供应商有哪些模型：只有 dsh 进程在运行时才回报，网关拿到也只放在内存里；
+    - ``has_key``：密钥有没有只写在凭据文件里。管理台这一侧至今不读凭据文件（都是问网关），
+      让这个服务去读是新开一个读取面，需求说明的敏感面声明里没有这一条。
+
     定下来之前这里一律抛：``GET /providers`` 与带 ``provider_id`` 的换供应商都回 500，
-    不向任何网关发请求，不写任何东西。
+    不向任何网关发请求，不写任何东西。换供应商在这之后的部分（``_require_offered`` 与
+    ``_switch``）已经做完，只认上面那个返回形状，不管它从哪来。
     """
     raise NotImplementedError("provider catalog source undecided")
+
+
+def _require_offered(provider_id, model):
+    """换供应商的两项校验（补充文件 4.4）：只看 4.3 的列表，不找任何网关。"""
+    for provider in _provider_catalog():
+        if provider["id"] != provider_id:
+            continue
+        if model not in provider["models"]:
+            raise _invalid("这家供应商没有这个模型")
+        if len(provider_id) + 1 + len(model) > MAX_SPEC:
+            raise _invalid("模型名太长，这只 bot 的进程收不下")
+        return
+    raise Refuse(404, "unknown_provider", "没有这家供应商")
 
 
 def _providers():
@@ -390,30 +427,109 @@ def _set_provider(bot_id):
         raise _invalid("请求里没有要改的内容：给 provider_id 加 model，或者给 effort")
     _require_bot(bot_id)
     if has_provider:
-        _provider_catalog()                 # 见该函数：来源未定，这条路先不通
+        _require_offered(body["provider_id"], body["model"])
     _require_enabled(bot_id)
     channel = config_sources.channel_dir(config_sources.effective_config(bot_id) or {})
-    unavailable = Refuse(503, "unavailable", "这只 bot 的进程现在连不上，这次没有保存")
     if not gateway_client.available(channel):
-        raise unavailable
+        raise Refuse(503, "unavailable", NOT_SAVED)
+    # 到这里校验全部通过，下面才开始找这只 bot 自己的网关。
+    before = after = prior_effort = None
+    if has_provider:
+        if has_effort:
+            # 强度被拒时要把供应商和模型换回去，而网关换模型会清掉单独指定的强度：先记下原来的。
+            prior_effort = _gateway(lambda: _effort_override(channel), NOT_SAVED_SLOW)
+        before, after = _switch(channel, body["provider_id"], body["model"])
+    if has_effort:
+        try:
+            _apply_effort(channel, body["effort"])
+        except Refuse as r:
+            if after != before:             # 供应商和模型这一步已经写进去了（约定 5.4：不许写了一半）
+                if r.status != 422:
+                    # 网关断了或没回应：换不回去，强度那一步也可能其实已经保存，只能把话说实
+                    raise Refuse(r.status, r.code, "供应商和模型已经换了，但思考强度"
+                                 "没有确认改成，请刷新后确认") from None
+                _undo_switch(channel, before, prior_effort)
+            raise
+    new_segment = has_provider and after[0] != before[0]
+    message = "已保存，下一条消息起生效"
+    if new_segment:
+        message += "；换到了另一家供应商，当前对话会先总结再另开一段"
+    return {"ok": True, "applied": True, "queued": False, "new_segment": new_segment,
+            "message": message}
+
+
+def _gateway(call, when_sent):
+    """向这只 bot 的网关发一次请求，把网络上的事翻成 503；别的异常原样往外抛（外层回 500）。
+
+    ``when_sent``：请求发出去之后才断或超时的那句话。写请求可能已经保存、读请求没有，
+    两种话不一样，由调用方给。约定里没有单独的码，都归到 503。
+    """
     try:
-        code, got = gateway_client.effort_set(channel, body["effort"])
+        return call()
     except Exception as e:                  # noqa: BLE001  下面按类型分流
         kind = gateway_client.net_kind(e)
         if kind == "unreachable":
-            raise unavailable from None
+            raise Refuse(503, "unavailable", NOT_SAVED) from None
         if kind == "broken":
-            # 请求发出去了才断的：可能已经保存。约定里没有单独的码，归到 503，话要说实。
-            raise Refuse(503, "unavailable",
-                         "这只 bot 的进程没有及时回应，这次改动可能已经保存，请刷新后确认") from None
+            raise Refuse(503, "unavailable", when_sent) from None
         raise
+
+
+def _pair(choice):
+    """网关回的一组 ``{"provider", "model"}`` → 元组；认不出就抛。"""
+    if not isinstance(choice, dict) or not _text(choice.get("provider")) \
+            or not _text(choice.get("model")):
+        raise RuntimeError("unexpected gateway reply")
+    return choice["provider"], choice["model"]
+
+
+def _switch(channel, provider_id, model):
+    """经这只 bot 的网关换供应商和模型，返回换之前、换之后生效的两组 ``(供应商, 模型)``。
+
+    发的是管理台模型页在用的那两个请求：``GET /v1/model`` 读现在生效的那一组（判断是不是
+    换到了另一家），再 ``POST /v1/model``，请求体 ``{"spec": "供应商/模型"}``，网关回
+    ``{"ok", "text", "current"}``。已经是这一组时网关也回 ok，重复提交不叠加。
+    网关明说没换（这只 bot 缺这家的密钥，或它的模型表里此刻没有这个模型）→ 422，什么都没写；
+    网关的原话可能带密钥的变量名，不往外带。
+    """
+    info = _gateway(lambda: gateway_client.model_info(channel), NOT_SAVED_SLOW)
+    before = _pair(info.get("current") if isinstance(info, dict) else None)
+    ok, got = _gateway(lambda: gateway_client.model_set(channel, "%s/%s" % (provider_id, model)),
+                       MAYBE_SAVED)
+    after = _pair(got.get("current") if isinstance(got, dict) else None)
+    if not ok:
+        if got.get("ok") is False and after == before:
+            raise _invalid("这只 bot 现在换不到这个模型：这家供应商在它那里可能还没配密钥，"
+                           "或者它的模型表里暂时没有这个模型。设置没有变")
+        raise RuntimeError("unexpected gateway reply")
+    return before, after
+
+
+def _apply_effort(channel, effort):
+    """经这只 bot 的网关改思考强度：``POST /v1/effort``，请求体 ``{"effort": 档位}``。"""
+    code, got = _gateway(lambda: gateway_client.effort_set(channel, effort), MAYBE_SAVED)
     if code == 409:
         # 网关的 409 unsupported：档位在四档之内，但这只 bot 现在用的模型不支持它
         raise _invalid("这只 bot 现在用的模型不支持这个思考强度")
     if code != 200 or not isinstance(got, dict) or got.get("ok") is not True:
         raise RuntimeError("unexpected gateway reply")
-    return {"ok": True, "applied": True, "queued": False, "new_segment": False,
-            "message": "已保存，下一条消息起生效"}
+
+
+def _undo_switch(channel, before, prior_effort):
+    """强度被拒之后把供应商和模型换回 ``before``，原来单独指定过强度的再设回去。
+
+    换回配置文件里那一组时网关自己会清掉单独指定，不留痕迹。换不回去就抛 500，把现状说实。
+    """
+    try:
+        ok, _got = gateway_client.model_set(channel, "%s/%s" % before)
+        if ok and prior_effort is not None:
+            code, got = gateway_client.effort_set(channel, prior_effort)
+            ok = code == 200 and isinstance(got, dict) and got.get("ok") is True
+    except Exception:                       # noqa: BLE001  换不回去的原因不重要，结果要说实
+        ok = False
+    if not ok:
+        raise Refuse(500, "internal", "思考强度没有改成，供应商和模型已经换了，"
+                     "而且没能换回去，请刷新后确认") from None
 
 
 def _restart_lock(bot_id):
