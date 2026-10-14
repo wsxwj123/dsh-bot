@@ -323,10 +323,11 @@ def _bot_row(entry, cfg, enabled, seams):
     else:
         provider, model = live["provider"], live["model"]
         effort = live["effort"] or brain["effort"]
+        # 补充文件 5.1：current 与 config 比，返回里没有 config 拿配置文件那一组比。
+        # 只单独指定了思考强度、供应商和模型没变的仍算 default，所以这里不看强度。
         config_pair = (live["config_provider"] or brain["provider"],
                        live["config_model"] or brain["model"])
-        overridden = (provider, model) != config_pair or live["effort"] is not None
-        source = "override" if overridden else "default"
+        source = "override" if (provider, model) != config_pair else "default"
     return {"bot_id": bot_id, "display_name": entry["display_name"],
             "state": state, "state_text": state_text,
             "provider": {"id": provider, "name": provider, "model": model, "effort": effort},
