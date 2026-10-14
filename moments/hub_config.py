@@ -277,6 +277,11 @@ def set_scalar(text, root, key, value, typ):
         raise HubError(409, "key_absent",
                        "配置里没有 %s，父层级也不存在；请先用高级模式补上该键" % key)
     anchor = parent.value[0][0]          # 父块的第一个子键：拿它的列号当缩进，行首当插入点
+    if parent.flow_style:
+        # 流式写法（`{a: 1}`，整份是 JSON 的配置就是这种）可以整块挤在一行里：按行插会插到花括号
+        # 外面、把文件写坏。改为插在第一个子键前面，用逗号隔开，其余字节照旧一字不动。
+        at = anchor.start_mark.index
+        return text[:at] + "%s: %s, " % (parts[-1], literal) + text[at:]
     col = anchor.start_mark.column
     at = anchor.start_mark.index - col
     return text[:at] + "%s%s: %s\n" % (" " * col, parts[-1], literal) + text[at:]
