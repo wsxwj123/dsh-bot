@@ -5,6 +5,7 @@
 生活设定的做法在 ``INTERFACE-生活设定.md``，逻辑在 ``moments/life_settings.py``。
 v0.6、v0.7 的启停、切进导入、同跑提示、群设置、``group_turn`` 照 ``INTERFACE-适配约定-v0.7摘录.md``
 与补充文件第 9 节；切进导入的水位线与写账本在 ``scripts/import_history.py``。
+v0.8 的人设、语音照 ``INTERFACE-适配约定-v0.8-dsh侧.md`` 与补充文件第 10 节；人设的备份、原子写用 ``life_settings`` 那一套。
 起服务：仓库根执行 ``python3 -m moments.adapter_service``；测试用 ``create_app()``。
 只支持这一种启动方式：监听地址只许回环、令牌文件不在就拒绝启动，这两道检查都在 ``main()`` 里。
 ``flask run`` 等别的方式拉起 ``create_app()`` 会绕过它们（例如对外监听），不要这样起。
@@ -32,6 +33,7 @@ import json
 import logging
 import os
 import re
+import stat
 import sys
 import threading
 import time
@@ -68,6 +70,8 @@ CAPABILITIES = {
     "bot.enable": True,
     "bot.switch_in": True,
     "bot.group_chat": True,
+    "bot.persona": True,
+    "bot.voice": True,
 }
 DEFAULT_LABEL = "各 bot 配置文件里写的那一组"
 
@@ -118,6 +122,21 @@ GROUP_INTRO_MAX = 4000
 #: group_turn 的 human_ts（9.6）：毫秒位恒为 000 的 UTC 时间
 HUMAN_TS_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z\Z")
 _ABSENT = object()
+
+#: 人设与语音（v0.8 草案 A、B，补充文件第 10 节）
+PERSONA_MAX = 256 * 1024
+#: 人设 PUT 的请求体上限：JSON 转义最坏把 1 个字节写成 6 个（如 \u0001），按这个放宽；人设本身另按 UTF-8 字节判
+PERSONA_MAX_BODY = 6 * PERSONA_MAX + 1024
+PERSONA_VERSION_RE = re.compile(r"^[0-9a-f]{16}\Z")
+#: 人设备份的文件名：时间，同一秒重名加 -01 等（life_settings._backup 的命名，不带后缀）
+PERSONA_BACKUP_RE = re.compile(r"^[0-9]{8}-[0-9]{6}(-[0-9]{2})?\Z")
+PERSONA_SAVED = "已保存，几秒内生效"
+PERSONA_SAME = "没有改动"
+PERSONA_STALE = "人设刚被别处改过，请刷新后再改"
+VOICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
+#: 白名单与语音桥那边一致，有增减时两边一起改（v0.8 草案 B.2）
+TTS_MODELS = ("s1", "s2-pro", "s2.1-pro", "s2.1-pro-free", "drama-3-preview")
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 #: 配置文件没写 brain 时网关自己用的默认值（gateway/src/config.ts 的 parseBrain）。
 CONFIG_DEFAULT_PROVIDER = "deepseek-official"
@@ -1125,29 +1144,26 @@ def _human_ts(value):
     return True
 
 
-def _access_path(bot):
-    """这只 bot 频道目录下的 ``access.json``（9.5）；不该碰的回 None。
+def _channel_file(bot, name):
+    """这只 bot 频道目录下的 ``name``（``access.json``、``CLAUDE.md``；9.5、10.2、10.3）；不该碰的回 None。
 
     频道目录同找网关的那个（``_gateway_channel``）。它解析成真实路径之后必须在这只 bot 自己的家里
-    （同管理台编辑页 ``hub_addbot._channel_dir`` 的落点校验），``access.json`` 本身也不许是软链：
+    （同管理台编辑页 ``hub_addbot._channel_dir`` 的落点校验），文件本身也不许是软链：
     不跟着软链去读写别处（另一套系统的频道目录在归属边界外）。
     """
     if not bot["channel"]:
         return None
     home = os.path.join(os.path.realpath(str(config_sources.dsh_home())), "bots", bot["id"])
     channel = os.path.realpath(bot["channel"])
-    path = os.path.join(channel, "access.json")
+    path = os.path.join(channel, name)
     if not channel.startswith(home + os.sep) or os.path.islink(path):
         return None
     return path
 
 
-def _read_access(bot):
-    """读 ``access.json`` → ``(路径, 整个对象, groups)``。没有 ``groups`` 键当作没进任何群。
-
-    读不出、不是 JSON 对象、``groups`` 不是对象：500（约定 5.12.1：不当成空）。
-    """
-    path = _access_path(bot)
+def _load_access(bot):
+    """读 ``access.json`` → ``(路径, 整个对象)``。读不出、不是 JSON 对象：500（不当成空，也不凭空新建）。"""
+    path = _channel_file(bot, "access.json")
     try:
         if path is None:
             raise ValueError("access.json is not ours to read")
@@ -1155,7 +1171,18 @@ def _read_access(bot):
             obj = json.loads(f.read().decode("utf-8"))
     except (OSError, ValueError, RecursionError):
         raise Refuse(500, "internal", "这只 bot 的 access.json 读不出来，或者不是合法的 JSON") from None
-    groups = obj.get("groups") if isinstance(obj, dict) else []
+    if not isinstance(obj, dict):
+        raise Refuse(500, "internal", "这只 bot 的 access.json 内容认不出来")
+    return path, obj
+
+
+def _read_access(bot):
+    """读 ``access.json`` → ``(路径, 整个对象, groups)``。没有 ``groups`` 键当作没进任何群。
+
+    读不出、不是 JSON 对象、``groups`` 不是对象：500（约定 5.12.1：不当成空）。
+    """
+    path, obj = _load_access(bot)
+    groups = obj.get("groups")
     groups = {} if groups is None else groups
     if not isinstance(groups, dict):
         raise Refuse(500, "internal", "这只 bot 的 access.json 内容认不出来")
@@ -1237,6 +1264,130 @@ def _groups_post(bot_id):
     return {"ok": True, "in_group": join, "policy": _group_view(groups[chat_id]) if join else None}
 
 
+# ---------------------------------------------------------------- v0.8 人设、语音（补充文件第 10 节）
+
+def _persona_version(raw):
+    """A.1：人设文件原始字节 SHA-256 的前 16 位小写十六进制；文件不存在按空内容算。"""
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _persona_path(bot):
+    """频道目录下的 ``CLAUDE.md``；落在本系统家目录外、本身是软链：500，不读不写（10.2、10.6）。"""
+    path = _channel_file(bot, "CLAUDE.md")
+    if path is None:
+        raise Refuse(500, "internal", "这只 bot 的人设文件不在它自己的目录里，或者是软链，不读也不改")
+    return path
+
+
+def _read_persona(path):
+    """人设文件 → ``(原始字节, 权限)``，不存在是 ``(b"", None)``；读不出 500。
+
+    ``O_NOFOLLOW``：查过之后才被换成软链的，也不跟过去读。
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
+        with os.fdopen(fd, "rb") as f:
+            return f.read(), stat.S_IMODE(os.fstat(f.fileno()).st_mode)
+    except FileNotFoundError:
+        return b"", None
+    except OSError:
+        raise Refuse(500, "internal", "这只 bot 的人设文件读不出来") from None
+
+
+def _persona_get(bot_id):
+    """读人设（v0.8 草案 A.1，补充文件 10.2）：原文全文与版本号。停用的 bot 照常能读；不是 UTF-8 回 500。"""
+    raw = _read_persona(_persona_path(_require_bot(bot_id)))[0]
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Refuse(500, "internal", "这只 bot 的人设文件不是合法的 UTF-8 文本") from None
+    return {"ok": True, "text": text, "version": _persona_version(raw)}
+
+
+def _persona_put(bot_id):
+    """改人设（v0.8 草案 A.2，补充文件 10.2、10.6）。停用的 bot 也能改；不重启（网关自己盯着这个文件）。
+
+    先后：请求体（422）→ 名单（404）→ 落点（500）→ 锁里比版本号（409）→ 全文没变就不写 → 原文备份到
+    ``<DSH_BOT_HOME>/backups/persona/<bot_id>/`` → 原子写、保持原权限（原来没有就 0600）→ 备份只留 5 份。
+    写盘的就是 ``text`` 的 UTF-8 原样，去首尾空白只用来判断是不是空。
+    """
+    request.max_content_length = PERSONA_MAX_BODY + 1      # 分块传输的读到上限多一个字节即停
+    body = _json_object(limit=PERSONA_MAX_BODY, too_big="请求体太大")
+    text, version = body.get("text"), body.get("version")
+    if set(body) != {"text", "version"}:
+        raise _invalid("请求体只能有 text、version 两个键，而且都要给")
+    if not isinstance(text, str) or not text.strip():
+        raise _invalid("text 要是字符串，去掉首尾空白后不能为空")
+    size = _utf8_size(text)
+    if size is None or size > PERSONA_MAX:
+        raise _invalid("text 按 UTF-8 不能超过 256 KiB")
+    if not isinstance(version, str) or not PERSONA_VERSION_RE.match(version):
+        raise _invalid("version 要是 16 位小写十六进制")
+    bot = _require_bot(bot_id)
+    path, data = _persona_path(bot), text.encode("utf-8")
+    try:
+        with hub_addbot.hold_addbot_lock():          # 与管理台编辑页写人设同一把锁（同进程内有效，9.7）
+            old, mode = _read_persona(path)
+            if _persona_version(old) != version:
+                raise Refuse(409, "stale", PERSONA_STALE)
+            if data == old:
+                return {"ok": True, "version": version, "message": PERSONA_SAME}
+            try:
+                folder = None if mode is None else life_settings._backup(bot_id, old, kind="persona", suffix="")
+                life_settings._replace(path, text, 0o600 if mode is None else mode)
+            except OSError:
+                raise Refuse(500, "internal", "写这只 bot 的人设失败") from None
+            if folder:
+                life_settings._rotate(folder, PERSONA_BACKUP_RE)      # 写盘成功之后才清理
+    except HubError as e:
+        raise _config_failure(e, "这只 bot 的人设") from None
+    return {"ok": True, "version": _persona_version(data), "message": PERSONA_SAVED}
+
+
+def _voice_view(obj):
+    """B.1、B.2 的回应：``voiceId``、``voiceModel`` 照原样；没写的（或不是非空字符串）为 null，别的键一律不回。"""
+    voice_id, model = obj.get("voiceId"), obj.get("voiceModel")
+    return {"ok": True, "voice_id": voice_id if _text(voice_id) else None,
+            "tts_model": model if _text(model) else None}
+
+
+def _voice_get(bot_id):
+    """读语音（v0.8 草案 B.1，补充文件 10.3）。停用的 bot 照常能读；access.json 读不出 500。"""
+    return _voice_view(_load_access(_require_bot(bot_id))[1])
+
+
+def _voice_put(bot_id):
+    """改语音（v0.8 草案 B.2，补充文件 10.3、10.6）：给了的键整键替换、null 删键、没给的不动。
+
+    只改这两个键，access.json 别的键原样，原子写、保持原权限，与群设置同一把锁；读不出 500，不新建、
+    不覆盖。不重启：网关下次发语音时现读。停用的 bot 也能改。
+    """
+    from moments import hub_config         # 延迟 import：同 _write_enabled
+    body = _json_object()
+    if not body or set(body) - {"voice_id", "tts_model"}:
+        raise _invalid("请求体只能有 voice_id、tts_model，至少给一个")
+    voice_id, model = body.get("voice_id"), body.get("tts_model")
+    if voice_id is not None and not (isinstance(voice_id, str) and VOICE_ID_RE.match(voice_id)):
+        raise _invalid("voice_id 只能用字母、数字、下划线、横线，1 到 64 个字符；或者 null")
+    if model is not None and model not in TTS_MODELS:
+        raise _invalid("tts_model 只能是 %s 之一，或者 null" % "、".join(TTS_MODELS))
+    bot = _require_bot(bot_id)
+    try:
+        with hub_addbot.hold_addbot_lock():
+            path, obj = _load_access(bot)
+            new = dict(obj)
+            for api_key, file_key in (("voice_id", "voiceId"), ("tts_model", "voiceModel")):
+                if api_key in body and body[api_key] is None:
+                    new.pop(file_key, None)
+                elif api_key in body:
+                    new[file_key] = body[api_key]
+            if new != obj:                  # 本来就是这样就不写
+                hub_config.atomic_write(json.dumps(new, ensure_ascii=False, indent=2) + "\n", path)
+    except HubError as e:
+        raise _config_failure(e, "这只 bot 的 access.json") from None
+    return _voice_view(new)
+
+
 _READ_ROUTES = {PREFIX + "/meta": _meta, PREFIX + "/bots": _bots, PREFIX + "/providers": _providers}
 #: ``/bots/<bot_id>/<这一段>`` 上的接口：方法 → 处理函数（键的先后就是 405 的 Allow 头）
 _BOT_ROUTES = {
@@ -1246,6 +1397,8 @@ _BOT_ROUTES = {
     "life": {"GET": _life_get, "PUT": _life_put},
     "enabled": {"POST": _set_enabled},
     "groups": {"GET": _groups_get, "POST": _groups_post},
+    "persona": {"GET": _persona_get, "PUT": _persona_put},
+    "voice": {"GET": _voice_get, "PUT": _voice_put},
 }
 
 
