@@ -834,16 +834,20 @@ def _write_lock():
         os.close(fd)                        # 关掉描述符即放锁
 
 
-def _backup(bot_id, data):
-    """6.5：原文逐字节存一份到 ``<DSH_BOT_HOME>/backups/life/<bot_id>/``，返回那个目录。
+def _backup(bot_id, data, kind="life", suffix=".yml"):
+    """6.5：原文逐字节存一份到 ``<DSH_BOT_HOME>/backups/<kind>/<bot_id>/``，返回那个目录。
 
-    ``O_CREAT|O_EXCL`` 一次建成、权限 0600；同一秒重名依次加 ``-01`` 到 ``-99``。``bot_id`` 已经与名单
-    精确匹配过（名单只收合格的 bot 编号），可以拼路径。
+    ``O_CREAT|O_EXCL`` 一次建成、权限 0600；同一秒重名依次加 ``-01`` 到 ``-99``，从这一秒已用的最后一个
+    往后接：轮换删掉了这一秒较早的那份时不再拿回它的名字，否则最新的一份排到最前、下次轮换先删它。
+    ``bot_id`` 已经与名单精确匹配过（名单只收合格的 bot 编号），可以拼路径。
+    适配服务的人设备份（INTERFACE-适配服务 10.2）也用这里：``kind="persona"``、不带后缀。
     """
-    folder = _private_dir(str(config_sources.dsh_home()), "backups", "life", bot_id)
+    folder = _private_dir(str(config_sources.dsh_home()), "backups", kind, bot_id)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    for name in [stamp] + ["%s-%02d" % (stamp, i) for i in range(1, 100)]:
-        target = os.path.join(folder, name + ".yml")
+    names = [stamp + suffix] + ["%s-%02d%s" % (stamp, i, suffix) for i in range(1, 100)]
+    taken = set(os.listdir(folder))
+    for name in names[max((i + 1 for i, n in enumerate(names) if n in taken), default=0):]:
+        target = os.path.join(folder, name)
         try:
             fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC, 0o600)
         except FileExistsError:
@@ -862,10 +866,10 @@ def _backup(bot_id, data):
     raise FileExistsError("backup names used up")
 
 
-def _rotate(folder):
-    """6.5：只留最近 5 份，按文件名排序删更早的；只认备份名字的文件；删失败不报错。"""
+def _rotate(folder, name_re=BACKUP_NAME_RE):
+    """6.5：只留最近 5 份，按文件名排序删更早的；只认备份名字（``name_re``）的文件；删失败不报错。"""
     try:
-        names = sorted(n for n in os.listdir(folder) if BACKUP_NAME_RE.match(n))
+        names = sorted(n for n in os.listdir(folder) if name_re.match(n))
     except OSError:
         return
     for name in names[:-BACKUP_KEEP]:
