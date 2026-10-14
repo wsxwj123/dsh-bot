@@ -6,6 +6,8 @@
 
 三份文件之外、从本目录现成支架（conftest.py 的 gw_bot / heartbeat / FakeLaunchctl）
 借来的东西只有"怎么摆一只假 bot"：配置文件的形状、网关端口与口令放在哪、心跳怎么写。
+假网关的应答只用补充文件第 5 节表格里写明的字段；那一节说可以沿用的"模型页假网关样例"
+在本目录现有用例里没有（没有哪条用例给 `GET /v1/model` 配过应答），所以没有沿用任何样例。
 下面这些是接口文件没写、只能猜着放的假数据，放错位置只会让"搜不到"的断言空转，不会误红：
 Telegram 假令牌与假聊天号（放在频道目录的 .env）、供应商假密钥（放在环境变量）。
 
@@ -134,17 +136,91 @@ def response_text(resp):
     return resp.get_data(as_text=True) + "\n" + head
 
 
-# ---------------------------------------------------------------- 记录型假网关
-class RecordingGateway:
-    """只绑 127.0.0.1 的假网关：记下收到的每个请求（任何方法），一律回 404。
+# ---------------------------------------------------------------- 假网关
+#: 补充文件第 5 节：适配服务对网关只发这两条路径上的读与写
+GW_MODEL = "/v1/model"
+GW_EFFORT = "/v1/effort"
 
-    适配服务与网关之间怎么说话不在三份接口文件里，所以这个假件不扮演"会成功的网关"，
-    只用来回答两个问题：有没有请求打过来、打过来的是不是写请求。
+#: 假网关清单里的三家。字段只用第 5 节写明的 name / models / key / enabled。
+#: 模型的先后故意不是字典序：摘要要"保持网关给的先后"，排过序就对不上。
+VENDOR_A = CFG_PROVIDER                      # 配置文件里写的那一家；模型给成字符串
+VENDOR_A_MODELS = [CFG_MODEL, "deepseek-pro-fake", "deepseek-alpha-fake"]
+VENDOR_B = "fake-vendor-b"                   # 另一家；没有密钥；模型给成带 id 的对象
+VENDOR_B_MODELS = ["vb-small", "vb-large"]
+VENDOR_OFF = "fake-vendor-off"               # 网关那边标了停用
+#: 醒目的假接口地址与假密钥变量名。它们在网关返回里叫什么键，接口文件没写，下面的键名是编的；
+#: 要验的是"值不出现在适配服务的响应里"，键名叫什么不影响这一点。
+FAKE_ENDPOINT_HOST = "fake-endpoint-do-not-leak.invalid"
+FAKE_BASE_URLS = ["https://%s/a/v1" % FAKE_ENDPOINT_HOST, "https://%s/b/v1" % FAKE_ENDPOINT_HOST,
+                  "https://%s/off/v1" % FAKE_ENDPOINT_HOST]
+FAKE_KEY_ENVS = ["FAKEVENDORA_DO_NOT_LEAK_API_KEY", "FAKEVENDORB_DO_NOT_LEAK_API_KEY",
+                 "FAKEVENDOROFF_DO_NOT_LEAK_API_KEY"]
+
+NO_RUNNING_BOT = "没有正在运行的 bot，暂时读不到供应商清单"     # 补充文件 4.3
+INTERNAL_MESSAGE = "内部错误"                                  # 补充文件第 3 节
+
+
+def gateway_providers():
+    """假网关 `GET /v1/model` 里的 providers。每次新造一份，用例之间不共用。"""
+    return [
+        {"name": VENDOR_A, "models": list(VENDOR_A_MODELS), "key": True, "enabled": True,
+         "base_url": FAKE_BASE_URLS[0], "key_env": FAKE_KEY_ENVS[0], "api_key": PROVIDER_KEY},
+        {"name": VENDOR_B, "models": [{"id": m} for m in VENDOR_B_MODELS], "key": False,
+         "enabled": True, "base_url": FAKE_BASE_URLS[1], "key_env": FAKE_KEY_ENVS[1]},
+        {"name": VENDOR_OFF, "models": ["off-model"], "key": True, "enabled": False,
+         "base_url": FAKE_BASE_URLS[2], "key_env": FAKE_KEY_ENVS[2], "api_key": PROVIDER_KEY},
+    ]
+
+
+class RecordingGateway:
+    """只绑 127.0.0.1 的假网关：记下收到的每个请求（任何方法）；没配应答的一律回 404。
+
+    `on` / `on_fn` 给某个"方法 + 路径"配应答；`serve_model` 一次配齐补充文件第 5 节那四种请求。
+    每条记录：method、path、body（原文）、json（解析出来的对象，解析不了为 None）。
     """
 
     def __init__(self):
         self.requests = []
+        self.routes = {}
+        self.state = {}
         self._srv = None
+
+    def on(self, method, path, status, payload):
+        """payload 是 str / bytes 就原样发（text/plain），别的按 JSON 发。"""
+        self.routes[(method, path)] = lambda rec: (status, payload)
+        return self
+
+    def on_fn(self, method, path, fn):
+        self.routes[(method, path)] = fn
+        return self
+
+    def serve_model(self, current, providers, effort=None):
+        """照第 5 节应答四种请求。换供应商、改强度都记在 self.state 里，下一次读就能读到。"""
+        st = self.state
+        st["current"] = {"provider": current[0], "model": current[1]}
+        st["effort"] = effort
+
+        def get_model(rec):
+            return 200, {"ok": True, "current": dict(st["current"]), "providers": providers}
+
+        def post_model(rec):
+            spec = rec["json"].get("spec") if isinstance(rec["json"], dict) else None
+            if not isinstance(spec, str) or "/" not in spec:
+                return 400, {"ok": False}
+            provider, model = spec.split("/", 1)
+            st["current"] = {"provider": provider, "model": model}
+            return 200, {"ok": True, "current": dict(st["current"])}
+
+        def get_effort(rec):
+            return 200, {"ok": True, "current": st["effort"]}
+
+        def post_effort(rec):
+            st["effort"] = rec["json"].get("effort") if isinstance(rec["json"], dict) else None
+            return 200, {"ok": True}
+
+        self.on_fn("GET", GW_MODEL, get_model).on_fn("POST", GW_MODEL, post_model)
+        self.on_fn("GET", GW_EFFORT, get_effort).on_fn("POST", GW_EFFORT, post_effort)
+        return self
 
     def start(self):
         gw = self
@@ -158,11 +234,24 @@ class RecordingGateway:
             def _any(self):
                 n = int(self.headers.get("content-length") or 0)
                 raw = self.rfile.read(n) if n else b""
-                gw.requests.append({"method": self.command, "path": self.path.split("?")[0],
-                                    "body": raw.decode("utf-8", "replace")})
-                out = b'{"error": "not found"}'
-                self.send_response(404)
-                self.send_header("Content-Type", "application/json")
+                text = raw.decode("utf-8", "replace")
+                try:
+                    parsed = json.loads(text) if text else None
+                except ValueError:
+                    parsed = None
+                rec = {"method": self.command, "path": self.path.split("?")[0],
+                       "body": text, "json": parsed}
+                gw.requests.append(rec)
+                handler = gw.routes.get((rec["method"], rec["path"]))
+                status, payload = handler(rec) if handler else (404, {"error": "not found"})
+                if isinstance(payload, (bytes, str)):
+                    out = payload if isinstance(payload, bytes) else payload.encode("utf-8")
+                    ctype = "text/plain; charset=utf-8"
+                else:
+                    out = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                    ctype = "application/json"
+                self.send_response(status)
+                self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(out)))
                 self.end_headers()
                 if self.command != "HEAD":
@@ -255,9 +344,24 @@ class AdapterEnv:
         return SimpleNamespace(id=bot_id, yml=yml, botdir=botdir)
 
     def gateway(self):
+        """只记不答的假网关（没配应答的请求一律回 404）。"""
         gw = RecordingGateway().start()
         self._gateways.append(gw)
         return gw
+
+    def model_gateway(self, current=(CFG_PROVIDER, CFG_MODEL), providers=None, effort=None):
+        """会应答的假网关：照补充文件第 5 节答四种请求。
+
+        current 不给就是配置文件里写的那一组；providers 不给就是 gateway_providers() 那三家。
+        """
+        return self.gateway().serve_model(
+            current, gateway_providers() if providers is None else providers, effort)
+
+    def running_bot(self, bot_id, gw, **kw):
+        """一只正在运行的假 bot：网关端口指向 gw，心跳一直在刷新。"""
+        bot = self.bot(bot_id, gw_port=gw.port, **kw)
+        self.heartbeat.tick(bot_id, pid=4242)
+        return bot
 
     def close(self):
         for gw in self._gateways:
@@ -290,13 +394,6 @@ class AdapterEnv:
             assert path not in msg, "message 里带了文件路径：%r" % (msg,)
         for name, secret in SECRETS.items():
             assert secret not in msg, "message 里出现了%s" % name
-
-    def first_provider(self):
-        """从供应商摘要里拿第一家（调用方就是这么拿下拉选项的）。"""
-        providers = self.ok(self.call("GET", PROVIDERS)).get("providers")
-        if not isinstance(providers, list) or not providers:
-            pytest.fail("用例前提不成立：供应商摘要是空的，拿不到一家现成的供应商（应至少有内置供应商）")
-        return providers[0]
 
 
 def _console_snapshot():
