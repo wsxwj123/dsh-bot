@@ -132,10 +132,14 @@ class FakeGateway:
 
     起初生效的是配置文件那一组。换模型时清掉单独指定的强度（适配服务正是为此先记下原来的
     强度）。``refuse_effort`` 里的档位回 409：这只 bot 现在用的模型不支持它。
+    ``effort_answer``：改强度时换成这个应答，``(状态码, 返回体)`` 或要抛的异常；状态码是 200 的
+    （以及抛异常的，模拟 200 但回体不是 JSON）算已经保存。``model_writes_ok`` 是整数时，换模型只成功
+    这么多次，之后拒连（用来让「换回去」失败）。
     """
 
     def __init__(self):
         self.current, self.effort, self.refuse_effort = dict(CFG_PAIR), None, ()
+        self.effort_answer, self.model_writes_ok = None, None
         self.calls = []
 
     def __call__(self, _channel_dir, method, path, body=None, timeout=10):
@@ -143,6 +147,10 @@ class FakeGateway:
         if (method, path) == ("GET", GW_MODEL):
             return 200, _model_reply(self.current)
         if (method, path) == ("POST", GW_MODEL):
+            if self.model_writes_ok is not None:
+                if self.model_writes_ok <= 0:
+                    raise urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+                self.model_writes_ok -= 1
             provider, model = body["spec"].split("/", 1)
             self.current, self.effort = {"provider": provider, "model": model}, None
             return 200, {"ok": True, "text": "ok", "current": dict(self.current)}
@@ -151,8 +159,12 @@ class FakeGateway:
         if (method, path) == ("POST", GW_EFFORT):
             if body["effort"] in self.refuse_effort:
                 return 409, {"ok": False, "error": "unsupported"}
-            self.effort = body["effort"]
-            return 200, {"ok": True}
+            answer, self.effort_answer = self.effort_answer, None     # 只顶替这一次
+            if answer is None or isinstance(answer, BaseException) or answer[0] == 200:
+                self.effort = body["effort"]
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer or (200, {"ok": True})
         return 404, {}
 
 
@@ -239,3 +251,46 @@ def test_第5步_强度被拒_把供应商和模型换回去_原来的强度设�
         ("POST", GW_MODEL, {"spec": "deepseek-official/deepseek-flash"}),   # 换回去
     ] + restore, gateway.calls
     assert (gateway.current, gateway.effort) == (CFG_PAIR, prior), "没有换回原样"
+
+
+INTERNAL = {"ok": False, "code": "internal", "message": "内部错误"}
+#: 改强度那一步网关回的「不是拒绝也不是断网」的东西：400、500、认不出的回体（安审 I2）
+EFFORT_ODD = {
+    "回400": (400, {"ok": False, "error": "bad effort"}),
+    "回500": (500, {"ok": False, "error": "boom"}),
+    "回200但ok不是true": (200, {"ok": "yes"}),
+    "回200但不是对象": (200, ["ok"]),
+    "回200但不是JSON": json.JSONDecodeError("Expecting value", "<html>", 0),
+}
+
+
+def _switch_with_effort(client, gateway, answer, prior):
+    """换到另一家并同时改强度；改强度那一次网关回 answer。"""
+    _put_bot(enabled=True)
+    gateway.effort, gateway.effort_answer = prior, answer
+    return _post(client, {**SWITCH, "effort": "max"})
+
+
+@pytest.mark.parametrize("prior", ["low", None], ids=["原来单独指定过强度", "原来没有单独指定"])
+@pytest.mark.parametrize("answer", list(EFFORT_ODD.values()), ids=list(EFFORT_ODD))
+def test_第5步_强度那步网关回400_500或认不出_也把供应商和模型换回去_不留半截(client, gateway, answer, prior):
+    status, got = _switch_with_effort(client, gateway, answer, prior)
+    assert (status, got) == (500, INTERNAL), got
+    restore = [("POST", GW_EFFORT, {"effort": prior})] if prior else []
+    assert gateway.calls == [
+        READ_CATALOG,
+        ("GET", GW_EFFORT, None),
+        ("POST", GW_MODEL, {"spec": "fake-vendor-b/vb-small"}),
+        ("POST", GW_EFFORT, {"effort": "max"}),                       # 回的东西不对
+        ("POST", GW_MODEL, {"spec": "deepseek-official/deepseek-flash"}),   # 换回去
+    ] + restore, gateway.calls
+    assert (gateway.current, gateway.effort) == (CFG_PAIR, prior), "没有换回原样"
+
+
+@pytest.mark.parametrize("answer", list(EFFORT_ODD.values()), ids=list(EFFORT_ODD))
+def test_第5步_强度那步回的东西不对_换回去也没成_如实说已经换了没换回去(client, gateway, answer):
+    gateway.model_writes_ok = 1                     # 换过去那一次成功，换回去那一次拒连
+    status, got = _switch_with_effort(client, gateway, answer, None)
+    assert (status, got["code"]) == (500, "internal"), got
+    assert "已经换了" in got["message"] and "没能换回去" in got["message"], got
+    assert gateway.current == {"provider": "fake-vendor-b", "model": "vb-small"}
