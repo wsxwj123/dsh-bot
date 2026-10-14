@@ -4,8 +4,8 @@
 依据：INTERFACE-适配约定-v0.3.md 5.2（bot_id 字符规则）、5.4、5.5，
 INTERFACE-适配服务.md 第 3 节、4.4、4.5。不读实现。
 
-换供应商"成功"那一条这里没有：适配服务和 bot 网关之间怎么说话不在三份接口文件里，
-搭不出一个会正确应答的假网关。见 .devflow/TEST-PLAN-适配服务.md 的"没覆盖的"。
+换供应商的清单校验与"成功"几条用会应答的假网关（adapter_util 的 serve_model），
+它只照 INTERFACE-适配服务.md 第 5 节写明的路径、请求体、返回字段应答。
 """
 import json
 import time
@@ -30,6 +30,13 @@ def live(adapter):
     bot = adapter.bot("botalpha", gw_port=gw.port)
     adapter.heartbeat.tick("botalpha", pid=4242)
     return SimpleNamespace(gw=gw, bot=bot)
+
+
+@pytest.fixture
+def switching(adapter):
+    """一只正在运行的 botalpha：网关照补充文件第 5 节应答，当前生效的是配置文件里那一组。"""
+    gw = adapter.model_gateway()
+    return SimpleNamespace(gw=gw, bot=adapter.running_bot("botalpha", gw))
 
 
 # ============================================================ bot_id 字符规则
@@ -137,20 +144,73 @@ def test_换供应商_入参不合规_回422_invalid_网关零请求(adapter, li
     assert live.gw.requests == [], "校验没过却去找了网关：%r" % live.gw.requests
 
 
-def test_换供应商_没有这家供应商_回404_unknown_provider_网关零请求(adapter, live):
+def test_换供应商_没有这家供应商_回404_unknown_provider_网关零写请求(adapter, switching):
+    """4.4 第 4 步：允许向这只 bot 的网关读一次清单，但不许有任何写请求。"""
     payload = {"provider_id": "no-such-provider-zz9", "model": "whatever"}
     adapter.expect_error(adapter.call("POST", au.provider_url("botalpha"), payload),
                          404, "unknown_provider")
-    assert live.gw.requests == [], "校验没过却去找了网关：%r" % live.gw.requests
+    assert switching.gw.writes() == [], "清单校验没过却往网关发了写请求：%r" % switching.gw.writes()
 
 
-def test_换供应商_模型不在这家里_回422_invalid_网关零请求(adapter, live):
-    provider_id = adapter.first_provider()["id"]
-    seen = len(live.gw.requests)
-    payload = {"provider_id": provider_id, "model": "no-such-model-zz9"}
+WRONG_MODELS = {"哪一家都没有的模型": "no-such-model-zz9", "别家才有的模型": au.VENDOR_A_MODELS[1]}
+
+
+@pytest.mark.parametrize("model", list(WRONG_MODELS.values()), ids=list(WRONG_MODELS))
+def test_换供应商_模型不在这家里_回422_invalid_网关零写请求(adapter, switching, model):
+    """4.4 第 4 步：供应商在清单里，模型不在这一家的模型里。"""
+    payload = {"provider_id": au.VENDOR_B, "model": model}
     adapter.expect_error(adapter.call("POST", au.provider_url("botalpha"), payload),
                          422, "invalid")
-    assert live.gw.requests[seen:] == [], "校验没过却去找了网关：%r" % live.gw.requests[seen:]
+    assert switching.gw.writes() == [], "清单校验没过却往网关发了写请求：%r" % switching.gw.writes()
+
+
+def test_换供应商_换到另一家_成功_返回形状如约_new_segment为真(adapter, switching):
+    payload = {"provider_id": au.VENDOR_B, "model": au.VENDOR_B_MODELS[0]}
+    body = adapter.ok(adapter.call("POST", au.provider_url("botalpha"), payload))
+    assert body.get("applied") is True and body.get("queued") is False, body
+    assert body.get("new_segment") is True, "从 %s 换到 %s，new_segment 应为 true：%r" % (
+        au.CFG_PROVIDER, au.VENDOR_B, body)
+    adapter.human_message(body.get("message"))
+
+
+def test_换供应商_只在同一家里换模型_new_segment为假(adapter, switching):
+    payload = {"provider_id": au.CFG_PROVIDER, "model": au.VENDOR_A_MODELS[1]}
+    body = adapter.ok(adapter.call("POST", au.provider_url("botalpha"), payload))
+    assert body.get("new_segment") is False, "还在 %s 这一家，new_segment 应为 false：%r" % (
+        au.CFG_PROVIDER, body)
+
+
+def test_换供应商_同样的请求提交两次_第二次仍是200_new_segment为假(adapter, switching):
+    payload = {"provider_id": au.VENDOR_B, "model": au.VENDOR_B_MODELS[0]}
+    adapter.ok(adapter.call("POST", au.provider_url("botalpha"), payload))
+    second = adapter.ok(adapter.call("POST", au.provider_url("botalpha"), payload))
+    assert second.get("applied") is True and second.get("queued") is False, second
+    assert second.get("new_segment") is False, "第二次时已经在那一家了，new_segment 应为 false：%r" % (second,)
+
+
+def test_换供应商_写请求只发给这只bot自己的网关_请求体是spec_别的bot的网关零请求(adapter):
+    """目标故意选编号靠后的那只：照"按字典序问第一只"去找网关的做法在这里会露馅。"""
+    gw_other, gw_mine = adapter.model_gateway(), adapter.model_gateway()
+    adapter.running_bot("botalpha", gw_other)
+    adapter.running_bot("botbravo", gw_mine)
+    model = au.VENDOR_B_MODELS[0]
+    adapter.call("POST", au.provider_url("botbravo"), {"provider_id": au.VENDOR_B, "model": model})
+    writes = gw_mine.writes()
+    assert [(w["method"], w["path"]) for w in writes] == [("POST", au.GW_MODEL)], \
+        "应恰好向这只 bot 的网关发一次 POST /v1/model：%r" % gw_mine.requests
+    assert writes[0]["json"] == {"spec": "%s/%s" % (au.VENDOR_B, model)}, writes[0]["body"]
+    assert gw_other.requests == [], "给 botbravo 换供应商，却找了 botalpha 的网关：%r" % gw_other.requests
+
+
+def test_换供应商_bot停用_回409_stopped_对任何网关零请求(adapter):
+    """4.4 第 3 步没过：连第 4 步那一次读清单都不该发生。"""
+    gw_stopped, gw_other = adapter.model_gateway(), adapter.model_gateway()
+    adapter.running_bot("botalpha", gw_other)
+    adapter.bot("botbravo", enabled=False, gw_port=gw_stopped.port)
+    payload = {"provider_id": au.VENDOR_B, "model": au.VENDOR_B_MODELS[0]}
+    adapter.expect_error(adapter.call("POST", au.provider_url("botbravo"), payload), 409, "stopped")
+    assert gw_stopped.requests == [], "bot 停用着，却去找了它的网关：%r" % gw_stopped.requests
+    assert gw_other.requests == [], "bot 停用着，却去找了别的 bot 的网关：%r" % gw_other.requests
 
 
 def test_换供应商_bot启用但网关连不上_回503_unavailable(adapter):
