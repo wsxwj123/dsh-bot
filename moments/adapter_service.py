@@ -538,12 +538,15 @@ def _set_provider(bot_id):
     if has_effort:
         try:
             _apply_effort(channel, body["effort"])
-        except Refuse as r:
+        except Exception as e:              # noqa: BLE001  不只是拒绝：网关回 400、500、认不出的也在这里
             if after != before:             # 供应商和模型这一步已经写进去了（约定 5.4：不许写了一半）
-                if r.status != 422:
+                if isinstance(e, Refuse) and e.status != 422:
                     # 网关断了或没回应：换不回去，强度那一步也可能其实已经保存，只能把话说实
-                    raise Refuse(r.status, r.code, "供应商和模型已经换了，但思考强度"
+                    raise Refuse(e.status, e.code, "供应商和模型已经换了，但思考强度"
                                  "没有确认改成，请刷新后确认") from None
+                # 网关明说不支持（422），或回了 400、500、认不出的东西：先换回原来那一组。
+                # 换回去了再照原样往外报（认不出的仍是 500 内部错误，但设置已经是原样）；
+                # 换不回去由 _undo_switch 把现状说实。
                 _undo_switch(channel, before, prior_effort)
             raise
     new_segment = has_provider and after[0] != before[0]
