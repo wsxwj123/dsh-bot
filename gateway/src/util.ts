@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'crypto'
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
-import { dirname } from 'path'
+import { dirname, join } from 'path'
 
 export const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
@@ -35,6 +35,13 @@ export function writeAtomic(path: string, data: string, mode?: number): void {
     try { rmSync(tmp, { force: true }) } catch {}
     throw e
   }
+}
+
+/** 主人私聊的"刚聊过"标记（INTERFACE-适配服务 10.5）：写 <dir>/<botId>，内容是整数的 Unix 秒（格式同旧系统）。
+ *  目录不存在就建（0700），文件 0600，先写临时文件再改名 */
+export function writeLastUser(dir: string, botId: string, nowMs: number = Date.now()): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  writeAtomic(join(dir, botId), String(Math.floor(nowMs / 1000)), 0o600)
 }
 
 /** 文件被占用（EPERM/EBUSY，Windows 上常见且是暂时的）时，每隔 waitMs 再试，最多再试 retries 次；其它错误直接抛 */
