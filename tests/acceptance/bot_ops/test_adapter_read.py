@@ -13,7 +13,8 @@ from . import adapter_util as au
 from . import botops_util as u
 from .adapter_util import adapter, console_guard  # noqa: F401  夹具
 
-#: 补充文件第 7 节：4.1 表里的八个，加 bot.notify 与 bot.life_settings，恰好十个键
+#: 补充文件第 7 节与 9.1：4.1 表里的八个，加 bot.notify、bot.life_settings，再加 bot.enable、
+#: bot.switch_in、bot.group_chat（v0.6/v0.7），恰好十三个键
 CAPABILITIES_TEN = {
     "bot.restart.graceful": False,
     "bot.restart.force": True,
@@ -25,6 +26,9 @@ CAPABILITIES_TEN = {
     "provider.switch_new_segment": True,
     "bot.notify": True,
     "bot.life_settings": True,
+    "bot.enable": True,
+    "bot.switch_in": True,
+    "bot.group_chat": True,
 }
 
 
@@ -39,7 +43,7 @@ def test_meta_固定取值与十项能力如约(adapter):
     assert isinstance(caps, dict), "capabilities 应是对象：%r" % (caps,)
     missing = sorted(set(CAPABILITIES_TEN) - set(caps))
     extra = sorted(set(caps) - set(CAPABILITIES_TEN))
-    assert not missing and not extra, "能力清单应恰好是约定的十个键：缺 %r，多 %r" % (missing, extra)
+    assert not missing and not extra, "能力清单应恰好是约定的十三个键：缺 %r，多 %r" % (missing, extra)
     for key, want in CAPABILITIES_TEN.items():
         assert caps[key] is want, "能力 %s 应为布尔 %r，实际 %r" % (key, want, caps[key])
 
