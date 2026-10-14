@@ -6,13 +6,15 @@
 
 三份文件之外、从本目录现成支架（conftest.py 的 gw_bot / heartbeat / FakeLaunchctl）
 借来的东西只有"怎么摆一只假 bot"：配置文件的形状、网关端口与口令放在哪、心跳怎么写。
-假网关的应答只用补充文件第 5 节表格里写明的字段；那一节说可以沿用的"模型页假网关样例"
-在本目录现有用例里没有（没有哪条用例给 `GET /v1/model` 配过应答），所以没有沿用任何样例。
+假网关 `GET /v1/model` 的返回体照补充文件 5.1 那份"照真实网关核对过"的样例：顶层 current、config、
+choices，providers 每项字段齐全（models 是个数、key 是 ok/missing/none/unknown 之一、带 keyEnv）。
+另外三种请求只用 5.2 表格里写明的字段。
 下面这些是接口文件没写、只能猜着放的假数据，放错位置只会让"搜不到"的断言空转，不会误红：
-Telegram 假令牌与假聊天号（放在频道目录的 .env）、供应商假密钥（放在环境变量）。
+Telegram 假令牌与假聊天号（放在频道目录的 .env）、供应商假密钥（放在环境变量；真实网关的返回里没有密钥原文）。
 
 被测模块的导入放在 `AdapterEnv.client` 里（第一次发请求时），不放文件顶部。
 """
+import copy
 import json
 import os
 import re
@@ -67,6 +69,7 @@ SECRETS = {
 #: 假 bot 配置文件里写的那一组（与 conftest.py 的 gw_bot 相同）
 CFG_PROVIDER = "deepseek-official"
 CFG_MODEL = "deepseek-flash"
+CFG_PAIR = (CFG_PROVIDER, CFG_MODEL)
 
 # ---------------------------------------------------------------- 约定里的固定取值
 UNAUTHORIZED = {"ok": False, "code": "unauthorized", "message": "令牌缺失或不对"}
@@ -141,35 +144,75 @@ def response_text(resp):
 GW_MODEL = "/v1/model"
 GW_EFFORT = "/v1/effort"
 
-#: 假网关清单里的三家。字段只用第 5 节写明的 name / models / key / enabled。
-#: 模型的先后故意不是字典序：摘要要"保持网关给的先后"，排过序就对不上。
-VENDOR_A = CFG_PROVIDER                      # 配置文件里写的那一家；模型给成字符串
+#: 假网关清单里的三家（补充文件 5.1 的形状：模型名只在顶层 choices 里，providers[].models 只是个数）。
+#: 模型的先后故意不是字典序，choices 里各家的条目也故意交错：摘要要按供应商归组、保持 choices 里的先后。
+VENDOR_A = CFG_PROVIDER                      # 配置文件里写的那一家；key 为 ok
 VENDOR_A_MODELS = [CFG_MODEL, "deepseek-pro-fake", "deepseek-alpha-fake"]
-VENDOR_B = "fake-vendor-b"                   # 另一家；没有密钥；模型给成带 id 的对象
+VENDOR_B = "fake-vendor-b"                   # 另一家；key 为 missing；个数给 null
 VENDOR_B_MODELS = ["vb-small", "vb-large"]
-VENDOR_OFF = "fake-vendor-off"               # 网关那边标了停用
-#: 醒目的假接口地址与假密钥变量名。它们在网关返回里叫什么键，接口文件没写，下面的键名是编的；
-#: 要验的是"值不出现在适配服务的响应里"，键名叫什么不影响这一点。
+VENDOR_OFF = "fake-vendor-off"               # 网关那边标了停用；key 为 ok，choices 里也有它的模型
+VENDOR_OFF_MODELS = ["off-model-zz7"]
+#: 5.1 说这五个键都不往外带
+GW_ONLY_KEYS = ("keyEnv", "api", "source", "note", "last_refresh")
+#: 醒目的假值：keyEnv 里的假变量名、note 里夹带的假接口地址。要验的是它们不出现在适配服务的响应里。
 FAKE_ENDPOINT_HOST = "fake-endpoint-do-not-leak.invalid"
-FAKE_BASE_URLS = ["https://%s/a/v1" % FAKE_ENDPOINT_HOST, "https://%s/b/v1" % FAKE_ENDPOINT_HOST,
-                  "https://%s/off/v1" % FAKE_ENDPOINT_HOST]
-FAKE_KEY_ENVS = ["FAKEVENDORA_DO_NOT_LEAK_API_KEY", "FAKEVENDORB_DO_NOT_LEAK_API_KEY",
-                 "FAKEVENDOROFF_DO_NOT_LEAK_API_KEY"]
+FAKE_KEY_ENVS = ["FAKEVENDORB_DO_NOT_LEAK_API_KEY", "FAKEVENDOROFF_DO_NOT_LEAK_API_KEY"]
 
 NO_RUNNING_BOT = "没有正在运行的 bot，暂时读不到供应商清单"     # 补充文件 4.3
 INTERNAL_MESSAGE = "内部错误"                                  # 补充文件第 3 节
+
+DEFAULT = object()    # model_reply 的参数：用下面的默认假数据
+OMIT = object()       # model_reply 的参数：返回体里干脆不放这个键
+
+
+def provider_entry(name, *, count, key, key_env=None, enabled=True, source="builtin",
+                   api="openai-completions", note=None, last_refresh=None):
+    """`GET /v1/model` 里 providers 的一项，字段照 5.1 的样例齐全。count 是模型个数（数字或 None）。"""
+    return {"name": name, "source": source, "api": api, "models": count, "key": key,
+            "keyEnv": key_env, "enabled": enabled, "note": note, "last_refresh": last_refresh}
 
 
 def gateway_providers():
     """假网关 `GET /v1/model` 里的 providers。每次新造一份，用例之间不共用。"""
     return [
-        {"name": VENDOR_A, "models": list(VENDOR_A_MODELS), "key": True, "enabled": True,
-         "base_url": FAKE_BASE_URLS[0], "key_env": FAKE_KEY_ENVS[0], "api_key": PROVIDER_KEY},
-        {"name": VENDOR_B, "models": [{"id": m} for m in VENDOR_B_MODELS], "key": False,
-         "enabled": True, "base_url": FAKE_BASE_URLS[1], "key_env": FAKE_KEY_ENVS[1]},
-        {"name": VENDOR_OFF, "models": ["off-model"], "key": True, "enabled": False,
-         "base_url": FAKE_BASE_URLS[2], "key_env": FAKE_KEY_ENVS[2], "api_key": PROVIDER_KEY},
+        provider_entry(VENDOR_A, count=len(VENDOR_A_MODELS), key="ok"),
+        provider_entry(VENDOR_B, count=None, key="missing", key_env=FAKE_KEY_ENVS[0],
+                       source="custom", api="anthropic-messages",
+                       note="走镜像 https://%s/b/v1" % FAKE_ENDPOINT_HOST,
+                       last_refresh={"at": 0, "ok": True, "count": len(VENDOR_B_MODELS), "reason": None}),
+        provider_entry(VENDOR_OFF, count=len(VENDOR_OFF_MODELS), key="ok", key_env=FAKE_KEY_ENVS[1],
+                       enabled=False, source="custom"),
     ]
+
+
+def gateway_choices():
+    """假网关 `GET /v1/model` 里的 choices：各家条目交错排列，停用那家的模型也在里面。"""
+    a, b, off = VENDOR_A_MODELS, VENDOR_B_MODELS, VENDOR_OFF_MODELS
+    order = [(VENDOR_A, a[0]), (VENDOR_B, b[0]), (VENDOR_A, a[1]), (VENDOR_OFF, off[0]),
+             (VENDOR_B, b[1]), (VENDOR_A, a[2])]
+    return [{"provider": p, "model": m} for p, m in order]
+
+
+def _pair(pair):
+    return {"provider": pair[0], "model": pair[1]}
+
+
+def model_reply(current=CFG_PAIR, config=CFG_PAIR, choices=DEFAULT, providers=DEFAULT):
+    """拼一份 `GET /v1/model` 的返回体（补充文件 5.1 的形状）。
+
+    current / config 给 (供应商, 模型)；config、choices、providers 给 OMIT 就不放这个键；
+    choices、providers 给别的值（含 None）就原样放进去。
+    """
+    reply = {"ok": True, "current": _pair(current)}
+    if config is not OMIT:
+        reply["config"] = _pair(config)
+    for key, value, make_default in (("choices", choices, gateway_choices),
+                                     ("providers", providers, gateway_providers)):
+        if value is DEFAULT:
+            value = make_default()
+        if value is not OMIT:
+            reply[key] = value
+    return reply
 
 
 class RecordingGateway:
@@ -194,22 +237,26 @@ class RecordingGateway:
         self.routes[(method, path)] = fn
         return self
 
-    def serve_model(self, current, providers, effort=None):
-        """照第 5 节应答四种请求。换供应商、改强度都记在 self.state 里，下一次读就能读到。"""
+    def serve_model(self, reply, effort=None):
+        """照第 5 节应答四种请求。`GET /v1/model` 回 reply（见 model_reply）。
+
+        换供应商只改 reply 里的 current（config 是配置文件里写的，不跟着变）；改强度记在
+        self.state 里。下一次读就能读到。
+        """
         st = self.state
-        st["current"] = {"provider": current[0], "model": current[1]}
+        st["reply"] = copy.deepcopy(reply)
         st["effort"] = effort
 
         def get_model(rec):
-            return 200, {"ok": True, "current": dict(st["current"]), "providers": providers}
+            return 200, copy.deepcopy(st["reply"])
 
         def post_model(rec):
             spec = rec["json"].get("spec") if isinstance(rec["json"], dict) else None
             if not isinstance(spec, str) or "/" not in spec:
                 return 400, {"ok": False}
             provider, model = spec.split("/", 1)
-            st["current"] = {"provider": provider, "model": model}
-            return 200, {"ok": True, "current": dict(st["current"])}
+            st["reply"]["current"] = {"provider": provider, "model": model}
+            return 200, {"ok": True, "current": dict(st["reply"]["current"])}
 
         def get_effort(rec):
             return 200, {"ok": True, "current": st["effort"]}
@@ -349,13 +396,13 @@ class AdapterEnv:
         self._gateways.append(gw)
         return gw
 
-    def model_gateway(self, current=(CFG_PROVIDER, CFG_MODEL), providers=None, effort=None):
+    def model_gateway(self, effort=None, **reply):
         """会应答的假网关：照补充文件第 5 节答四种请求。
 
-        current 不给就是配置文件里写的那一组；providers 不给就是 gateway_providers() 那三家。
+        reply 原样交给 model_reply：current、config 不给就是配置文件里写的那一组，choices、providers
+        不给就是上面那三家。effort 是单独指定的思考强度，不给就是没有单独指定（读到 null）。
         """
-        return self.gateway().serve_model(
-            current, gateway_providers() if providers is None else providers, effort)
+        return self.gateway().serve_model(model_reply(**reply), effort)
 
     def running_bot(self, bot_id, gw, **kw):
         """一只正在运行的假 bot：网关端口指向 gw，心跳一直在刷新。"""
