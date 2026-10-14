@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """适配服务 v0.4 验收：投递通知 POST /adapter/v1/bots/{bot_id}/notify，与 meta 的十项能力。
 
-依据：约定 v0.4 第 4 节、5.7、第 6 节；补充文件 6.2、第 7 节、第 8 节。不读实现。
+依据：约定 v0.4 第 4 节、5.7、第 6 节；补充文件 6.2（含约定 v0.5 加的第三种 source moment_image）、
+第 7 节、第 8 节。不读实现。
 假网关的 POST /v1/inject 在本文件里配（adapter_util 不改）：照补充文件 6.2 应答
 {"ok": true, "duplicate": 布尔}，并像真网关一样把 key 截到 120 个字符再去重（第 8 节）。
 """
@@ -20,6 +21,9 @@ GW_INJECT = "/v1/inject"
 OTHER_CHAT_ID = 1009876543210888          # 另一只 bot 的假聊天号
 TEXT = "测试通知：用户刚发了一条动态，内容是今天下雨了。"
 KEY = "user-moment:9001"
+#: 配图通知（source 为 moment_image）：key 照补充文件 6.2 形如 moment-image:<动态编号>
+IMAGE_TEXT = "测试通知：你刚发的那条动态还缺一张配图，动态内容是傍晚的操场。"
+IMAGE_KEY = "moment-image:31415"
 
 
 def notify_url(bot_id):
@@ -103,6 +107,29 @@ def test_通知_同一个key交两次_第二次回duplicate_bot只收到一次(a
     assert len(target.inbox.delivered) == 1, "bot 收到了不止一次：%r" % target.inbox.delivered
 
 
+def test_通知_配图source为moment_image_回delivered_source与key原样交给这只bot的网关(adapter, target):
+    payload = req(text=IMAGE_TEXT, key=IMAGE_KEY, source="moment_image")
+    body = adapter.ok(adapter.call("POST", notify_url("botbravo"), payload))
+    assert body.get("status") == "delivered", body
+    sent = injects(target.gw)
+    assert len(sent) == 1, "应恰好向 botbravo 的网关发一次 POST /v1/inject：%r" % target.gw.requests
+    got = sent[0]["json"]
+    assert got.get("source") == "moment_image", "source 应原样转交：%r" % got.get("source")
+    assert got.get("key") == IMAGE_KEY, "key 应原样转交：%r" % got.get("key")
+    assert str(got.get("chat_id")) == au.CHAT_ID, "chat_id 应取 botbravo 配置里的那个"
+    assert isinstance(got.get("text"), str) and IMAGE_TEXT in got["text"], "要投的那段话没交给网关"
+    assert target.other_gw.requests == [], "给 botbravo 投通知，却找了 botalpha 的网关"
+
+
+def test_通知_配图source为moment_image_同一个key交两次_第二次回duplicate_bot只收到一次(adapter, target):
+    payload = req(text=IMAGE_TEXT, key=IMAGE_KEY, source="moment_image")
+    first = adapter.ok(adapter.call("POST", notify_url("botbravo"), payload))
+    second = adapter.ok(adapter.call("POST", notify_url("botbravo"), payload))
+    assert first.get("status") == "delivered", first
+    assert second.get("status") == "duplicate", "同一个 key 第二次应回 duplicate：%r" % second
+    assert len(target.inbox.delivered) == 1, "bot 收到了不止一次：%r" % target.inbox.delivered
+
+
 def test_通知_超过120个字符的key_前120个字符相同也能分开_同一个长key仍去重(adapter, target):
     head = "moment-reply:" + "9" * 120
     k1, k2 = head + ":A1", head + ":B2"
@@ -144,7 +171,10 @@ def test_通知_边界上的合规入参_照常投递(adapter, target, payload):
 
 BAD = {
     "source缺失": ({"text": TEXT, "key": KEY}, None),
-    "source不在两种里": (req(source="user_post"), None),
+    "source不在三种里": (req(source="user_post"), None),
+    "source写成key前缀的连字符moment-image": (req(source="moment-image"), None),
+    "source大小写不对Moment_Image": (req(source="Moment_Image"), None),
+    "source是没有的同族moment_video": (req(source="moment_video"), None),
     "source不是字符串": (req(source=1), None),
     "text缺失": ({"source": "user_moment", "key": KEY}, None),
     "text是空串": (req(text=""), None),
