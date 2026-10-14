@@ -434,9 +434,11 @@ export class Engine {
     at.replyCalls++
     at.lastProgressAt = Date.now()
     const asVoice = args.as_voice === true || args.as_voice === 'true'
-    const voiceId = asVoice ? this.access().voiceId : undefined
+    // access.json 每次发语音现读（改了不用重启）：音色，和约定 v0.8 B.3 的合成模型（没设就不带）
+    const voiceAccess = asVoice ? this.access() : undefined
+    const voiceId = voiceAccess?.voiceId
     if (asVoice && !voiceId) this.log.warn('tool.reply_voice_unconfigured', { turn: at.turnId })
-    const voice = voiceId ? (t: string) => this.media.synthesize(t, voiceId, str(args.voice_emotion), str(args.voice_instruct)) : undefined
+    const voice = voiceId ? (t: string) => this.media.synthesize(t, voiceId, str(args.voice_emotion), str(args.voice_instruct), voiceAccess?.voiceModel) : undefined
     const voiceTexts = voice && typeof args.voice_text === 'string' && args.voice_text.trim() ? args.voice_text.split(/\n\s*\n/).map(x => x.trim()) : undefined
     const skipFiles = new Set(this.ledger.sentFilesInChain(at.rootId))
     const sending = this.sender.send({ chatId: at.chatId, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo: Number.isInteger(replyTo) && replyTo > 0 ? replyTo : undefined, skipTexts: already, skipFiles, voice, voiceTexts })
