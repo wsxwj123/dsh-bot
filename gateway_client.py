@@ -96,9 +96,12 @@ def model_info(channel_dir: str, timeout: float = 70) -> dict:
     return r
 
 
-def model_set(channel_dir: str, spec: str) -> tuple[bool, dict]:
-    """换模型：spec 是模型名（同 /model 命令），default 换回配置文件里的"""
-    code, r = _call(channel_dir, "POST", "/v1/model", {"spec": spec}, timeout=70)
+def model_set(channel_dir: str, spec: str, timeout: float = 70) -> tuple[bool, dict]:
+    """换模型：spec 是模型名（同 /model 命令），default 换回配置文件里的。
+
+    timeout 缺省 70 秒；适配服务的换供应商整条请求有时限，自己传剩下的时间。
+    """
+    code, r = _call(channel_dir, "POST", "/v1/model", {"spec": spec}, timeout=timeout)
     return code == 200 and bool(r.get("ok")), r
 
 
@@ -189,10 +192,10 @@ def effort_get(channel_dir: str, timeout: float = EFFORT_TIMEOUT) -> tuple[int, 
     return _call(channel_dir, "GET", "/v1/effort", timeout=timeout)
 
 
-def effort_set(channel_dir: str, effort: str) -> tuple[int, dict]:
-    """改一个 bot 的思考强度档位（POST /v1/effort）。"""
-    return _call(channel_dir, "POST", "/v1/effort", {"effort": effort},
-                 timeout=PROVIDER_WRITE_TIMEOUT)
+def effort_set(channel_dir: str, effort: str,
+               timeout: float = PROVIDER_WRITE_TIMEOUT) -> tuple[int, dict]:
+    """改一个 bot 的思考强度档位（POST /v1/effort）。timeout 缺省同写端点；适配服务自己传短的。"""
+    return _call(channel_dir, "POST", "/v1/effort", {"effort": effort}, timeout=timeout)
 
 
 def inject(channel_dir: str, chat_id: str, text: str, source: str, key: str,
