@@ -1938,7 +1938,8 @@ export class Engine {
       ok: problems.length === 0,
       problems,
       bot: this.cfg.id,
-      telegram: { last_ok_ms: pollAge, conflict: extra.pollConflict, last_error: extra.pollError },
+      // username：启动时向 Telegram 问到的用户名（不带 @），还没问到为 null。适配服务读它给群设置（适配约定 v0.7 5.12.1）
+      telegram: { last_ok_ms: pollAge, conflict: extra.pollConflict, last_error: extra.pollError, username: this.botUsername || null },
       dsh: { running: this.dsh.running, pid: this.dsh.pid, generation: this.dsh.generation, version: this.dsh.agentVersion, last_probe_ok_ms: this.lastProbeOkAt ? now - this.lastProbeOkAt : null },
       brain: { provider: this.brain.provider, model: this.brain.model, effort: this.brain.reasoningEffort ?? null },
       turns_running: this.runningCount,
