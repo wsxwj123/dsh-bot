@@ -70,3 +70,7 @@ PROJECT.md
 
 # ── dsh 验证脚本的运行输出（含请求记录，不入库）──
 lab/dsh/.runs/
+
+# 生活设定文件挪到了 ~/.dsh-bot/life/（2026-10-14），代码仓库里不再放
+configs/chenlulu.yml
+configs/wenya.yml
