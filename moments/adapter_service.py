@@ -5,8 +5,9 @@
 起服务：仓库根执行 ``python3 -m moments.adapter_service``；测试用 ``create_app()``。
 
 本模块只做三件事：换一种鉴权（令牌文件）、按约定的形状组响应、把错误翻成约定的错误码。
-列 bot、判状态、读生效的模型、经网关改思考强度、重启并等心跳，全部调管理台已有的函数
+判状态、读生效的模型、经网关改思考强度、重启并等心跳，全部调管理台已有的函数
 （``bots_client`` / ``bot_launchd`` / ``config_sources`` / ``gateway_client``），这里不重写。
+只有「读 bot 配置」不走管理台那条共用读法，见 ``_own_bots``。
 
 几条贯穿全模块的规矩：
 
@@ -26,6 +27,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+import yaml
 from flask import Flask, Response, request
 
 import gateway_client
@@ -233,25 +235,52 @@ def _json_object(allow_empty=False):
 
 # ---------------------------------------------------------------- 本系统的 bot
 
-def _bot_entries():
-    """本系统的 bot ``[{"id", "display_name"}]``，按编号字典序。
+def _own_bots():
+    """本系统的 bot，按编号字典序：``[{"id", "display_name", "enabled", "channel", "cfg"}]``。
 
-    范围与管理台单只重启的名单是同一句判据（过放行闸的：生效的那份配置在新系统配置根下、
-    文件名是合格的 bot id）。另一套系统的 bot 不在里面。名单读不出来就抛，外层回 500。
+    范围是补充文件第 1 节那句：新系统配置根（``HUB_CONFIGS_DSH_DIR``）下文件名是合格 bot id
+    的 ``<id>.yml``。每份只取它**自己**顶层写的键（``cfg``），不走管理台共用的
+    ``config_loader.load_bot``：那条读法会打开 ``life_config`` 指向的旧配置（另一套系统的目录）
+    整份合并进来，那份文件坏了或被删，这只 bot 还会从名单里整只消失（BRIEF 归属边界）。
+    旧系统配置根同理不读。读不了、解析不出、顶层不是映射的那份只跳过它自己（与管理台名单同口径）；
+    配置根本身列不出来就抛，外层回 500。
+
+    启停与网关位置都在这里（处理请求的线程里）读好：``enabled`` 按这份 yml 自己的 ``enabled``
+    判（判定只有 ``bots_registry.is_enabled`` 一处），``channel`` 是找网关用的频道目录。
     """
-    entries = bots_client.hub_visible(bots_client.list_bots(), bots_client.bot_sources(),
-                                      strict=True)
-    return sorted(entries, key=lambda e: e["id"])
+    from bots_registry import is_enabled    # 延迟 import：仓库根模块，理由同 config_sources
+    d = config_sources.dsh_dir()
+    if d is None or not os.path.isdir(d):
+        return []
+    bots = []
+    for name in sorted(os.listdir(d)):
+        bot_id = name[:-4] if name.endswith(".yml") else None
+        if not config_sources.is_qualified_bot_id(bot_id):
+            continue
+        try:
+            with open(os.path.join(str(d), name), encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception:                   # noqa: BLE001  坏掉的只跳过它自己
+            continue
+        if not isinstance(cfg, dict):
+            continue
+        shown = cfg.get("display_name")
+        bots.append({"id": bot_id, "display_name": shown.strip() if _text(shown) else bot_id,
+                     "enabled": is_enabled(cfg), "channel": config_sources.channel_dir(cfg),
+                     "cfg": cfg})
+    return bots
 
 
 def _require_bot(bot_id):
-    """名单里有这只 bot 才往下走（精确匹配，不拿 bot_id 去拼任何路径）。"""
-    if bot_id not in {e["id"] for e in _bot_entries()}:
-        raise Refuse(404, "unknown_bot", "没有这只 bot")
+    """名单里有这只 bot 才往下走（精确匹配，不拿 bot_id 去拼任何路径），返回它那一条。"""
+    for bot in _own_bots():
+        if bot["id"] == bot_id:
+            return bot
+    raise Refuse(404, "unknown_bot", "没有这只 bot")
 
 
-def _require_enabled(bot_id):
-    if not bot_launchd.enabled_of(bot_id):
+def _require_enabled(bot):
+    if not bot["enabled"]:
         raise Refuse(409, "stopped", "这只 bot 已停用，先启用它再操作")
 
 
@@ -306,12 +335,12 @@ def _live_brain(channel):
             "effort": effort}
 
 
-def _bot_row(entry, cfg, enabled, seams):
+def _bot_row(bot, seams):
     """列表里的一行（约定 5.2 的八个键）。在线程池里跑：只用传进来的值，不读环境与配置。"""
-    bot_id = entry["id"]
-    brain = _config_brain(cfg)
+    bot_id = bot["id"]
+    brain = _config_brain(bot["cfg"])
     live = None
-    if not enabled:
+    if not bot["enabled"]:
         state, state_text = "stopped", "已停用"
     else:
         row_state, _pid = bot_launchd.row_state(bot_id, seams)
@@ -321,7 +350,7 @@ def _bot_row(entry, cfg, enabled, seams):
             state, state_text = "running", "启动中"
         else:
             state, state_text = "broken", "没在运行：没有新鲜的心跳，启动项也不在跑"
-        live = _live_brain(config_sources.channel_dir(cfg))
+        live = _live_brain(bot["channel"])
     if live is None:
         provider, model, effort, source = brain["provider"], brain["model"], brain["effort"], "default"
     else:
@@ -332,7 +361,7 @@ def _bot_row(entry, cfg, enabled, seams):
         config_pair = (live["config_provider"] or brain["provider"],
                        live["config_model"] or brain["model"])
         source = "override" if (provider, model) != config_pair else "default"
-    return {"bot_id": bot_id, "display_name": entry["display_name"],
+    return {"bot_id": bot_id, "display_name": bot["display_name"],
             "state": state, "state_text": state_text,
             "provider": {"id": provider, "name": provider, "model": model, "effort": effort},
             "provider_source": source, "pending": None, "detail": {}}
@@ -369,16 +398,13 @@ def _meta():
 
 
 def _bots():
-    entries = _bot_entries()
-    if not entries:
+    bots = _own_bots()
+    if not bots:
         return {"ok": True, "bots": []}
     # 接缝、每只的启停、每只的配置都在处理请求的线程里读好，线程池里不再读环境与配置。
     seams = bot_launchd.resolve_seams()
-    configs = config_sources.effective_configs()
-    enabled = {e["id"]: bot_launchd.enabled_of(e["id"]) for e in entries}
-    with ThreadPoolExecutor(max_workers=min(MAX_ROW_WORKERS, len(entries))) as pool:
-        futures = [pool.submit(_bot_row, e, configs.get(e["id"]) or {}, enabled[e["id"]], seams)
-                   for e in entries]
+    with ThreadPoolExecutor(max_workers=min(MAX_ROW_WORKERS, len(bots))) as pool:
+        futures = [pool.submit(_bot_row, bot, seams) for bot in bots]
         return {"ok": True, "bots": [f.result() for f in futures]}
 
 
@@ -395,11 +421,10 @@ def _provider_catalog():
 
     换供应商的第 4 步不走这里：它只问那只 bot 自己的网关（见 ``_set_provider``）。
     """
-    configs = config_sources.effective_configs()
-    for entry in _bot_entries():
-        if not bot_launchd.enabled_of(entry["id"]):
+    for bot in _own_bots():
+        if not bot["enabled"]:
             continue
-        channel = config_sources.channel_dir(configs.get(entry["id"]) or {})
+        channel = bot["channel"]
         if not gateway_client.available(channel):
             continue
         try:
@@ -473,10 +498,10 @@ def _set_provider(bot_id):
         raise _invalid("思考强度只能是 off、low、high、max 之一")
     if not has_provider and not has_effort:
         raise _invalid("请求里没有要改的内容：给 provider_id 加 model，或者给 effort")
-    _require_bot(bot_id)
-    _require_enabled(bot_id)                # 补充文件 4.4 第 3 步：停用先于读清单，停用时什么都不读
+    bot = _require_bot(bot_id)
+    _require_enabled(bot)                   # 补充文件 4.4 第 3 步：停用先于读清单，停用时什么都不读
     # 前三步都过了，下面才开始找这只 bot 自己的网关（不找别的 bot 的）。
-    channel = config_sources.channel_dir(config_sources.effective_config(bot_id) or {})
+    channel = bot["channel"]
     if not gateway_client.available(channel):
         raise Refuse(503, "unavailable", NOT_SAVED)
     before = after = prior_effort = None
@@ -592,8 +617,7 @@ def _restart(bot_id):
         raise _invalid("force 只能是 true 或 false")
     if body.get("force") is not True:
         raise Refuse(501, "unsupported", "这个底层还不支持等空闲再重启，只能强制重启")
-    _require_bot(bot_id)
-    _require_enabled(bot_id)
+    _require_enabled(_require_bot(bot_id))
     # 覆盖命令（HUB_RESTART_CMD）是「整次换成跑一条全局命令」，做不到只动这一只，这里不走它。
     plan = bots_client.restart_plan()
     if not plan.available:
