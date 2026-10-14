@@ -266,9 +266,29 @@ def _own_bots():
             continue
         shown = cfg.get("display_name")
         bots.append({"id": bot_id, "display_name": shown.strip() if _text(shown) else bot_id,
-                     "enabled": is_enabled(cfg), "channel": config_sources.channel_dir(cfg),
+                     "enabled": is_enabled(cfg), "channel": _gateway_channel(bot_id, cfg),
                      "cfg": cfg})
     return bots
+
+
+def _gateway_channel(bot_id, cfg):
+    """找这只 bot 的网关用的频道目录（``gateway_client`` 到它旁边的 ``state/`` 里读口令与端口）。
+
+    取法与管理台编辑 bot 那边（``hub_addbot._channel_dir``）、网关自己（``config.ts``）一致：只认
+    这份 yml 自己顶层写的 ``bot_channel_path``（展开 ``~``），没写、为空、不是字符串就是
+    ``<bot 家>/channel``；``life_config`` 那份里写的不参与（安审 I1）。
+
+    落点：真正会被读的是旁边那个 ``state/``。它解析成真实路径（软链跟到底）之后必须在这只 bot 的家
+    （``<DSH_BOT_HOME>/bots/<id>``）里面，否则回空串，按网关不可用处理：写到另一套系统频道目录
+    （``~/.claude/channels/<x>``）的、``state`` 经软链出去的、频道目录就写成 bot 家本身的（那样
+    ``state`` 落在 ``bots/state``，不是这只的），都不去那里找口令。
+    """
+    raw = cfg.get("bot_channel_path")
+    home = os.path.join(os.path.realpath(str(config_sources.dsh_home())), "bots", bot_id)
+    written = config_sources.channel_dir({"bot_channel_path": raw.strip()}) if _text(raw) else ""
+    channel = os.path.abspath(written or os.path.join(home, "channel"))
+    state = os.path.realpath(os.path.join(os.path.dirname(channel), "state"))
+    return channel if state.startswith(home + os.sep) else ""
 
 
 def _require_bot(bot_id):
