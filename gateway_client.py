@@ -18,11 +18,22 @@ import urllib.error
 import urllib.request
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """跳转一律不跟：3xx 原样当 HTTPError 交给调用方（``_call`` 里就是带状态码的返回）。
+
+    默认的跳转处理会把请求头连同网关口令原样带到 Location 指的地方。端口被别的本机进程占了、
+    api.port 是残留文件时，对方回一个跳转就能把口令引到任意主机。真网关从不回跳转。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 # 管理台到网关一律走本机回环（127.0.0.1）。这台机器常驻 http_proxy（Clash TUN），
 # urllib 默认会把本机请求也交给代理，代理接走回 502 空正文，页面一路显示「网关没响应」。
 # 自己造一个不带代理的 opener：传了 ProxyHandler({}) 覆盖掉默认那个读环境变量的
-# （管理台侧一条 U43 验收钉的就是这件事）。
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+# （管理台侧一条 U43 验收钉的就是这件事）。也不跟跳转（安审 S1，见 _NoRedirect）。
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
 
 
 def _state_dir(channel_dir: str) -> str:
