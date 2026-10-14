@@ -29,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import yaml
 from flask import Flask, Response, request
+from werkzeug.exceptions import RequestEntityTooLarge
 
 import gateway_client
 from moments import bot_launchd, bots_client, config_sources
@@ -217,7 +218,12 @@ def _json_object(allow_empty=False):
     length = request.content_length
     if length is not None and length > MAX_BODY:
         raise bad
-    raw = request.get_data(cache=False)
+    # 分块传输没有 Content-Length：靠应用的 MAX_CONTENT_LENGTH（MAX_BODY + 1，见 create_app）
+    # 让框架最多读这么多就停，读满了就是超了。框架某些情况下改为抛 413，同样按不合规拒绝。
+    try:
+        raw = request.get_data(cache=False)
+    except RequestEntityTooLarge:
+        raise bad from None
     if len(raw) > MAX_BODY:
         raise bad
     if not raw.strip():
@@ -670,6 +676,10 @@ def create_app():
     """适配服务的 Flask 应用。不注册任何 URL 规则：全部请求在 ``before_request`` 里由
     ``_respond`` 接走（鉴权先于路由；路由按原样路径自己比对，见模块说明）。"""
     app = Flask(__name__)
+    # 请求体上限（安审 S4）。带 Content-Length 的在 _json_object 里先挡；分块传输的没有这个头，
+    # 框架读这种流时最多读到这个数就停（不抛错、不读进更多）。多给 1 个字节，_json_object 才分得清
+    # 「正好 MAX_BODY」与「超了」。
+    app.config["MAX_CONTENT_LENGTH"] = MAX_BODY + 1
 
     @app.before_request
     def _entry():
