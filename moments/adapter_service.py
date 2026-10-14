@@ -11,6 +11,10 @@
 （``bots_client`` / ``bot_launchd`` / ``config_sources`` / ``gateway_client``），这里不重写。
 只有「读 bot 配置」不走管理台那条共用读法，见 ``_own_bots``。
 
+同一个进程里还挂着管理台的三页与它们的接口（``INTERFACE-页面服务.md``，见「管理台三页」一节）：
+处理函数就是 8765 上那几个（``hub_routes``），这里只换鉴权（同一个令牌）、按原样路径对名单、
+渲染时把导航条换成一行占位注释，别的照 8765 收尾。
+
 几条贯穿全模块的规矩：
 
 - **鉴权先于一切**：没过鉴权时不看路径、不读请求体、不读任何 bot 的数据。
@@ -28,13 +32,14 @@ import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import unquote
 
 import yaml
-from flask import Flask, Response, request
-from werkzeug.exceptions import RequestEntityTooLarge
+from flask import Flask, Response, current_app, jsonify, request
+from werkzeug.exceptions import HTTPException, InternalServerError, RequestEntityTooLarge
 
 import gateway_client
-from moments import bot_launchd, bots_client, config_sources
+from moments import bot_launchd, bots_client, config_sources, hub_addbot, hub_routes, redact
 
 PREFIX = "/adapter/v1"
 DEFAULT_HOST = "127.0.0.1"
@@ -206,6 +211,9 @@ def _respond():
     if not allowed:
         return _json(UNAUTHORIZED, 401)
     try:
+        path = _raw_path()
+        if path == "/hub" or path.startswith("/hub/"):
+            return _hub_respond(path)       # 名单外的 404、错方法的 405 也从这里以 Refuse 抛出来
         return _json(_dispatch())
     except Refuse as r:
         return _json({"ok": False, "code": r.code, "message": r.message}, r.status, r.headers)
@@ -672,6 +680,147 @@ _READ_ROUTES = {PREFIX + "/meta": _meta, PREFIX + "/bots": _bots, PREFIX + "/pro
 _WRITE_ROUTES = {"provider": _set_provider, "restart": _restart}
 
 
+# ---------------------------------------------------------------- 管理台三页（页面服务）
+#
+# INTERFACE-页面服务.md。处理函数一个不重写：调的就是 8765 上注册的那几个函数对象（hub_routes）。
+# 它们在 8765 上还依赖几样应用级的东西，这里照搬：JSON 键不重排、重启任务表、getMe 地址的形状检查
+# （见 create_app）；/hub/api/ 的请求体上限、框架层出错回的 JSON、出站脱敏（见下面，原样出自 web.py）。
+# 只有鉴权（上面的令牌，先于一切）、按原样路径对名单、导航条换成占位注释这三样与 8765 不同。
+
+HUB_API_PREFIX = "/hub/api/"
+#: 8765 对 /hub/api/ 请求体的上限（web.py 的 HUB_MAX_BODY）。适配接口自己的上限 MAX_BODY 不管这里。
+HUB_MAX_BODY = 1024 * 1024
+#: 8765 在 /hub/api/ 下对这几种出错回 ``{"error": 码名}``（web.py 的 _HUB_ERROR_CODES），别的照框架默认。
+HUB_ERROR_CODES = {404: "not_found", 405: "method_not_allowed", 413: "payload_too_large", 500: "internal"}
+
+#: 名单（INTERFACE-页面服务 §2，只有这些，方法也只有这些）：``(路径, {方法: 8765 上的处理函数})``。
+#: 路径照 8765 的规则串写：``<x>`` 是一段、不许为空；``<dmname:x>`` 连空段也收（8765 预览接口的转换器，
+#: 空名字由处理函数回 400）。一个路径对得上两条时先试排在前面的：``bots/restart/<job_id>`` 排在
+#: ``bots/<bot_id>/…`` 之前，同框架「写死的段优先」；方法对不上接着往下试，也同框架。
+_HUB_ROUTES = [
+    ("/hub/bots", {"GET": hub_routes.hub_bots_page}),
+    ("/hub/addbot", {"GET": hub_routes.hub_addbot_page}),
+    ("/hub/dsh-model", {"GET": hub_routes.hub_dsh_model_page}),
+    ("/hub/api/bots", {"GET": hub_routes.bots_list, "POST": hub_routes.bots_create}),
+    ("/hub/api/bots/templates", {"GET": hub_routes.bots_templates}),
+    ("/hub/api/bots/test_token", {"POST": hub_routes.bots_test_token}),
+    ("/hub/api/bots/restart", {"POST": hub_routes.bots_restart}),
+    ("/hub/api/bots/restart/<job_id>", {"GET": hub_routes.bots_restart_status}),
+    ("/hub/api/bots/<bot_id>/edit", {"GET": hub_routes.bots_edit_read,
+                                      "POST": hub_routes.bots_edit_save}),
+    ("/hub/api/bots/<bot_id>/enabled", {"POST": hub_routes.bots_set_enabled}),
+    ("/hub/api/bots/<bot_id>/restart", {"POST": hub_routes.bots_restart_one}),
+    ("/hub/api/dsh-model", {"GET": hub_routes.dsh_model_list}),
+    ("/hub/api/dsh-model/<bot_id>", {"POST": hub_routes.dsh_model_set}),
+    ("/hub/api/dsh-model/<bot_id>/effort", {"GET": hub_routes.dsh_model_effort_get,
+                                             "POST": hub_routes.dsh_model_effort_set}),
+    ("/hub/api/dsh-model/provider/save", {"POST": hub_routes.dsh_model_provider_save}),
+    ("/hub/api/dsh-model/provider/<dmname:name>/preview",
+     {"POST": hub_routes.dsh_model_provider_preview}),
+    ("/hub/api/dsh-model/provider/<name>/models", {"POST": hub_routes.dsh_model_provider_models}),
+    ("/hub/api/dsh-model/provider/<name>/refresh", {"POST": hub_routes.dsh_model_provider_refresh}),
+    ("/hub/api/dsh-model/provider/<name>/remove", {"POST": hub_routes.dsh_model_provider_remove}),
+    ("/hub/api/dsh-model/provider/<name>/test", {"POST": hub_routes.dsh_model_provider_test}),
+]
+_HUB_TABLE = [(rule.split("/"), methods) for rule, methods in _HUB_ROUTES]
+
+
+def _segment_value(raw):
+    """原样路径里的一段 → 处理函数拿到的值，与 8765 上框架给的逐字相同。
+
+    WSGI 环境里的串是「按 latin-1 装着的字节」，框架解路径时先还原成字节、再按 UTF-8 解百分号编码
+    （解不出的字节换成替换字符）；这里对这一段做同样两步。先切段再解码：段里的 ``%2F`` 解出来
+    仍在这一段里，交给处理函数自己的名字校验去拒，不会变成分隔符把请求带到别的路由上。
+    """
+    try:
+        raw = raw.encode("latin-1").decode("utf-8", "replace")
+    except UnicodeEncodeError:              # 不是服务器给的样子：保持原样，名字校验会拒
+        pass
+    return unquote(raw, encoding="utf-8", errors="replace")
+
+
+def _hub_match(path, method):
+    """原样路径与方法 → ``(处理函数, 路径参数)``。逐段比对，不规范化（末尾斜杠、双斜杠、
+    ``%62ots`` 这种编过码的写死段都对不上）。路径不在名单 → 404，路径在而方法不在 → 405。"""
+    parts = path.split("/")
+    allowed = set()
+    for rule, methods in _HUB_TABLE:
+        if len(rule) != len(parts):
+            continue
+        args = {}
+        for want, got in zip(rule, parts):
+            if want.startswith("<") and want.endswith(">"):
+                kind, _, name = want[1:-1].rpartition(":")
+                if got == "" and kind != "dmname":
+                    break
+                args[name] = _segment_value(got)
+            elif want != got:
+                break
+        else:
+            if method in methods:
+                return methods[method], args
+            allowed.update(methods)
+    if allowed:
+        raise Refuse(405, "method_not_allowed", "这个接口不支持这种请求方式",
+                     headers={"Allow": ", ".join(sorted(allowed))})
+    raise Refuse(404, "not_found", "没有这个接口")
+
+
+def _hub_failure(api, err):
+    """8765 框架层对同一种出错的回应（web.py 的 _hub_error_handler）。"""
+    if api and err.code in HUB_ERROR_CODES:
+        resp = jsonify({"error": HUB_ERROR_CODES[err.code]})
+        resp.status_code = err.code
+        return resp
+    return err.get_response(request.environ)
+
+
+def _hub_scrub(resp):
+    """8765 出站的第二层脱敏（web.py 的 _hub_api_scrub），同一个函数、同一个判据。"""
+    if resp.direct_passthrough or not resp.is_json:
+        return resp
+    body = resp.get_json(silent=True)
+    if body is None:
+        return resp
+    scrubbed, changed = redact.scrub_fields(body)
+    if changed:
+        resp.set_data(json.dumps(scrubbed, ensure_ascii=False))
+    return resp
+
+
+def _hub_respond(path):
+    """名单内的 ``/hub/...``：已过鉴权，调 8765 上同一个处理函数，照 8765 的样子收尾。"""
+    handler, args = _hub_match(path, request.method)
+    api = path.startswith(HUB_API_PREFIX)
+    try:
+        if api:
+            if (request.content_length or 0) > HUB_MAX_BODY:     # 8765 的体积闸（web.py 的 _hub_body_limit）
+                raise RequestEntityTooLarge()
+            # 应用级的 MAX_CONTENT_LENGTH 是给适配接口的；这几条接口按 8765 的上限读请求体，
+            # 分块传输的读到上限就停（超了框架抛 413，下面回同一个 JSON）。
+            request.max_content_length = HUB_MAX_BODY
+        resp = current_app.make_response(handler(**args))
+    except HTTPException as e:
+        resp = _hub_failure(api, e)
+    except Exception as e:                  # noqa: BLE001  异常消息可能带请求体里的令牌或密钥，只记类名
+        _log.error("console page internal error: %s", type(e).__name__)
+        resp = _hub_failure(api, InternalServerError())
+    return _hub_scrub(resp) if api else resp
+
+
+def _addbot_base_error():
+    """``HUB_TELEGRAM_API_BASE`` 形状不对时的那句话，没问题是 None。
+
+    与 8765 同一个判定、同一个时机（建应用时判一次）。8765 那边挂在蓝图注册上（hub_routes 的
+    ``_ab_check_base``，被 record_once 装饰后模块里那个名字是 None，调不到），这里照它写。
+    """
+    try:
+        hub_addbot.api_base()
+    except RuntimeError as e:
+        return str(e)
+    return None
+
+
 # ---------------------------------------------------------------- 应用与命令行
 
 def create_app():
@@ -682,6 +831,17 @@ def create_app():
     # 框架读这种流时最多读到这个数就停（不抛错、不读进更多）。多给 1 个字节，_json_object 才分得清
     # 「正好 MAX_BODY」与「超了」。
     app.config["MAX_CONTENT_LENGTH"] = MAX_BODY + 1
+    # 管理台三页的处理函数在 8765 上依赖的应用级设置（适配接口自己的响应不经 jsonify，不受影响）：
+    app.json.sort_keys = False              # 同 web.py：JSON 的键照处理函数给的顺序，不重排
+    app.extensions["hub_restart_jobs"] = bots_client.RestartJobs()      # 同 hub_routes 的 _init_restart_jobs
+    app.extensions["hub_addbot_base_error"] = _addbot_base_error()
+    # requests 底下的 urllib3 在调试级别会把整条地址记进日志，getMe 的地址里就是请求体里的 Telegram 令牌
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+    @app.context_processor
+    def _console_nav():
+        # 渲染开关：_nav.html 见到它就把导航条换成一行占位注释（壳换成它的导航）；8765 不设，照旧
+        return {"console_nav": True}
 
     @app.before_request
     def _entry():
