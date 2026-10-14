@@ -31,6 +31,7 @@ import os
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import unquote
 
@@ -69,6 +70,11 @@ MAX_BODY = 64 * 1024
 GATEWAY_READ_TIMEOUT = 2.0
 #: 重启从发命令算起的总时限（补充文件 4.5：50 秒内没等到就回 failed；壳等 60 秒）。
 RESTART_BUDGET = 50.0
+#: 换供应商整条请求的时限（补充文件 6.1：55 秒内返回）。测试经 DSH_CONSOLE_PROVIDER_BUDGET 缩短（第 8 节）。
+PROVIDER_BUDGET = 55.0
+#: 读清单、读原强度最多用掉时限的这一份，写请求至少留下其余的时间（PLAN-v04 第 1 节）：
+#: 读拖到最后才回的话，写请求刚发出就到点，只能回「还没确认」。
+READ_SHARE = 0.4
 MAX_ROW_WORKERS = 8
 
 #: 配置文件没写 brain 时网关自己用的默认值（gateway/src/config.ts 的 parseBrain）。
@@ -82,7 +88,7 @@ KEY_READY = ("ok", "none")
 
 NOT_SAVED = "这只 bot 的进程现在连不上，这次没有保存"
 NOT_SAVED_SLOW = "这只 bot 的进程没有及时回应，这次没有保存"
-MAYBE_SAVED = "这只 bot 的进程没有及时回应，这次改动可能已经保存，请刷新后确认"
+UNCONFIRMED = "已发给这只 bot，还没确认生效，请稍后刷新确认"     # 补充文件 6.1 原文
 NO_RUNNING_BOT = "没有正在运行的 bot，暂时读不到供应商清单"
 
 UNAUTHORIZED = {"ok": False, "code": "unauthorized", "message": "令牌缺失或不对"}
@@ -102,6 +108,10 @@ class Refuse(Exception):
     def __init__(self, status, code, message, headers=None):
         super().__init__(code)
         self.status, self.code, self.message, self.headers = status, code, message, headers
+
+
+class _NoReply(Exception):
+    """请求已经交给网关，在时限内没等到回复（超时、中途断开）。写请求时：可能已经生效，也可能没有。"""
 
 
 def _invalid(message):
@@ -522,7 +532,23 @@ def _providers():
     return {"ok": True, "providers": _provider_catalog(), "default": {"label": DEFAULT_LABEL}}
 
 
+def _provider_budget():
+    """换供应商整条请求的时限（秒）：``DSH_CONSOLE_PROVIDER_BUDGET``，每次请求现读。
+
+    只供测试缩短时限用：不是正数、比 55 秒还长的（含 nan、inf）一律按 55 秒。
+    """
+    try:
+        budget = float((os.environ.get("DSH_CONSOLE_PROVIDER_BUDGET") or "").strip())
+    except ValueError:
+        return PROVIDER_BUDGET
+    return budget if 0 < budget <= PROVIDER_BUDGET else PROVIDER_BUDGET
+
+
 def _set_provider(bot_id):
+    started = time.monotonic()
+    budget = _provider_budget()
+    # 补充文件 6.1：整条请求在 deadline 前返回；读阶段（读清单、读原强度）在 read_by 前回来
+    deadline, read_by = started + budget, started + READ_SHARE * budget
     body = _json_object()
     if "reset" in body:
         raise Refuse(501, "unsupported", "这个底层还不支持一键回到默认供应商")
@@ -543,27 +569,34 @@ def _set_provider(bot_id):
     before = after = prior_effort = None
     if has_provider:
         # 第 4 步：向这只 bot 的网关读一次清单（只读请求），没过就到此为止，什么都没写。
-        info = _gateway(lambda: gateway_client.model_info(channel), NOT_SAVED_SLOW)
+        info = _read_gateway(lambda t: gateway_client.model_info(channel, timeout=t), read_by)
         _require_offered(_catalog(info), body["provider_id"], body["model"])
         before = _pair(info.get("current"))  # 同一次读里现在生效的那一组，用来判断是不是换了一家
         # 第 5 步：以上都过了才写。
         if has_effort:
             # 强度被拒时要把供应商和模型换回去，而网关换模型会清掉单独指定的强度：先记下原来的。
-            prior_effort = _gateway(lambda: _effort_override(channel), NOT_SAVED_SLOW)
-        after = _switch(channel, before, body["provider_id"], body["model"])
+            prior_effort = _read_gateway(lambda t: _effort_override(channel, t), read_by)
+        try:
+            after = _switch(channel, before, body["provider_id"], body["model"], deadline)
+        except _NoReply:
+            # 6.1：换模型已经发出、时限内没回，换没换成不知道；强度不再发
+            return _unconfirmed(False)
     if has_effort:
         try:
-            _apply_effort(channel, body["effort"])
+            _apply_effort(channel, body["effort"], deadline)
+        except _NoReply:
+            # 6.1：改强度已经发出、时限内没回；供应商和模型这一步（若有）是确认过的
+            return _unconfirmed(has_provider and after[0] != before[0])
         except Exception as e:              # noqa: BLE001  不只是拒绝：网关回 400、500、认不出的也在这里
             if after != before:             # 供应商和模型这一步已经写进去了（约定 5.4：不许写了一半）
                 if isinstance(e, Refuse) and e.status != 422:
-                    # 网关断了或没回应：换不回去，强度那一步也可能其实已经保存，只能把话说实
+                    # 改强度没发出去（网关连不上了，或者没时间了）：供应商和模型换了，强度没动
                     raise Refuse(e.status, e.code, "供应商和模型已经换了，但思考强度"
                                  "没有确认改成，请刷新后确认") from None
-                # 网关明说不支持（422），或回了 400、500、认不出的东西：先换回原来那一组。
+                # 网关明说不支持（422），或回了 400、500、认不出的东西：在剩下的时间里换回原来那一组。
                 # 换回去了再照原样往外报（认不出的仍是 500 内部错误，但设置已经是原样）；
                 # 换不回去由 _undo_switch 把现状说实。
-                _undo_switch(channel, before, prior_effort)
+                _undo_switch(channel, before, prior_effort, deadline)
             raise
     new_segment = has_provider and after[0] != before[0]
     message = "已保存，下一条消息起生效"
@@ -573,21 +606,54 @@ def _set_provider(bot_id):
             "message": message}
 
 
-def _gateway(call, when_sent):
-    """向这只 bot 的网关发一次请求，把网络上的事翻成 503；别的异常原样往外抛（外层回 500）。
+def _unconfirmed(new_segment):
+    return {"ok": True, "applied": True, "queued": False, "new_segment": new_segment,
+            "message": UNCONFIRMED}
 
-    ``when_sent``：请求发出去之后才断或超时的那句话。写请求可能已经保存、读请求没有，
-    两种话不一样，由调用方给。约定里没有单独的码，都归到 503。
+
+def _gateway(call, deadline):
+    """向这只 bot 的网关发一次请求 ``call(超时秒数)``，最多等到 ``deadline``（单调时钟）。
+
+    硬封顶靠线程：urllib 的超时管的是每一次阻塞操作，连接、发送、接收能各用掉接近一个超时，
+    不是整次调用的上限。到点没回，那次请求留在守护线程里，socket 超时（同为当时剩下的时间）到了自己退出。
+
+    - 还没发就到了时限 → 503 ``NOT_SAVED_SLOW``；连不上（拒连）→ 503 ``NOT_SAVED``。都是没发出去。
+    - 发出去了，中途断开、超时、到点没回 → ``_NoReply``，由调用方按读还是写来定怎么回。
+    - 别的异常原样往外抛（外层回 500）。
     """
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise Refuse(503, "unavailable", NOT_SAVED_SLOW)
+    box = {}
+
+    def run():
+        try:
+            box["reply"] = call(left)
+        except Exception as e:              # noqa: BLE001  交回主线程分流
+            box["error"] = e
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(left)
+    if worker.is_alive():
+        raise _NoReply()
+    error = box.get("error")
+    if error is None:
+        return box["reply"]
+    kind = gateway_client.net_kind(error)
+    if kind == "unreachable":
+        raise Refuse(503, "unavailable", NOT_SAVED) from None
+    if kind == "broken":
+        raise _NoReply() from None
+    raise error
+
+
+def _read_gateway(call, deadline):
+    """只读请求：没等到回复也什么都没写，回 503。"""
     try:
-        return call()
-    except Exception as e:                  # noqa: BLE001  下面按类型分流
-        kind = gateway_client.net_kind(e)
-        if kind == "unreachable":
-            raise Refuse(503, "unavailable", NOT_SAVED) from None
-        if kind == "broken":
-            raise Refuse(503, "unavailable", when_sent) from None
-        raise
+        return _gateway(call, deadline)
+    except _NoReply:
+        raise Refuse(503, "unavailable", NOT_SAVED_SLOW) from None
 
 
 def _pair(choice):
@@ -598,17 +664,17 @@ def _pair(choice):
     return choice["provider"], choice["model"]
 
 
-def _switch(channel, before, provider_id, model):
+def _switch(channel, before, provider_id, model, deadline):
     """经这只 bot 的网关换供应商和模型，返回换之后生效的那一组 ``(供应商, 模型)``。
 
     ``before`` 是第 4 步那次读里现在生效的一组。发的是管理台模型页在用的写请求
     ``POST /v1/model``，请求体 ``{"spec": "供应商/模型"}``，网关回 ``{"ok", "text", "current"}``。
     已经是这一组时网关也回 ok，重复提交不叠加。
     网关明说没换（这只 bot 缺这家的密钥，或它的模型表里此刻没有这个模型）→ 422，什么都没写；
-    网关的原话可能带密钥的变量名，不往外带。
+    网关的原话可能带密钥的变量名，不往外带。发出去了没等到回复抛 ``_NoReply``。
     """
-    ok, got = _gateway(lambda: gateway_client.model_set(channel, "%s/%s" % (provider_id, model)),
-                       MAYBE_SAVED)
+    spec = "%s/%s" % (provider_id, model)
+    ok, got = _gateway(lambda t: gateway_client.model_set(channel, spec, timeout=t), deadline)
     after = _pair(got.get("current") if isinstance(got, dict) else None)
     if not ok:
         if got.get("ok") is False and after == before:
@@ -618,9 +684,9 @@ def _switch(channel, before, provider_id, model):
     return after
 
 
-def _apply_effort(channel, effort):
+def _apply_effort(channel, effort, deadline):
     """经这只 bot 的网关改思考强度：``POST /v1/effort``，请求体 ``{"effort": 档位}``。"""
-    code, got = _gateway(lambda: gateway_client.effort_set(channel, effort), MAYBE_SAVED)
+    code, got = _gateway(lambda t: gateway_client.effort_set(channel, effort, timeout=t), deadline)
     if code == 409:
         # 网关的 409 unsupported：档位在四档之内，但这只 bot 现在用的模型不支持它
         raise _invalid("这只 bot 现在用的模型不支持这个思考强度")
@@ -628,15 +694,17 @@ def _apply_effort(channel, effort):
         raise RuntimeError("unexpected gateway reply")
 
 
-def _undo_switch(channel, before, prior_effort):
-    """强度被拒之后把供应商和模型换回 ``before``，原来单独指定过强度的再设回去。
+def _undo_switch(channel, before, prior_effort, deadline):
+    """强度被拒之后，在时限剩下的时间里把供应商和模型换回 ``before``，原来单独指定过强度的再设回去。
 
-    换回配置文件里那一组时网关自己会清掉单独指定，不留痕迹。换不回去就抛 500，把现状说实。
+    换回配置文件里那一组时网关自己会清掉单独指定，不留痕迹。换不回去（含到点没换完）就抛 500，把现状说实。
     """
+    spec = "%s/%s" % before
     try:
-        ok, _got = gateway_client.model_set(channel, "%s/%s" % before)
+        ok, _got = _gateway(lambda t: gateway_client.model_set(channel, spec, timeout=t), deadline)
         if ok and prior_effort is not None:
-            code, got = gateway_client.effort_set(channel, prior_effort)
+            code, got = _gateway(lambda t: gateway_client.effort_set(channel, prior_effort, timeout=t),
+                                 deadline)
             ok = code == 200 and isinstance(got, dict) and got.get("ok") is True
     except Exception:                       # noqa: BLE001  换不回去的原因不重要，结果要说实
         ok = False
