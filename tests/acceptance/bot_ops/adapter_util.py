@@ -645,3 +645,76 @@ class InjectInbox:
         self.seen.add(k)
         self.delivered.append(body)
         return 200, {"ok": True, "duplicate": False}
+
+
+# ---------------------------------------------------------------- v0.8（补充文件第 10 节）
+# 依据：INTERFACE-适配服务.md 10.1 到 10.3；INTERFACE-适配约定-v0.8-dsh侧.md A、B。下面是第 10 节几份用例共用的小件。
+
+#: 10.1：第 9 节的十三个键，加 bot.persona、bot.voice，都报 true，共十五个键
+CAPABILITIES_V08 = dict(CAPABILITIES_V07, **{"bot.persona": True, "bot.voice": True})
+
+#: v0.8 草案 B.2：tts_model 的白名单
+TTS_MODELS = ("s1", "s2-pro", "s2.1-pro", "s2.1-pro-free", "drama-3-preview")
+PERSONA_SAVED = "已保存，几秒内生效"                 # A.2 成功
+PERSONA_SAME = "没有改动"                            # A.2 和当前全文完全相同
+PERSONA_STALE = "人设刚被别处改过，请刷新后再改"     # A.2 409 stale
+PERSONA_LIMIT = 256 * 1024                           # A.2：text 按 UTF-8 字节数的上限
+PAST = 1600000000    # 2020-09：先把文件修改时间拨到过去，"没写过"才看得出来
+
+
+def persona_url(bot_id):
+    return "%s/%s/persona" % (BOTS, bot_id)
+
+
+def voice_url(bot_id):
+    return "%s/%s/voice" % (BOTS, bot_id)
+
+
+def persona_version(data):
+    """A.1：原始字节的 SHA-256 取前 16 位十六进制。str 按 UTF-8 编码；文件不存在就传 b""。"""
+    import hashlib
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def channel_of(bot):
+    """adapter.bot 摆出来的频道目录（配置里的 bot_channel_path）。"""
+    return bot.botdir / "channel"
+
+
+def persona_path(bot):
+    """A.1：人设是这只 bot 频道目录下的 CLAUDE.md。"""
+    return channel_of(bot) / "CLAUDE.md"
+
+
+def persona_backups(sandbox, bot_id):
+    """10.2：<DSH_BOT_HOME>/backups/persona/<bot_id>/ 下的文件，按名字排好；目录不在就是空列表。"""
+    d = sandbox.dsh_home / "backups" / "persona" / bot_id
+    if not d.is_dir():
+        return []
+    return sorted(p for p in d.iterdir() if p.is_file())
+
+
+def put_file(path, data, mode=0o600):
+    """写一个文件（str 按 UTF-8），设好权限，修改时间拨到过去。"""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data.encode("utf-8") if isinstance(data, str) else data)
+    p.chmod(mode)
+    os.utime(str(p), (PAST, PAST))
+    return p
+
+
+def file_mark(path):
+    """"一个字节都没变"的指纹：是否软链、字节、修改时间、权限、inode。文件不在就是 None。"""
+    p = Path(path)
+    if not os.path.lexists(str(p)):
+        return None
+    st = os.lstat(str(p))
+    data = None if p.is_symlink() else p.read_bytes()
+    return (p.is_symlink(), data, st.st_mtime_ns, st.st_mode & 0o7777, st.st_ino)
+
+
+def mode_of(path):
+    return os.stat(str(path)).st_mode & 0o7777
