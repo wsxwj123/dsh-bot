@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """适配服务验收：三个只读接口的返回形状，以及"响应里没有敏感内容"。
 
-依据：INTERFACE-适配约定-v0.3.md 5.1 到 5.3，INTERFACE-适配服务.md 4.1 到 4.3、5.1。不读实现。
+依据：INTERFACE-适配约定-v0.3.md 5.1 到 5.3，INTERFACE-适配服务.md 4.1 到 4.3、5.1、第 7 节。不读实现。
 """
 import copy
 import re
@@ -13,8 +13,22 @@ from . import adapter_util as au
 from . import botops_util as u
 from .adapter_util import adapter, console_guard  # noqa: F401  夹具
 
+#: 补充文件第 7 节：4.1 表里的八个，加 bot.notify 与 bot.life_settings，恰好十个键
+CAPABILITIES_TEN = {
+    "bot.restart.graceful": False,
+    "bot.restart.force": True,
+    "bot.set_provider": True,
+    "bot.reset_provider": False,
+    "bot.set_effort": True,
+    "provider.subscription": False,
+    "provider.per_session": False,
+    "provider.switch_new_segment": True,
+    "bot.notify": True,
+    "bot.life_settings": True,
+}
 
-def test_meta_固定取值与八项能力如约(adapter):
+
+def test_meta_固定取值与十项能力如约(adapter):
     body = adapter.ok(adapter.call("GET", au.META))
     assert body["backend"] == "dsh"
     assert body["adapter"] == "v1"
@@ -22,8 +36,12 @@ def test_meta_固定取值与八项能力如约(adapter):
     assert isinstance(version, str) and version.strip(), "backend_version 应是非空字符串：%r" % (version,)
     assert body["effort_levels"] == au.EFFORT_LEVELS
     caps = body["capabilities"]
-    assert caps == au.CAPABILITIES, "能力清单应恰好是约定的八个键与取值"
-    assert all(type(v) is bool for v in caps.values()), "能力清单的值必须是布尔：%r" % (caps,)
+    assert isinstance(caps, dict), "capabilities 应是对象：%r" % (caps,)
+    missing = sorted(set(CAPABILITIES_TEN) - set(caps))
+    extra = sorted(set(caps) - set(CAPABILITIES_TEN))
+    assert not missing and not extra, "能力清单应恰好是约定的十个键：缺 %r，多 %r" % (missing, extra)
+    for key, want in CAPABILITIES_TEN.items():
+        assert caps[key] is want, "能力 %s 应为布尔 %r，实际 %r" % (key, want, caps[key])
 
 
 def test_bots_一只bot都没有_200且是空数组(adapter):
