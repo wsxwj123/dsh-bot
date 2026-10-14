@@ -3,6 +3,8 @@
 
 契约：``.devflow/INTERFACE-适配约定-v0.4.md``（两边定稿）与 ``INTERFACE-适配服务.md``（本系统补充）；
 生活设定的做法在 ``INTERFACE-生活设定.md``，逻辑在 ``moments/life_settings.py``。
+v0.6、v0.7 的启停、切进导入、同跑提示、群设置、``group_turn`` 照 ``INTERFACE-适配约定-v0.7摘录.md``
+与补充文件第 9 节；切进导入的水位线与写账本在 ``scripts/import_history.py``。
 起服务：仓库根执行 ``python3 -m moments.adapter_service``；测试用 ``create_app()``。
 只支持这一种启动方式：监听地址只许回环、令牌文件不在就拒绝启动，这两道检查都在 ``main()`` 里。
 ``flask run`` 等别的方式拉起 ``create_app()`` 会绕过它们（例如对外监听），不要这样起。
@@ -34,6 +36,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from urllib.parse import unquote
 
 import yaml
@@ -42,6 +45,7 @@ from werkzeug.exceptions import HTTPException, InternalServerError, RequestEntit
 
 import gateway_client
 from moments import bot_launchd, bots_client, config_sources, hub_addbot, hub_routes, life_settings, redact
+from moments.provider_model import HubError
 
 PREFIX = "/adapter/v1"
 DEFAULT_HOST = "127.0.0.1"
@@ -61,6 +65,9 @@ CAPABILITIES = {
     "provider.switch_new_segment": True,
     "bot.notify": True,
     "bot.life_settings": True,
+    "bot.enable": True,
+    "bot.switch_in": True,
+    "bot.group_chat": True,
 }
 DEFAULT_LABEL = "各 bot 配置文件里写的那一组"
 
@@ -80,8 +87,8 @@ PROVIDER_BUDGET = 55.0
 #: 读拖到最后才回的话，写请求刚发出就到点，只能回「还没确认」。
 READ_SHARE = 0.4
 
-#: 投递通知（补充文件 6.2）：source 的三种取值、text 按 UTF-8 的字节上限、key 的字符数上限
-NOTIFY_SOURCES = ("user_moment", "moment_reply", "moment_image")
+#: 投递通知（补充文件 6.2、9.6）：source 的四种取值、text 按 UTF-8 的字节上限、key 的字符数上限
+NOTIFY_SOURCES = ("user_moment", "moment_reply", "moment_image", "group_turn")
 NOTIFY_MAX_TEXT = 16 * 1024
 NOTIFY_MAX_KEY = 200
 #: 网关把 key 截到前 120 个字符再去重（第 8 节），超过的改交摘要
@@ -90,6 +97,27 @@ GATEWAY_KEY_MAX = 120
 NOTIFY_TIMEOUT = 8.0
 #: 生活设定 PUT 的请求体上限（约定 5.6：256 KiB），比别的接口的 MAX_BODY 大
 LIFE_MAX_BODY = 256 * 1024
+
+#: 启停（补充文件 9.2）：整条请求的时限；「停」之后等启动项停下的上限（DSH_CONSOLE_STOP_WAIT 只许缩短）与查的间隔
+ENABLE_BUDGET = 55.0
+STOP_WAIT = 50.0
+STOP_POLL = 1.0
+#: 「启」这一步最坏要的时间：launchctl 最多四条（kickstart、回落 bootstrap、定时单元的 bootout 与 bootstrap），
+#: 每条最多一个超时。切进导入要在整条时限减去它之前做完，整条请求才不超过 55 秒。
+START_RESERVE = 4 * bot_launchd.LAUNCHCTL_TIMEOUT
+#: 切进导入（9.3）：旧频道目录根、Claude Code 会话目录根的缺省（测试接缝见 _switch_in）
+DEFAULT_CHANNELS_DIR = "~/.claude/channels"
+DEFAULT_PROJECTS_DIR = "~/.claude/projects"
+#: 群设置（约定 5.12.1、5.12.2）：六个键、群号、bot 用户名、列表与介绍的上限
+GROUP_KEYS = ("requireMention", "allowFrom", "selfAliases", "otherBotUsernames", "otherBotAliases", "intro")
+GROUP_ID_RE = re.compile(r"^-[0-9]{1,20}\Z")
+BOT_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{5,32}\Z")
+GROUP_LIST_MAX = 50
+GROUP_ITEM_MAX = 64
+GROUP_INTRO_MAX = 4000
+#: group_turn 的 human_ts（9.6）：毫秒位恒为 000 的 UTC 时间
+HUMAN_TS_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z\Z")
+_ABSENT = object()
 
 #: 配置文件没写 brain 时网关自己用的默认值（gateway/src/config.ts 的 parseBrain）。
 CONFIG_DEFAULT_PROVIDER = "deepseek-official"
@@ -448,6 +476,9 @@ def _bot_row(bot, seams):
         else:
             state, state_text = "broken", "没在运行：没有新鲜的心跳，启动项也不在跑"
         live = _live_brain(bot["channel"])
+    detail = {}
+    if state == "running" and _gateway_health(bot["channel"]).get("conflict") is True:
+        detail = {"telegram_conflict": True}    # 9.4：同一个 Telegram 令牌有别的程序在收消息
     if live is None:
         provider, model, effort, source = brain["provider"], brain["model"], brain["effort"], "default"
     else:
@@ -461,7 +492,7 @@ def _bot_row(bot, seams):
     return {"bot_id": bot_id, "display_name": bot["display_name"], "person": _person(bot),
             "state": state, "state_text": state_text,
             "provider": {"id": provider, "name": provider, "model": model, "effort": effort},
-            "provider_source": source, "pending": None, "detail": {}}
+            "provider_source": source, "pending": None, "detail": detail}
 
 
 # ---------------------------------------------------------------- 五个接口
@@ -812,22 +843,41 @@ def _gateway_key(key):
 
 
 def _notify(bot_id):
-    """投递通知（约定 5.7，补充文件 6.2）：形状 → 名单 → 停用 → 这只 bot 的网关 ``POST /v1/inject``。"""
+    """投递通知（约定 5.7，补充文件 6.2）：形状 → 名单 → 停用 → 这只 bot 的网关 ``POST /v1/inject``。
+
+    ``group_turn``（约定 5.12.3，补充文件 9.6）多带群号：停用之后先看 access.json 里有没有这个群，
+    再以来源 ``director`` 注入这个群的聊天；别的同另三种来源。
+    """
     body = _json_object()
     source, text, key = body.get("source"), body.get("text"), body.get("key")
     if not isinstance(source, str) or source not in NOTIFY_SOURCES:
-        raise _invalid("source 只能是 user_moment、moment_reply、moment_image 之一")
+        raise _invalid("source 只能是 user_moment、moment_reply、moment_image、group_turn 之一")
     size = _utf8_size(text) if isinstance(text, str) else None
     if size is None or not text.strip() or size > NOTIFY_MAX_TEXT:
         raise _invalid("text 要是一段不全是空白的文字，不超过 16 KiB")
     if not isinstance(key, str) or not 1 <= len(key) <= NOTIFY_MAX_KEY or _utf8_size(key) is None:
         raise _invalid("key 要是 1 到 200 个字符")
+    group = body.get("chat_id")
+    if source == "group_turn":
+        # 9.6：群号必填；human_ts 可选，只校验、不交给网关
+        if not _group_id(group):
+            raise _invalid("group_turn 要带 chat_id：群号，- 后面跟 1 到 20 位数字的字符串")
+        if "human_ts" in body and not _human_ts(body["human_ts"]):
+            raise _invalid("human_ts 要是 YYYY-MM-DDTHH:MM:SS.000Z 形状的 UTC 时间")
+    elif "chat_id" in body or "human_ts" in body:
+        raise _invalid("只有 group_turn 才能带 chat_id 和 human_ts")
     bot = _require_bot(bot_id)
     _require_enabled(bot)
-    # 投进这只 bot 与主人的私聊：聊天号取它自己 yml 顶层写的（不读 life_config 指过去的那份）
-    chat_id = bot["cfg"].get("chat_id")
-    if not (_text(chat_id) or type(chat_id) is int):
-        raise Refuse(500, "internal", "这只 bot 的配置里没有主人的聊天号，投不了")
+    if source == "group_turn":
+        if group not in _read_access(bot)[2]:
+            raise Refuse(409, "not_in_group", "这只 bot 不在这个群里，没有投递")
+        # 以来源 director 注入这个群的聊天：网关只在收到导演的注入时才在群里开口（约定 5.12.3）
+        chat_id, inject_source = group, "director"
+    else:
+        # 投进这只 bot 与主人的私聊：聊天号取它自己 yml 顶层写的（不读 life_config 指过去的那份）
+        chat_id, inject_source = bot["cfg"].get("chat_id"), source
+        if not (_text(chat_id) or type(chat_id) is int):
+            raise Refuse(500, "internal", "这只 bot 的配置里没有主人的聊天号，投不了")
     channel = bot["channel"]
     if not gateway_client.available(channel):
         raise Refuse(503, "unavailable", "这只 bot 的进程现在连不上，这条通知没有投出去")
@@ -835,7 +885,7 @@ def _notify(bot_id):
     deadline = time.monotonic() + NOTIFY_TIMEOUT
     try:
         code, got = _gateway(lambda t: gateway_client.inject_result(
-            channel, chat_id, text, source, _gateway_key(key), timeout=t), deadline)
+            channel, chat_id, text, inject_source, _gateway_key(key), timeout=t), deadline)
     except _NoReply:
         # 网关可能已经收下了：壳用同一个 key 重试时网关去重，只会投一次
         raise Refuse(503, "unavailable", "这只 bot 的进程没有及时回应，这条通知不一定投到了") from None
@@ -844,7 +894,8 @@ def _notify(bot_id):
     if code == 200 and isinstance(got, dict) and got.get("ok") is True:
         return {"ok": True, "status": "duplicate" if got.get("duplicate") is True else "delivered"}
     if code == 403:                         # 不带 Origin 时，网关的 inject 只在聊天号不在允许名单里回 403
-        raise Refuse(500, "internal", "这只 bot 的进程拒收了这条通知：它配置里主人的聊天号不在允许名单里")
+        raise Refuse(500, "internal", "这只 bot 的进程拒收了这条通知：%s不在它的允许名单里"
+                     % ("这个群" if source == "group_turn" else "它配置里主人的聊天号"))
     raise RuntimeError("unexpected gateway reply")
 
 
@@ -882,6 +933,310 @@ def _life_put(bot_id):
     return {"ok": True, "applied": True, "queued": False, "message": message}
 
 
+# ---------------------------------------------------------------- v0.6、v0.7（补充文件第 9 节）
+
+def _gateway_health(channel):
+    """这只 bot 的网关 ``GET /v1/health`` 返回里 ``telegram`` 那一段（9.4 同跑提示、9.5 用户名）。
+
+    最多等 ``GATEWAY_READ_TIMEOUT``。问不到（没有网关文件、连不上、超时、回的不是 JSON）不算错，回 ``{}``。
+    网关自己有毛病时（同跑冲突本身就算一条）这个接口回 503，返回体照样是完整的健康信息，所以 503 也认。
+    返回体里别的东西（聊天号、模型）一概不往外带。
+    """
+    if not gateway_client.available(channel):
+        return {}
+    try:
+        code, got = gateway_client._call(channel, "GET", "/v1/health", timeout=GATEWAY_READ_TIMEOUT)
+    except Exception:                       # noqa: BLE001  问不到不算错（9.4）
+        return {}
+    telegram = got.get("telegram") if code in (200, 503) and isinstance(got, dict) else None
+    return telegram if isinstance(telegram, dict) else {}
+
+
+def _unit_running(bot_id, seams):
+    """启动项此刻在不在跑：``launchctl print`` 说 running。9.2、9.3 都按它判，不看心跳。"""
+    return bot_launchd.print_state(bot_id, seams)[0] == "running"
+
+
+def _stop_wait():
+    """「停」之后等启动项停下的秒数：``DSH_CONSOLE_STOP_WAIT``，每次请求现读（9.2）。
+
+    只供测试缩短：不是正数、比 50 秒长、不是数（含 nan、inf）一律按 50 秒。
+    """
+    try:
+        wait = float((os.environ.get("DSH_CONSOLE_STOP_WAIT") or "").strip())
+    except ValueError:
+        return STOP_WAIT
+    return wait if 0 < wait <= STOP_WAIT else STOP_WAIT
+
+
+def _config_failure(err, what):
+    """管理台写配置的函数抛的 ``HubError`` → 约定的失败。锁被占着（管理台正在建 bot、改配置）是 409 busy。"""
+    if err.status == 409 and err.error == "config_busy":
+        return Refuse(409, "busy", "管理台正在改 bot 的配置，这次没有执行，请稍后重试")
+    return Refuse(500, "internal", "写%s失败" % what)
+
+
+def _write_enabled(bot_id, enabled):
+    """把这只 bot 记成启用或停用，与管理台的停用开关同一种效果（9.2）。
+
+    写法照 ``hub_addbot.set_enabled``：同一把锁，按行只改顶层 ``enabled`` 这一个值（注释、键序、人设原文
+    一字不动），原子写。没有直接调它：它第一步过管理台的放行闸，闸里会读 ``life_config`` 指过去的旧系统
+    配置（归属边界不许读，见 ``_own_bots``）。本服务的 bot 范围已由 ``_own_bots`` 定好，写的恒是新系统
+    配置根下的 ``<id>.yml``。
+    """
+    from moments import hub_config         # 延迟 import：理由同 hub_addbot.set_enabled
+    path = os.path.join(str(config_sources.dsh_dir()), bot_id + ".yml")
+    try:
+        with hub_addbot.hold_addbot_lock():
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            new_text = hub_config.set_scalar(text, hub_config.compose(text), "enabled", enabled, "bool")
+            hub_config.atomic_write(new_text, path)
+    except HubError as e:
+        raise _config_failure(e, "这只 bot 的配置") from None
+    except (OSError, ValueError, yaml.YAMLError):      # 读不了、不是 UTF-8、解析不出
+        raise Refuse(500, "internal", "写这只 bot 的配置失败") from None
+
+
+def _stop_bot(bot, seams, deadline):
+    """「停」（约定 5.8，补充文件 9.2）：先记成停用，再停启动项，每秒查一次，等到确认不在跑。"""
+    bot_id = bot["id"]
+    if not bot["enabled"] and not _unit_running(bot_id, seams) and not any(
+            bot_launchd.unit_state(bot_id, timer, seams) == "installed" for timer in (False, True)):
+        return {"ok": True, "enabled": False, "running": False}       # 已是目标状态，不重复操作
+    if bot["enabled"]:
+        _write_enabled(bot_id, False)
+    # 管理台停用开关同步时跑的就是这一段（sync_one 的停用方向）：两个单元 bootout，再把 plist 收起
+    ok, reason = bot_launchd._stop_one(bot_id, seams)
+    if not ok:
+        raise Refuse(503, "unavailable", "已记成停用，但停止它的启动项失败：%s" % reason)
+    wait = _stop_wait()
+    until = min(time.monotonic() + wait, deadline)
+    while _unit_running(bot_id, seams):
+        left = until - time.monotonic()
+        if left <= 0:
+            raise Refuse(503, "unavailable", "已记成停用，也发了停止命令，但等了 %g 秒它仍在跑" % wait)
+        time.sleep(min(STOP_POLL, left))
+    return {"ok": True, "enabled": False, "running": False}
+
+
+def _start_bot(bot, seams, deadline):
+    """「启」（约定 5.8，补充文件 9.2）：先记成启用，再装载并启动启动项，不等心跳。"""
+    bot_id = bot["id"]
+    if not bot["enabled"]:
+        _write_enabled(bot_id, True)
+    # 管理台开关同步时启用方向的那一段，去掉等心跳：放回 plist、kickstart（回落 bootstrap）、装回定时单元
+    ok, reason = bot_launchd._start_one(bot_id, seams)
+    if not ok:
+        raise Refuse(503, "unavailable", "已记成启用，但启动它的启动项失败：%s" % reason)
+    # 再问一次 print 最多要一个 launchctl 超时：剩的时间不够就不问，按「还没在跑」报
+    running = deadline - time.monotonic() > bot_launchd.LAUNCHCTL_TIMEOUT and _unit_running(bot_id, seams)
+    return {"ok": True, "enabled": True, "running": running}
+
+
+def _seam_dir(name, default):
+    """测试接缝（9.3，生产不设）：环境变量给了用它，没给或为空用缺省；展开 ``~``、转成绝对路径。"""
+    raw = (os.environ.get(name) or "").strip()
+    return os.path.abspath(os.path.expanduser(raw or default))
+
+
+def _switch_in(bot, import_from, seams, deadline):
+    """切进导入（约定 5.9，补充文件 9.3、9.7），成功回 ``{"messages", "promises"}``。
+
+    先后照 9.7：在跑（409）→ 配置缺 chat_id（422）→ 频道目录与会话目录的存在和软链（422）→ 读文件导入
+    （500，到 ``deadline`` 还没读完 503）。只读约定列的两样，软链全部查完才读。哪一步没过都以 ``Refuse``
+    抛出，此时还没启动、也没记成启用。水位线与写账本在 ``scripts/import_history.switch_in``。
+    """
+    import chat_history                     # 延迟 import：仓库根模块，只有切进要用
+    from scripts import import_history
+    bot_id = bot["id"]
+    if _unit_running(bot_id, seams):
+        raise Refuse(409, "running", "这只 bot 正在跑，先停下再切进")
+    chat = bot["cfg"].get("chat_id")        # 主人的聊天编号取 bot 自己的配置，不读旧频道目录的 access.json
+    if not (_text(chat) or type(chat) is int):
+        raise _invalid("这只 bot 的配置缺 chat_id（主人的聊天编号），没法导入")
+    channel = os.path.join(_seam_dir("DSH_CONSOLE_CHANNELS_DIR", DEFAULT_CHANNELS_DIR), import_from)
+    # 会话目录名照 Claude Code 的规则由频道目录的绝对路径换算（9.7，与 chat_history 同一个函数）
+    session = os.path.join(_seam_dir("DSH_CONSOLE_CLAUDE_PROJECTS_DIR", DEFAULT_PROJECTS_DIR),
+                           chat_history._project_slug_for(channel))
+    if os.path.islink(channel) or not os.path.isdir(channel):
+        raise _invalid("旧频道目录不存在，或者是软链")
+    promises = os.path.join(channel, ".promises.json")
+    if os.path.islink(promises) or os.path.islink(session):
+        raise _invalid("要读的旧记录里有软链，没有导入")
+    try:
+        names = sorted(os.listdir(session)) if os.path.isdir(session) else []   # 会话目录不在：没有聊天记录
+    except OSError:
+        raise Refuse(500, "internal", "导入旧记录这一步出错：会话目录读不了，没有启动") from None
+    files = [os.path.join(session, name) for name in names if name.endswith(".jsonl")]
+    if any(os.path.islink(path) for path in files):
+        raise _invalid("要读的旧记录里有软链，没有导入")
+    try:
+        messages, promised = import_history.switch_in(
+            bot_id, str(chat).strip(), promises if os.path.lexists(promises) else None,
+            [path for path in files if os.path.isfile(path)], deadline=deadline)
+    except import_history.ImportTimeout:
+        raise Refuse(503, "unavailable", "导入旧记录没在时限内做完，没有启动，可以重试") from None
+    except Exception as e:                  # noqa: BLE001  只记类名：异常消息里可能有路径或旧记录原文
+        _log.error("switch-in import failed: %s", type(e).__name__)
+        raise Refuse(500, "internal", "导入旧记录这一步出错：旧记录读不了或解析不出，没有启动") from None
+    _log.info("switch-in imported %d messages, %d promises", messages, promised)    # 日志只记条数
+    return {"messages": messages, "promises": promised}
+
+
+def _set_enabled(bot_id):
+    """启停（约定 5.8，补充文件 9.2）；带 ``import_from`` 时先切进导入（5.9，9.3）。整条请求 55 秒封顶。"""
+    deadline = time.monotonic() + ENABLE_BUDGET - 1.0     # 留一秒收尾
+    body = _json_object()
+    enabled, import_from = body.get("enabled"), body.get("import_from")
+    if type(enabled) is not bool or set(body) - {"enabled", "import_from"}:
+        raise _invalid("请求体只能有 enabled（true 或 false）和可选的 import_from")
+    if "import_from" in body:
+        if not enabled:
+            raise _invalid("停用时不能带 import_from")
+        if not (isinstance(import_from, str) and BOT_ID_RE.match(import_from)
+                and import_from not in (".", "..")):
+            raise _invalid("import_from 只能用字母、数字、点、横线、下划线，1 到 64 个字符")
+    bot = _require_bot(bot_id)
+    seams = bot_launchd.resolve_seams()
+    if not enabled:
+        return _stop_bot(bot, seams, deadline)
+    if "import_from" not in body:
+        if bot["enabled"] and _unit_running(bot_id, seams):
+            return {"ok": True, "enabled": True, "running": True}     # 已是目标状态，不重复操作
+        return _start_bot(bot, seams, deadline)
+    imported = _switch_in(bot, import_from, seams, deadline - START_RESERVE)
+    # 5.10 的人设和技能同步不在本批（第 9 节），synced 恒为空
+    return dict(_start_bot(bot, seams, deadline), imported=imported, synced=[])
+
+
+def _group_id(value):
+    return isinstance(value, str) and GROUP_ID_RE.match(value) is not None
+
+
+def _human_ts(value):
+    """9.6：``YYYY-MM-DDTHH:MM:SS.000Z``，毫秒位恒为 000，而且是真实存在的时刻。"""
+    if not isinstance(value, str) or not HUMAN_TS_RE.match(value):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.000Z")
+    except ValueError:
+        return False
+    return True
+
+
+def _access_path(bot):
+    """这只 bot 频道目录下的 ``access.json``（9.5）；不该碰的回 None。
+
+    频道目录同找网关的那个（``_gateway_channel``）。它解析成真实路径之后必须在这只 bot 自己的家里
+    （同管理台编辑页 ``hub_addbot._channel_dir`` 的落点校验），``access.json`` 本身也不许是软链：
+    不跟着软链去读写别处（另一套系统的频道目录在归属边界外）。
+    """
+    if not bot["channel"]:
+        return None
+    home = os.path.join(os.path.realpath(str(config_sources.dsh_home())), "bots", bot["id"])
+    channel = os.path.realpath(bot["channel"])
+    path = os.path.join(channel, "access.json")
+    if not channel.startswith(home + os.sep) or os.path.islink(path):
+        return None
+    return path
+
+
+def _read_access(bot):
+    """读 ``access.json`` → ``(路径, 整个对象, groups)``。没有 ``groups`` 键当作没进任何群。
+
+    读不出、不是 JSON 对象、``groups`` 不是对象：500（约定 5.12.1：不当成空）。
+    """
+    path = _access_path(bot)
+    try:
+        if path is None:
+            raise ValueError("access.json is not ours to read")
+        with open(path, "rb") as f:
+            obj = json.loads(f.read().decode("utf-8"))
+    except (OSError, ValueError, RecursionError):
+        raise Refuse(500, "internal", "这只 bot 的 access.json 读不出来，或者不是合法的 JSON") from None
+    groups = obj.get("groups") if isinstance(obj, dict) else []
+    groups = {} if groups is None else groups
+    if not isinstance(groups, dict):
+        raise Refuse(500, "internal", "这只 bot 的 access.json 内容认不出来")
+    return path, obj, groups
+
+
+def _group_view(entry):
+    """约定 5.12.1 的群设置：六个键照原样，文件里没写的为 null，别的键一律不回。"""
+    entry = entry if isinstance(entry, dict) else {}
+    return {key: entry.get(key) for key in GROUP_KEYS}
+
+
+def _groups_get(bot_id):
+    """读群设置（约定 5.12.1，补充文件 9.5）。停用的 bot 照常能读；用户名问不到为 null。"""
+    bot = _require_bot(bot_id)
+    groups = _read_access(bot)[2]
+    username = _gateway_health(bot["channel"]).get("username")
+    return {"ok": True, "username": username if _text(username) else None,
+            "groups": {chat_id: _group_view(entry) for chat_id, entry in groups.items()}}
+
+
+def _check_policy(policy):
+    """约定 5.12.2 的校验：只许六个键，值为 null 表示删掉这个键。"""
+    if not isinstance(policy, dict) or set(policy) - set(GROUP_KEYS):
+        raise _invalid("policy 要是一个对象，键只能是 requireMention、allowFrom、selfAliases、"
+                       "otherBotUsernames、otherBotAliases、intro")
+    for key, value in policy.items():
+        if value is None:
+            continue
+        if key == "requireMention":
+            ok = type(value) is bool
+        elif key == "intro":
+            ok = isinstance(value, str) and len(value) <= GROUP_INTRO_MAX and _utf8_size(value) is not None
+        else:
+            ok = isinstance(value, list) and len(value) <= GROUP_LIST_MAX and all(
+                isinstance(item, str) and 1 <= len(item) <= GROUP_ITEM_MAX and _utf8_size(item) is not None
+                and (key != "otherBotUsernames" or BOT_USERNAME_RE.match(item)) for item in value)
+        if not ok:
+            raise _invalid("policy 里的 %s 不合规" % key)
+
+
+def _groups_post(bot_id):
+    """进群、改设置、退群（约定 5.12.2，补充文件 9.5）。停用的 bot 也能改；不重启、不找网关。"""
+    from moments import hub_config         # 延迟 import：同 _write_enabled
+    body = _json_object()
+    chat_id, join = body.get("chat_id"), body.get("join")
+    if set(body) - {"chat_id", "join", "policy"}:
+        raise _invalid("请求体只能有 chat_id、join、policy")
+    if not _group_id(chat_id):
+        raise _invalid("chat_id 要是 - 后面跟 1 到 20 位数字的字符串")
+    if type(join) is not bool:
+        raise _invalid("join 只能是 true 或 false")
+    if not join and "policy" in body:
+        raise _invalid("退群时不能带 policy")
+    policy = body.get("policy", {})
+    _check_policy(policy)
+    bot = _require_bot(bot_id)
+    try:
+        # 与管理台新建页、编辑页写 access.json 同一把锁：读、改、写都在锁里，两边不会互相覆盖
+        with hub_addbot.hold_addbot_lock():
+            path, obj, groups = _read_access(bot)
+            before = groups.get(chat_id, _ABSENT)
+            if join:
+                entry = dict(before) if isinstance(before, dict) else {}
+                for key, value in policy.items():
+                    if value is None:
+                        entry.pop(key, None)
+                    else:
+                        entry[key] = value
+                groups[chat_id] = entry
+            else:
+                groups.pop(chat_id, None)
+            if groups.get(chat_id, _ABSENT) != before:      # 本来就是这样（比如本来就不在群里）就不写
+                obj["groups"] = groups
+                # 只改这一个群号的条目，别的键原样；原子写（临时文件改名），保持原文件权限
+                hub_config.atomic_write(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", path)
+    except HubError as e:
+        raise _config_failure(e, "这只 bot 的 access.json") from None
+    return {"ok": True, "in_group": join, "policy": _group_view(groups[chat_id]) if join else None}
+
+
 _READ_ROUTES = {PREFIX + "/meta": _meta, PREFIX + "/bots": _bots, PREFIX + "/providers": _providers}
 #: ``/bots/<bot_id>/<这一段>`` 上的接口：方法 → 处理函数（键的先后就是 405 的 Allow 头）
 _BOT_ROUTES = {
@@ -889,6 +1244,8 @@ _BOT_ROUTES = {
     "restart": {"POST": _restart},
     "notify": {"POST": _notify},
     "life": {"GET": _life_get, "PUT": _life_put},
+    "enabled": {"POST": _set_enabled},
+    "groups": {"GET": _groups_get, "POST": _groups_post},
 }
 
 
