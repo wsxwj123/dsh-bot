@@ -66,6 +66,8 @@ CONFIG_DEFAULT_MODEL = "deepseek-flash"
 
 #: 网关 ``POST /v1/model`` 把 spec 截到 200 个字符（管理台模型页同一个上限）：超了就别发。
 MAX_SPEC = 200
+#: 网关 ``key`` 的四种取值里算「有密钥」的两种（补充文件 5.1：ok 已配，none 这家不需要）。
+KEY_READY = ("ok", "none")
 
 NOT_SAVED = "这只 bot 的进程现在连不上，这次没有保存"
 NOT_SAVED_SLOW = "这只 bot 的进程没有及时回应，这次没有保存"
@@ -397,9 +399,41 @@ def _provider_catalog():
     raise NotImplementedError("provider catalog source undecided")
 
 
-def _require_offered(provider_id, model):
-    """换供应商的两项校验（补充文件 4.4）：只看 4.3 的列表，不找任何网关。"""
-    for provider in _provider_catalog():
+def _catalog(info):
+    """``GET /v1/model`` 的返回体 → 4.3 的供应商列表 ``[{"id", "name", "has_key", "models"}]``。
+
+    照补充文件 5.1 映射：名字取 ``providers[].name``；模型名取 ``choices`` 里归这一家的那些，
+    保持 ``choices`` 的先后（``providers[].models`` 只是个数）；``key`` 为 ok 或 none 才算有密钥；
+    停用的不列。只往外带这四个键，keyEnv、api、note 这些一律不带。
+
+    返回体不是对象、没有 ``providers`` 或它不是数组 → 认不出，抛（外层回 500）。``choices``
+    缺失或不是数组当作空（网关刚启动时会这样）。约定没写的照最保守的办：形状不对的单项跳过，
+    认不出的值不往外带；``choices`` 里 ``providers`` 没有的名字不单列；没有 ``enabled`` 字段的
+    当作启用（那样的网关没有停用这回事），有这个字段但不是 true 的不列。
+    """
+    providers = info.get("providers") if isinstance(info, dict) else None
+    if not isinstance(providers, list):
+        raise RuntimeError("unexpected gateway reply")
+    choices = info.get("choices")
+    models = {}
+    for choice in choices if isinstance(choices, list) else []:
+        if isinstance(choice, dict) and _text(choice.get("provider")) \
+                and _text(choice.get("model")):
+            models.setdefault(choice["provider"], []).append(choice["model"])
+    catalog = []
+    for p in providers:
+        if not isinstance(p, dict) or not _text(p.get("name")) \
+                or p.get("enabled", True) is not True:
+            continue
+        name = p["name"]
+        catalog.append({"id": name, "name": name, "has_key": p.get("key") in KEY_READY,
+                        "models": list(models.get(name, []))})
+    return catalog
+
+
+def _require_offered(catalog, provider_id, model):
+    """换供应商第 4 步的两项校验（补充文件 4.4）：只看这只 bot 的网关刚读来的清单。"""
+    for provider in catalog:
         if provider["id"] != provider_id:
             continue
         if model not in provider["models"]:
@@ -427,19 +461,22 @@ def _set_provider(bot_id):
     if not has_provider and not has_effort:
         raise _invalid("请求里没有要改的内容：给 provider_id 加 model，或者给 effort")
     _require_bot(bot_id)
-    _require_enabled(bot_id)                # 补充文件 4.4 第 3 步：停用先于清单校验，停用时什么都不读
-    if has_provider:
-        _require_offered(body["provider_id"], body["model"])
+    _require_enabled(bot_id)                # 补充文件 4.4 第 3 步：停用先于读清单，停用时什么都不读
+    # 前三步都过了，下面才开始找这只 bot 自己的网关（不找别的 bot 的）。
     channel = config_sources.channel_dir(config_sources.effective_config(bot_id) or {})
     if not gateway_client.available(channel):
         raise Refuse(503, "unavailable", NOT_SAVED)
-    # 到这里校验全部通过，下面才开始找这只 bot 自己的网关。
     before = after = prior_effort = None
     if has_provider:
+        # 第 4 步：向这只 bot 的网关读一次清单（只读请求），没过就到此为止，什么都没写。
+        info = _gateway(lambda: gateway_client.model_info(channel), NOT_SAVED_SLOW)
+        _require_offered(_catalog(info), body["provider_id"], body["model"])
+        before = _pair(info.get("current"))  # 同一次读里现在生效的那一组，用来判断是不是换了一家
+        # 第 5 步：以上都过了才写。
         if has_effort:
             # 强度被拒时要把供应商和模型换回去，而网关换模型会清掉单独指定的强度：先记下原来的。
             prior_effort = _gateway(lambda: _effort_override(channel), NOT_SAVED_SLOW)
-        before, after = _switch(channel, body["provider_id"], body["model"])
+        after = _switch(channel, before, body["provider_id"], body["model"])
     if has_effort:
         try:
             _apply_effort(channel, body["effort"])
@@ -484,17 +521,15 @@ def _pair(choice):
     return choice["provider"], choice["model"]
 
 
-def _switch(channel, provider_id, model):
-    """经这只 bot 的网关换供应商和模型，返回换之前、换之后生效的两组 ``(供应商, 模型)``。
+def _switch(channel, before, provider_id, model):
+    """经这只 bot 的网关换供应商和模型，返回换之后生效的那一组 ``(供应商, 模型)``。
 
-    发的是管理台模型页在用的那两个请求：``GET /v1/model`` 读现在生效的那一组（判断是不是
-    换到了另一家），再 ``POST /v1/model``，请求体 ``{"spec": "供应商/模型"}``，网关回
-    ``{"ok", "text", "current"}``。已经是这一组时网关也回 ok，重复提交不叠加。
+    ``before`` 是第 4 步那次读里现在生效的一组。发的是管理台模型页在用的写请求
+    ``POST /v1/model``，请求体 ``{"spec": "供应商/模型"}``，网关回 ``{"ok", "text", "current"}``。
+    已经是这一组时网关也回 ok，重复提交不叠加。
     网关明说没换（这只 bot 缺这家的密钥，或它的模型表里此刻没有这个模型）→ 422，什么都没写；
     网关的原话可能带密钥的变量名，不往外带。
     """
-    info = _gateway(lambda: gateway_client.model_info(channel), NOT_SAVED_SLOW)
-    before = _pair(info.get("current") if isinstance(info, dict) else None)
     ok, got = _gateway(lambda: gateway_client.model_set(channel, "%s/%s" % (provider_id, model)),
                        MAYBE_SAVED)
     after = _pair(got.get("current") if isinstance(got, dict) else None)
@@ -503,7 +538,7 @@ def _switch(channel, provider_id, model):
             raise _invalid("这只 bot 现在换不到这个模型：这家供应商在它那里可能还没配密钥，"
                            "或者它的模型表里暂时没有这个模型。设置没有变")
         raise RuntimeError("unexpected gateway reply")
-    return before, after
+    return after
 
 
 def _apply_effort(channel, effort):
