@@ -641,7 +641,17 @@ def _trigger_bot_moment_reply(cfg: dict, moment: dict, user_text: str,
 from moments.bots_client import bot_port as _bot_port
 import urllib.request  # noqa: E402
 
-_urlopen = urllib.request.urlopen  # HTTP 注入点（INTERFACE §10.4），测试换成记录器
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """拉起请求遇到跳转不跟：跳转会把口令头原样带到 Location 指的地方。3xx 照常当失败抛出。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# HTTP 注入点（INTERFACE §10.4），测试换成记录器。默认出口只连本机：不走代理（这台机器常驻
+# http_proxy，默认 opener 会把发往 127.0.0.1 的请求连同口令头交给代理）、不跟跳转（安审 S2）。
+_urlopen = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect).open
 
 
 def _dispatcher_token(bot_dir) -> str:
@@ -649,12 +659,16 @@ def _dispatcher_token(bot_dir) -> str:
 
     每次现读、不缓存（调度器启动时文件不在会自己生成一份新的）。读不到、是空的就回空串，
     调用方按"不带口令"发，行为与以前相同。口令只进请求头，不进日志、不进报错。
+
+    只认可见 ASCII（中间可以有空格）。含换行、回车或别的控制字符的（非 ASCII 同理）当无效、
+    回空串：这种值进请求头时 http.client 会抛错，错误消息里带着口令原文。
     """
     try:
         with open(os.path.join(bot_dir, ".api-token"), encoding="utf-8") as f:
-            return f.read().strip()
+            token = f.read().strip()
     except (OSError, UnicodeError, TypeError):
         return ""
+    return token if all(" " <= c <= "~" for c in token) else ""
 
 
 def _ensure_worker_alive(bot_id: str, chat_id: str, bot_dir: str, cfg: dict = None):
@@ -683,7 +697,8 @@ def _ensure_worker_alive(bot_id: str, chat_id: str, bot_dir: str, cfg: dict = No
             headers={"X-Api-Token": token} if token else {})
         _urlopen(req, timeout=5)
     except Exception as e:
-        sys.stderr.write(f"[ensure_worker] {bot_id} 失败(dispatcher 未起?): {e}\n")
+        # 只记类名：异常消息可能带着请求头原文（口令）
+        sys.stderr.write(f"[ensure_worker] {bot_id} 失败(dispatcher 未起?): {type(e).__name__}\n")
 
 
 @app.route("/api/moment", methods=["POST"])
