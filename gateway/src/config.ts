@@ -30,6 +30,8 @@ export type Brain = {
   routes: Record<string, Route>
   /** dsh 自带压缩，只作应急开关，默认关 */
   emergencyCompaction: boolean
+  /** 停着时在管理台选定的时刻（适配服务 13.7 写）；它变了，账本里聊天时临时切的覆盖就作废 */
+  chosenAt?: string
 }
 
 export type GatewayOpts = {
@@ -204,6 +206,7 @@ export function parseBrain(raw: unknown, selfProviders: Iterable<string> = []): 
     maxInputTokens: max > 0 ? max : undefined,
     routes,
     emergencyCompaction: b.emergency_compaction === true,
+    chosenAt: typeof b.chosen_at === 'string' && b.chosen_at ? b.chosen_at : undefined,
   }
 }
 
