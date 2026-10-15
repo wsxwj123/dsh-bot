@@ -41,8 +41,8 @@ export const DEFAULT_TEXT_LANGUAGE = '简体中文'
 /** access.json 里 textLanguage、voiceLanguage 的原值（可能没设，也可能是手改出来的不合规值） */
 export type Languages = { text?: unknown; voice?: unknown }
 
-/** 语言名不许有的字符（同适配服务 11.3 的校验） */
-const LANGUAGE_BAD = /[\r\n\[\]<>{}`|]/
+/** 语言名不许有的字符（同适配服务 11.3 的校验；换行与 Python str.splitlines 同一个口径） */
+const LANGUAGE_BAD = /[\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029\[\]<>{}`|]/
 
 /** 存的语言名 → 能用的名字（去掉首尾空白）；空、超过 20 个字符、带禁用字符、不是字符串的当没设 */
 function languageName(v: unknown): string | undefined {
