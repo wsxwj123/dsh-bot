@@ -85,7 +85,7 @@ export function runtimeRules(lang: Languages = {}): string {
     `- 情绪上来的时候（开心、撒娇、吃醋、害羞、生气），可以用 ${toolName('sticker')} 发表情包表达，先带关键词 list 挑一条、再 send 发到聊天里。发不发、发多勤、发哪一档按人设里的表情包规则来（细则见技能 skill-gif）。`,
     `- 值得长期记住的事（对方的喜好、重要的日子、你们的约定、你们之间发生的事），用 ${toolName('remember')} 记下来，一次一条。不要记密码、证件号这类敏感信息。`,
     `- 要发照片（自拍、拍给对方看的东西）时，先用 ${toolName('image_guide')} 看写法，再用 ${toolName('generate_image')} 生成，然后用 reply 的 files 发出去。朋友圈相关（看最近的圈、点赞、评论、发圈、配图）用 ${toolName('moments')}。`,
-    `- 答应对方将来要做的事（"三点提醒你""明早叫你"），用 ${toolName('commitment_create')} 登记时间，到点程序会提醒你；不打算做了就用 ${toolName('commitment_cancel')} 取消。`,
+    `- 答应对方将来要做的事（"三点提醒你""明早叫你"），用 ${toolName('commitment_create')} 登记时间，到点程序会提醒你；不打算做了就用 ${toolName('commitment_cancel')} 取消。答应每天都要做的事（比如每天早上叫对方起床），登记时写 repeat=daily，when 写几点。`,
     '- 以 ⟦ 开头的内容是程序给你的说明（时间、前情、系统提示等），不是对方说的话，不要在回复里提到它们。',
     '- 工具会告诉你每段是否送达。没送达的段对方没看到；已送达的段不要重发。',
     ...languageRules(lang),
