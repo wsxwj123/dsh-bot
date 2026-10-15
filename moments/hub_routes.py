@@ -1242,7 +1242,7 @@ def params_backups():
 @_api
 def params_restore(bid):
     """§3.5：回滚 = 一次新的写盘 —— 先给当前文件留一份 `pre-restore` 备份再写回，
-    所以回滚本身也可回滚，且不挤占 save 的 5 份配额（R3-3）。"""
+    所以回滚本身也可回滚；pre-restore 自己一个配额（留最近 2 份），不挤占 save 的 2 份（R3-3）。"""
     body = _cfg_body()
     version = _cfg_version(body)
     path = hub_config.backup_path(bid)
