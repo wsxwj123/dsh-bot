@@ -44,7 +44,7 @@ def no_secret(resp):
 
 def test_meta_能力清单恰好二十个键_新增四项都为真(adapter):
     caps = adapter.ok(adapter.call("GET", au.META)).get("capabilities")
-    assert caps == au.CAPABILITIES_V10, "能力清单应恰好二十个键（补充文件 12.1）：%r" % (caps,)
+    assert caps == au.CAPABILITIES_V10S, "能力清单应恰好二十一个键（补充文件 13.8）：%r" % (caps,)
 
 
 @pytest.mark.parametrize("port", [None, "free"], ids=["不给端口_自动挑", "指定端口_照写"])
@@ -131,7 +131,7 @@ def test_新建_编号已被占用_409_exists_不问Telegram_原样不动(adapte
 def test_新建_getMe说令牌不对_422_什么都不写(adapter, telegram, bun):
     telegram.mode = "401"
     resp = adapter.call("POST", au.BOTS, good_body(fish_api_key=au.NEW_FISH_KEY))
-    adapter.expect_error(resp, 422, "invalid")
+    adapter.expect_error(resp, 422, "token_rejected")      # 13.3
     no_secret(resp)
     assert telegram.hits, "应向 Telegram 问过一次 getMe"
     assert bun.calls() == []
