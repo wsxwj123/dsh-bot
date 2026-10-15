@@ -138,3 +138,17 @@ def test_管理台页面启用开关_有标记拒绝_配置与启动项不动(ad
         resp.status_code, resp.get_data(as_text=True)[:200])
     assert au.file_mark(bot.yml) == before, "拒绝时配置不该动"
     assert adapter.launchctl.calls() == [], "拒绝时不该动启动项"
+
+
+def test_停用_launchctl答不上在不在跑_按可能还在跑等到上限回503_不报running假(adapter, monkeypatch):
+    """约定 v1.0 5.8：响应里的 running 与 5.2 的 polling 同一判定，宁可误报。print 的输出认不出状态时 polling 为 null，
+    停用就不能当它已经停下（壳会接着去启另一边）：等到上限回 503。"""
+    alpha = adapter.bot("botalpha")
+    au.put_plists(adapter.sandbox, "botalpha")
+    adapter.launchctl.set_default(installed=True, running=True, pid=4242)
+    adapter.launchctl.set_print_text("no state line here\n")      # 认不出状态
+    monkeypatch.setenv("DSH_CONSOLE_STOP_WAIT", "1")
+    body = adapter.expect_error(adapter.call("POST", au.enabled_url("botalpha"), {"enabled": False}),
+                                503, "unavailable")
+    assert "running" not in body, body
+    assert au.read_cfg(alpha).get("enabled") is False, "先记成停用再停进程"
