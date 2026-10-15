@@ -61,3 +61,13 @@ test('技能文件改内容、加一个、删一个，内容指纹都变，两�
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('语言名中间或两头带 str.splitlines 认的另外 8 种换行，一样当没设（同适配服务 11.3）', () => {
+  const dflt = runtimeRules()
+  expect(runtimeRules({ text: '英语', voice: '英语' })).not.toBe(dflt)   // 对照：正常的语言名照用
+  for (const ch of ['\v', '\f', '\x1c', '\x1d', '\x1e', '\x85', '\u2028', '\u2029']) {
+    for (const bad of [`英${ch}语`, `英语${ch}`, `${ch}英语`]) {
+      expect(runtimeRules({ text: bad, voice: bad })).toBe(dflt)
+    }
+  }
+})
