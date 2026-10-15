@@ -44,7 +44,8 @@ _OFF_VALUES = {"off", "-", "none", "0", "false", "no"}
 BOT_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}\Z")
 #: 保留名：``com.dsh-bot.`` 前缀下**不属于 bot** 的单元名（§0 第 7 条）。全仓库只有这一份
 #: （``hub_addbot.RESERVED_UNIT_NAMES`` 是它的引用）。拿这些名字当 bot，动的是那个真单元。
-RESERVED_UNIT_NAMES = ("jiwen", "director", "voicecall")
+#: ``templates`` 不是单元名：适配接口 ``GET /adapter/v1/bots/templates`` 占了这个名字（约定 v1.0 5.18.1）。
+RESERVED_UNIT_NAMES = ("jiwen", "director", "voicecall", "templates")
 
 
 def is_qualified_bot_id(bot_id):
