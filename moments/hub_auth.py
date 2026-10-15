@@ -217,6 +217,13 @@ def _eq(supplied, expected) -> bool:
     return hmac.compare_digest((supplied or "").encode("utf-8"), (expected or "").encode("utf-8"))
 
 
+def remember_configured(app):
+    """真的要开门户时调一次（web.py 的 ``__main__``）：此刻配了口令，之后哪一刻口令读不出来，
+    都按「读不到」拒绝，不按「没设」放行。不放进 :func:`install`：``moments.web`` 也会被
+    bot 进程和测试 import，那时的环境不代表门户的配置。"""
+    app.extensions["hub_gate_configured"] = gate_open()
+
+
 def install(app):
     """挂 before_request 门 + /login 两个方法 + 免鉴权的 /hub/healthz。
 
@@ -255,6 +262,13 @@ def install(app):
         # 管理面只能关死，绝不能因为"门关闭"就把 /hub 裸奔出去。
         admin_scope = bool(admin_pw) and is_admin_path(path)
         if not gate_open() and not admin_scope:
+            # 读不到口令时不放行：启动时配过口令，或者 hub.env 在却读不出来，口令多半就在那里，
+            # 只是此刻读不到。这时放行等于整站不设防，而本机端口可能经隧道开到了外网。
+            if app.extensions.get("hub_gate_configured") or env_file.unreadable():
+                if path in PASSLIST:
+                    return None
+                return jsonify({"error": "auth_unavailable",
+                                "detail": "登录口令此刻读不出来，暂时拒绝访问；检查 hub.env 能否读取后重启管理台"}), 503
             return None                      # 门关闭：行为与改造前完全一致
         if path in PASSLIST:                 # 精确相等，不是前缀
             return None
