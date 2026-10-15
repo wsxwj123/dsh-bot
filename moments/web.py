@@ -1003,6 +1003,7 @@ if __name__ == "__main__":
     _exit_code = app.extensions.get("hub_startup_refused")
     if _exit_code is not None:
         sys.exit(_exit_code)          # 不 bind 端口，不初始化 db
+    hub_auth.remember_configured(app)   # 记下此刻配没配口令：之后读不到就拒绝，不放行
     db.init()
     port = int(os.environ.get("MOMENTS_WEB_PORT", "8765"))
     if _hub_routes is not None:
