@@ -231,7 +231,7 @@ def test_PUT技能_成功_原样落盘_原子写_保持原权限_旧文备份一
     assert adapter.launchctl.actions() == [], "保存技能不该动启动项：%r" % adapter.launchctl.actions()
 
 
-def test_PUT技能_同一技能连存7次只留它最近5份_同一秒也不互相覆盖_别的技能的备份不受影响(adapter):
+def test_PUT技能_同一技能连存7次只留它最近2份_同一秒也不互相覆盖_别的技能的备份不受影响(adapter):
     texts = [u"第%d版发图技能。\n" % i for i in range(8)]       # texts[0] 是原文
     voice0, voice1 = u"# skill-voice 第0版\n", u"# skill-voice 第1版\n"
     bot = skill_bot(adapter, {"image": texts[0], "voice": voice0})
@@ -240,11 +240,11 @@ def test_PUT技能_同一技能连存7次只留它最近5份_同一秒也不互�
         adapter.ok(call_skill(adapter, "PUT", "image", {"text": cur, "version": au.persona_version(prev)}))
     image = au.skill_backups(adapter.sandbox, "botalpha", "image")
     got = sorted(p.read_text(encoding="utf-8") for p in image)
-    assert got == sorted(texts[2:7]), "image 应只留最近 5 份（第 2 到第 6 版）且互不覆盖，实际 %r" % got
-    assert [au.mode_of(p) for p in image] == [0o600] * 5, "备份权限都应为 0600"
+    assert got == sorted(texts[5:7]), "image 应只留最近 2 份（第 5、第 6 版）且互不覆盖，实际 %r" % got
+    assert [au.mode_of(p) for p in image] == [0o600] * 2, "备份权限都应为 0600"
     voice = au.skill_backups(adapter.sandbox, "botalpha", "voice")
     assert [p.read_text(encoding="utf-8") for p in voice] == [voice0], \
-        "voice 那一份备份应原样留着（只留每个技能各自最近 5 份），实际 %r" % voice
+        "voice 那一份备份应原样留着（只留每个技能各自最近 2 份），实际 %r" % voice
     assert au.skill_path(bot, "image").read_bytes() == texts[7].encode("utf-8")
 
 
