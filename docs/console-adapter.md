@@ -29,10 +29,15 @@
 | 接口 | 用途 |
 |---|---|
 | `GET /meta` | 版本与能力清单（壳据此决定显示哪些功能） |
-| `GET /bots` | 本系统全部 bot：状态、当前模型、朋友圈里记的名字（`person`）、同一账号两边同时在跑的提示 |
-| `GET /providers`、`POST /bots/{id}/provider` | 看可选的供应商和模型；给一只 bot 换供应商、模型、思考强度 |
+| `GET /bots` | 本系统全部 bot：状态、启用开关、网关在不在收消息、Telegram 用户名、当前模型、朋友圈里记的名字（`person`）、是否已迁到另一种底层、同一账号两边同时在跑的提示 |
+| `POST /bots`、`GET /bots/templates` | 新建一只 bot（可以先建好不启动）；列出可用的人设模板 |
+| `GET /providers`、`POST /bots/{id}/provider` | 看可选的供应商和模型；给一只 bot 换供应商、模型、思考强度。bot 停着时只存进配置，下次启用生效 |
 | `POST /bots/{id}/restart` | 重启一只 bot |
-| `POST /bots/{id}/enabled` | 启用或停用；从旧系统切过来时可顺带导入旧的私聊记录与没到点的约定 |
+| `POST /bots/{id}/enabled` | 启用或停用；从旧系统切过来时可顺带导入旧的私聊记录与没到点的约定。停用时可记下「已迁到另一种底层」，有这个标记就不许再启用 |
+| `POST /bots/{id}/archive`、`GET /archives`、`POST /archives/{archive_id}/restore` | 归档（整份移走，不删）、列出归档、恢复（恢复后是停用状态） |
+| `POST /bots/{id}/delete` | 删除本地数据：Telegram 令牌文件直接抹掉，其余移进废纸篓；Telegram 上的 bot 本身不受影响 |
+| `GET`、`PUT /bots/{id}/profile` | 显示名 |
+| `POST /bots/{id}/token_handoff` | 切换到另一种底层时，把这只 bot 的 Telegram 令牌交给对方 |
 | `POST /bots/{id}/notify` | 投递朋友圈通知、群聊轮到它说话 |
 | `GET`、`PUT /bots/{id}/life` | 生活设定（作息、爱好、关注的话题等） |
 | `GET`、`PUT /bots/{id}/persona` | 人设全文（带版本号，防止两人同时改互相覆盖） |
@@ -46,4 +51,5 @@
 
 - 只读写本系统自己的文件（`~/.dsh-bot` 下），不碰旧系统的目录。唯一例外：从旧系统切过来时，只读旧频道目录里的约定文件和 Claude Code 为它建的会话记录，这是用户当面同意的。
 - 写文件一律先备份（每样只留最近 2 份）、再原子写入；软链、落在本系统目录外的文件一律拒绝。
-- 密钥只回「有没有」，不回原文。
+- 密钥只回「有没有」，不回原文。唯一的例外是令牌转交：每个切换任务编号只交一次，同一只 bot 10 分钟内只交一次；令牌只出现在那一个成功响应里（带 `Cache-Control: no-store`），记录里只有 bot 编号、任务编号和时间。
+- 「已迁到另一种底层」的标记是 `~/.dsh-bot/bots/<编号>/.moved`。标记在时，适配服务、管理台页面的启用开关、网关的开机自启安装都拒绝启动这只 bot，免得两边用同一个令牌同时收消息。标记要由壳在停用请求里清掉。
