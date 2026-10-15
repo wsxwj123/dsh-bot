@@ -926,7 +926,7 @@ def api_image_provider():
                                              "moments.image_generation." + name,
                                              new_provider, "str")
             # backup=False：单枚举翻转不留备份 —— 本端点在低权面（仅 access 门），
-            # 照常备份会让低权用户挤掉 admin 参数页的 5 份 save 配额
+            # 照常备份会让低权用户挤掉 admin 参数页的 2 份 save 配额
             hub_config.commit(text, backup=False)
     except provider_model.HubError as e:
         return jsonify({"error": e.error, "detail": e.detail}), e.status
