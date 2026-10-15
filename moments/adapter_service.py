@@ -2183,8 +2183,9 @@ def _queue_provider(bot, body, has_provider, has_effort):
 
     供应商与模型用在跑的 bot 的网关读来的清单核对（``_provider_catalog``）：一只都问不到、或回的东西认不出，都算
     核对不了，503，什么都不写；不在清单 404，这家没有这个模型 422。只改强度不用核对。不碰这只自己的网关。
-    网关下次启动按配置这一组起：它账本里的单独指定（brain_override）记着当时配置那一组，配置这一组变了就清掉
-    （gateway/src/engine/engine.ts 的 withOverride）。
+    网关下次启动按配置这一组起：它账本里的单独指定（brain_override）记着当时配置那一组与 ``chosen_at``，
+    两样有一样变了就清掉（gateway/src/engine/engine.ts 的 withOverride、overrideKey）。每次都写一个新的
+    ``chosen_at``：选的正好就是配置里现在这一组时，配置那一组没变，靠它清掉聊天里临时切的。
     """
     changes = {}
     if has_provider:
@@ -2199,6 +2200,7 @@ def _queue_provider(bot, body, has_provider, has_effort):
         changes.update(provider=body["provider_id"], model=body["model"])
     if has_effort:
         changes["reasoning_effort"] = body["effort"]
+    changes["chosen_at"] = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     _write_brain(bot["id"], changes)
     return {"ok": True, "applied": False, "queued": True, "new_segment": False, "message": QUEUED}
 
@@ -2228,7 +2230,7 @@ def _brain_text(text, changes):
 
 
 def _write_brain(bot_id, changes):
-    """13.7：把 ``changes``（provider、model、reasoning_effort 里的几项）写进这只 bot 配置的 brain 段。
+    """13.7：把 ``changes``（provider、model、reasoning_effort 里的几项，加 chosen_at）写进这只 bot 配置的 brain 段。
 
     持管理台写配置那把锁；读回来核对只变了这几项（别的键、brain 里别的项一个不差）；原文先备份到
     ``<DSH_BOT_HOME>/backups/config/<bot_id>/``（0600，只留 2 份，同生活设定的备份）；原子写、保持原权限。
