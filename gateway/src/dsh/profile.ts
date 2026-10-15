@@ -1,6 +1,8 @@
 // 生成本 bot 的 dsh 补丁层（"只留人设"）。补丁按 JSON 写：YAML 是 JSON 的超集，dsh 能直接读，人设里任何字符都不用手工转义。
 // 人设只做技术处理（{{ 中间插不可见字符），不改动任何文字。
 import { createHash } from 'crypto'
+import { readdirSync, readFileSync } from 'fs'
+import { join } from 'path'
 import type { Brain } from '../config'
 
 /**
@@ -33,8 +35,45 @@ export function escapePersona(text: string): string {
 export const MCP_SERVER_NAME = 'tg'
 export const toolName = (t: string) => `mcp__${MCP_SERVER_NAME}__${t}`
 
-/** 运行规则：放在人设后面，是单独的一段，不改人设文件。 */
-export function runtimeRules(): string {
+/** 文字语言没设时按它；语音语言没设时跟生效的文字语言（约定 5.14，补充文件 11.4） */
+export const DEFAULT_TEXT_LANGUAGE = '简体中文'
+
+/** access.json 里 textLanguage、voiceLanguage 的原值（可能没设，也可能是手改出来的不合规值） */
+export type Languages = { text?: unknown; voice?: unknown }
+
+/** 语言名不许有的字符（同适配服务 11.3 的校验） */
+const LANGUAGE_BAD = /[\r\n\[\]<>{}`|]/
+
+/** 存的语言名 → 能用的名字（去掉首尾空白）；空、超过 20 个字符、带禁用字符、不是字符串的当没设 */
+function languageName(v: unknown): string | undefined {
+  if (typeof v !== 'string' || LANGUAGE_BAD.test(v)) return undefined
+  const s = v.trim()
+  return s && [...s].length <= 20 ? s : undefined
+}
+
+/** 生效的两种语言：文字语言缺省「简体中文」，语音语言缺省同文字语言 */
+export function effectiveLanguages(l: Languages = {}): { text: string; voice: string } {
+  const text = languageName(l.text) ?? DEFAULT_TEXT_LANGUAGE
+  return { text, voice: languageName(l.voice) ?? text }
+}
+
+/** 运行规则里的语言一节（补充文件 11.4，语义照 v0.9 claude 侧草案第二节），按这只 bot 的两种语言现填 */
+function languageRules(l: Languages): string[] {
+  const { text, voice } = effectiveLanguages(l)
+  return [
+    '',
+    '### 语言',
+    `- 文字语言是${text}，语音语言是${voice}。文字气泡始终用文字语言写。`,
+    `- 发语音（${toolName('reply')} 带 as_voice=true）时 text 与 voice_text 都要写，两种语言相同时也要写。`,
+    '- text 用文字语言写，只显示、不朗读，不加语气标签。',
+    '- voice_text 用语音语言写，只朗读、不显示。每一段至少带一个方括号语气指令，指令也用语音语言写，简短，建议 8 字以内。',
+    '- 两种语言相同时，voice_text 的内容与 text 一致，加上语气标签，去掉不适合朗读的符号与表情。',
+    '- voice_text 的段数与 text 一致（按空行分段），一一对应；内心独白段在 voice_text 对应位置写空字符串。',
+  ]
+}
+
+/** 运行规则：放在人设后面，是单独的一段，不改人设文件。末尾是按 access.json 现填的语言一节。 */
+export function runtimeRules(lang: Languages = {}): string {
   return [
     '## 运行规则（程序附加，不属于人设）',
     `- 你在 Telegram 上和对方聊天。对方只能看到你用 ${toolName('reply')} 发出的内容，你直接输出的文字对方看不到。`,
@@ -49,6 +88,7 @@ export function runtimeRules(): string {
     `- 答应对方将来要做的事（"三点提醒你""明早叫你"），用 ${toolName('commitment_create')} 登记时间，到点程序会提醒你；不打算做了就用 ${toolName('commitment_cancel')} 取消。`,
     '- 以 ⟦ 开头的内容是程序给你的说明（时间、前情、系统提示等），不是对方说的话，不要在回复里提到它们。',
     '- 工具会告诉你每段是否送达。没送达的段对方没看到；已送达的段不要重发。',
+    ...languageRules(lang),
   ].join('\n')
 }
 
@@ -67,6 +107,10 @@ export type PatchInput = {
   sessionsRoot: string
   /** 本 bot 的技能根目录（里面的 <名>/SKILL.md 或 <名>.md 会被模型按需加载）。 */
   skillDir: string
+  /** access.json 的 textLanguage、voiceLanguage（补充文件 11.4）；不给按缺省 */
+  languages?: Languages
+  /** 技能文件的内容指纹（skillsDigest，补充文件 11.5）；变了按人设变了处理 */
+  skillsDigest?: string
 }
 
 export function buildPatchRows(p: PatchInput): object[] {
@@ -88,7 +132,7 @@ export function buildPatchRows(p: PatchInput): object[] {
     includeHarnessIdentity: false,
     includeRuntimeContext: false,
     personaPrefix: escapePersona(p.persona),
-    personaSuffix: escapePersona(runtimeRules()),
+    personaSuffix: escapePersona(runtimeRules(p.languages)),
   } })
   rows.push({ id: 'session-persistence-jsonl', config: { root: p.sessionsRoot, compression: 'none' } })
   rows.push({ id: 'compaction-basic', config: b.emergencyCompaction ? {} : { auto: false } })
@@ -101,21 +145,38 @@ export function patchText(rows: object[]): string {
 }
 
 /**
- * 补丁层里"需要重启 dsh 才生效"的部分的指纹：人设、路由、凭据路径、压缩开关、技能根目录。
+ * 补丁层里"需要重启 dsh 才生效"的部分的指纹：人设、路由、凭据路径、压缩开关、技能根目录，
+ * 以及技能文件的内容与生效的两种语言（补充文件 11.4、11.5：变了按人设变了处理）。
  * 只换模型（provider + model 在已有路由里）不需要重启，走 set_config_option。
  */
 export function restartFingerprint(p: PatchInput): string {
   const b = p.brain
-  return createHash('sha256').update(JSON.stringify([p.persona, b.routes, p.credentialsPath, b.emergencyCompaction, p.sessionsRoot, p.skillDir])).digest('hex').slice(0, 16)
+  return createHash('sha256').update(JSON.stringify([p.persona, b.routes, p.credentialsPath, b.emergencyCompaction, p.sessionsRoot, p.skillDir, p.skillsDigest ?? '', effectiveLanguages(p.languages)])).digest('hex').slice(0, 16)
 }
 
 /**
- * 系统提示词的指纹：人设、运行规则、dsh 版本。指纹变了，旧会话就不再接着用：
+ * 系统提示词的指纹：人设、运行规则（含语言一节）、技能文件、dsh 版本。指纹变了，旧会话就不再接着用：
  * dsh 对 deepseek 这类模型（systemPromptUpdate: in-history）会把新的系统提示词整份追加进历史，
  * 旧的那份还留着，以后每轮都要再付一遍（M2 真机报告问题 2）。
  */
 export function promptFingerprint(p: PatchInput, harnessVersion: string): string {
-  return createHash('sha256').update(JSON.stringify([p.persona, runtimeRules(), harnessVersion])).digest('hex').slice(0, 16)
+  return createHash('sha256').update(JSON.stringify([p.persona, runtimeRules(p.languages), harnessVersion, p.skillsDigest ?? ''])).digest('hex').slice(0, 16)
+}
+
+/**
+ * 技能文件的内容指纹（补充文件 11.5）：<skillDir>/<名>/SKILL.md 按名字排好，名字与内容一起算。
+ * 改了、加了、删了哪一个都会变；目录不在是空串。
+ */
+export function skillsDigest(skillDir: string): string {
+  let names: string[]
+  try { names = readdirSync(skillDir).sort() } catch { return '' }
+  const h = createHash('sha256')
+  for (const name of names) {
+    let body: Buffer
+    try { body = readFileSync(join(skillDir, name, 'SKILL.md')) } catch { continue }
+    h.update(`${name}\0${body.length}\0`).update(body)
+  }
+  return h.digest('hex').slice(0, 16)
 }
 
 export function modelValue(b: Pick<Brain, 'provider' | 'model'>): string {
