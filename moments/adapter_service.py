@@ -569,8 +569,9 @@ def _bot_row(bot, seams, moved_to=None):
             state, state_text = "broken", "没在运行：没有新鲜的心跳，启动项也不在跑"
         live = _live_brain(bot["channel"])
     polling = _polling(bot_id, seams)
-    # 9.4、13.1：网关在跑（判不出也算，宁可多问一次）才问健康接口，同跑提示与用户名都从这一次里取
-    health = _gateway_health(bot["channel"]) if state == "running" or polling is not False else {}
+    # 9.4、13.1：只问在跑（state 为 running）的 bot 的健康接口，同跑提示与用户名都从这一次里取；
+    # 停用的不问（9.4），用户名取配置里记下的
+    health = _gateway_health(bot["channel"]) if state == "running" else {}
     detail = {}
     if state == "running" and health.get("conflict") is True:
         detail = {"telegram_conflict": True}    # 9.4：同一个 Telegram 令牌有别的程序在收消息
