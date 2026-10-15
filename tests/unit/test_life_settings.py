@@ -9,6 +9,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from moments import life_settings as life
 
@@ -99,15 +100,18 @@ def test_读完之后拿锁之前别处改了文件_回409_不备份不写(env, 
     assert not (env.dsh_home / "backups").exists()
 
 
-def test_新的一段解析回来与提交值不符_自检拦下_回500_文件不动不备份(env):
-    # 结尾两个换行的多行文字写成保留结尾的字面块（|+），原文留在段后的空行会被它吞进去
+def test_结尾两个换行的多行文字_改用双引号写_能存进去_后面的键不受影响(env):
     text = "persona_summary: 原来的人设\n\ncity: 杭州\n"
     bot, bots, path = put_bot(env, text)
-    with pytest.raises(life.LifeError) as e:
-        life.save(bot, bots, {"persona_summary": "结尾有两个换行\n\n"})
-    assert (e.value.status, e.value.message) == (500, life.UNSAFE)
-    assert path.read_text(encoding="utf-8") == text
-    assert not (env.dsh_home / "backups").exists()
+    assert life.save(bot, bots, {"persona_summary": "结尾有两个换行\n\n"}) == life.SAVED
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert doc == {"persona_summary": "结尾有两个换行\n\n", "city": "杭州"}
+
+
+def test_备份轮换_不带序号的那份排在同一秒带序号的前面():
+    names = ["20261015-084153-01.yml", "20261015-084153.yml", "20261015-084152-02.yml"]
+    assert sorted(names, key=life._backup_order) == [
+        "20261015-084152-02.yml", "20261015-084153.yml", "20261015-084153-01.yml"]
 
 
 def test_允许目录_缺省是本系统家目录下的life_落在禁区或家目录别处的一律不算(env, monkeypatch, tmp_path):
