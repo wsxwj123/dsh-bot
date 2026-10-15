@@ -3,6 +3,7 @@
 // - 进程环境只放必要的几项：PATH、HOME、DSH_BOT_HOME、代理设置（Telegram 要走代理时没有它连不上）、关遥测。
 //   不放任何密钥：Telegram 令牌在频道目录的 .env，模型密钥在凭据文件，网关自己读
 // - 日志：网关和导演自己写、自己轮转；launchd 的输出文件只会有崩溃时的几行
+import { lstatSync } from 'fs'
 import { posix } from 'path'
 
 const { dirname, join } = posix // launchd 只在 macOS 上用：一律按斜杠拼路径（测试在 Windows 上也跑）
@@ -139,6 +140,20 @@ ${Object.entries(a.calendar).map(([k, v]) => `    <key>${esc(k)}</key><integer>$
 }
 
 export const plistPath = (home: string, label: string) => join(home, 'Library', 'LaunchAgents', `${label}.plist`)
+
+/**
+ * 迁出标记（适配服务 13.2）：<bot 目录>/.moved 在（不论内容、读不读得懂），这只 bot 已迁到另一种底层，
+ * 不许再装它的开机自启。返回给人看的拒绝原因；没有标记返回 null。查不了（不是「不存在」）也拒绝，宁可拦住。
+ */
+export function movedRefusal(botDir: string): string | null {
+  try {
+    lstatSync(join(botDir, '.moved'))
+  } catch (e) {
+    const code = (e as { code?: string }).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null
+  }
+  return '这只 bot 已迁到另一种底层，请在管理台用切换底层'
+}
 export const binDir = (p: string) => dirname(p)
 
 // ─── 安装前检查与状态解析（方案 3.10.1） ───
