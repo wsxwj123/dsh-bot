@@ -3,7 +3,7 @@
 import pytest
 
 from conftest import payload, no_dns, dns_to
-from moments.provider_model import HubError, validate_provider_payload
+from moments.provider_model import HubError, _check_base_url, validate_provider_payload
 
 
 def code(url, resolve=no_dns, allow_private=False):
@@ -187,3 +187,17 @@ def test_内网文案给出可执行出路():
         validate_provider_payload(payload(base_url="http://127.0.0.1:8317/v1"),
                                   resolve=no_dns)
     assert "HUB_ALLOW_PRIVATE_BASE_URL=1" in ei.value.detail
+
+
+@pytest.mark.parametrize("url", [
+    "http://１２７.０.０.１:8317/v0/management",     # 全角数字
+    "http://127。0。0。1:8317/",                       # 全角句号
+    "http://127.0.0.1​:8317/",                   # 零宽空格
+    "http://localhost‍/",                        # 零宽连接符
+    "https://例子.中国/v1",                            # 中文域名要先转成 xn-- 写法
+])
+def test_B31_主机名里有非ASCII字符一律拒收_连逃生门也不放(url):
+    for allow in (False, True):
+        with pytest.raises(HubError) as e:
+            _check_base_url(url, allow_private=allow, resolve=lambda h: [])
+        assert e.value.error == "bad_base_url"
