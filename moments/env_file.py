@@ -45,6 +45,19 @@ def parse(path):
     return out
 
 
+def unreadable(env=None):
+    """hub.env 在、却读不出来（没权限、不是 UTF-8）。口令可能就在里面，鉴权门据此不放行。"""
+    path = hub_env_path(env)
+    if not os.path.lexists(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            f.read()
+    except (OSError, UnicodeDecodeError):
+        return True
+    return False
+
+
 def get(key, env=None):
     """先进程环境、后 hub.env。**取不到回空串**，调用方不必区分"没设"与"设成空"。
 
