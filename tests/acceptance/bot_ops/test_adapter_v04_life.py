@@ -744,7 +744,7 @@ def test_生活设定_只读字段_GET给固定说明_PUT回422用同一句(adap
     assert bot.path.read_bytes() == original
 
 
-def test_生活设定PUT_备份只留最近5份_不认的文件不动(adapter, life):
+def test_生活设定PUT_备份只留最近2份_不认的文件不动(adapter, life):
     life_bot(adapter, life)
     d = life.backups / "botalpha"
     d.mkdir(parents=True)
@@ -753,7 +753,7 @@ def test_生活设定PUT_备份只留最近5份_不认的文件不动(adapter, l
         (d / name).write_text("旧备份", encoding="utf-8")
     adapter.ok(put(adapter, {"city": "苏州"}))
     left = backups_of(life)
-    assert len(left) == 5 and left[:4] == old[2:], "应只留最近 5 份：%r" % left
+    assert len(left) == 2 and left[:1] == old[5:], "应只留最近 2 份：%r" % left
     assert (d / "keep-me.txt").exists() and (d / "20200101-000000.yml.bak").exists(), "不认的文件被删了"
 
 
