@@ -1046,12 +1046,12 @@ BAD_CHANNEL_PATH_DETAIL = ("频道目录不在这只 bot 的新系统家目录�
                            "这一页不读也不改它")
 #: 人设文件读得出字节、但不是合法 UTF-8 时读接口的那一句（§10a，逐字）
 _EDIT_BAD_PERSONA = "人设文件不是合法的 UTF-8 文本，这一页读不了它；先把文件修好再来编辑"
-#: 人设备份（§10「人设备份」）：与人设同一个目录，名字是 `CLAUDE.md.bak.<时间戳>`，最多留 5 份。
+#: 人设备份（§10「人设备份」）：与人设同一个目录，名字是 `CLAUDE.md.bak.<时间戳>`，最多留 2 份。
 #: 时间戳的形状与 `hub_config.make_backup` 同一套（年月日-时分秒，同秒重名加 `-01` 到 `-99`）；
 #: 正则在这里另写一条是因为本文件的形状正则一律以 `\Z` 结尾 —— 那边那条是 `$`，
 #: 名字末尾多一个换行的文件也会被它认成备份，清理时就可能删错。
 PERSONA_BAK_PREFIX = "CLAUDE.md.bak."
-PERSONA_BAK_KEEP = 5
+PERSONA_BAK_KEEP = 2
 PERSONA_BAK_ID_RE = re.compile(r"^\d{8}-\d{6}(?:-\d{2})?\Z")
 #: `_edit_open` 交回的东西：闸交回的配置、yml 路径、yml 原文、节点树、yml 自己的错（或 None）、
 #: 频道目录的真实路径
@@ -1352,7 +1352,7 @@ def edit_save(bot_id, body):
     「不改某个字段」的表达是**不给这个键**：给了就必须是字符串，null 也是 400；没给的键
     对应的那一口一个字节都不动。空的人设正文不接受（要清空人设得去改文件）。
 
-    人设被改写之前先留一份备份（`_backup_persona`），写盘成功之后清理到 5 份；后面哪一步
+    人设被改写之前先留一份备份（`_backup_persona`），写盘成功之后清理到 2 份；后面哪一步
     失败，恢复时把这次建的备份一并删掉。
     """
     if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
@@ -1442,7 +1442,7 @@ def edit_save(bot_id, body):
         partial = _restore_writes(undo)
         raise HubError(500, "config_write_failed", _write_detail(err, partial))
     if backup_of:
-        _prune_persona_backups(channel)         # 写盘成功之后才清理，留最近 5 份
+        _prune_persona_backups(channel)         # 写盘成功之后才清理，留最近 2 份
     return {"ok": True,
             "saved": {"display_name": name is not None, "persona": persona is not None,
                       "fish_voice_id": voice is not None},
