@@ -38,6 +38,7 @@ MARKERS = [
 
 @pytest.mark.parametrize("text,want", [m[1:] for m in MARKERS], ids=[m[0] for m in MARKERS])
 def test_bots_停用的bot_polling为假_username取配置_moved_to按标记(adapter, text, want):
+    adapter.launchctl.set_default(installed=False)    # 假 launchctl 默认报"装着、在跑"；这条要的是停着的 bot
     alpha = adapter.bot("botalpha", enabled=False)
     au.set_cfg(alpha, telegram_username="alpha_cfg_bot")
     adapter.bot("botbravo", enabled=False)
@@ -69,6 +70,7 @@ def test_停用_带moved_to_写标记0600_一行to_op_at(adapter, moved_to, kind
 
 
 def test_停用_不给moved_to标记不动_给null删标记_已停着照常200(adapter):
+    adapter.launchctl.set_default(installed=False)    # 假 launchctl 默认报"装着、在跑"；这条要的是停着的 bot
     adapter.bot("botalpha", enabled=False)
     marker = au.put_file(au.moved_marker(adapter.sandbox, "botalpha"), MARK_CLAUDE)
     before = au.file_mark(marker)
