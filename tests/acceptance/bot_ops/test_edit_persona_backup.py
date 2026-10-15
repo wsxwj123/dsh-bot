@@ -6,7 +6,7 @@
 保存，人设被写成空文件、音色被删掉。后端这一侧的三道保险在这里量：
 1. 空的人设正文不再接受；
 2. 请求体里没出现的键，对应的那一口一个字节都不动；
-3. 人设被改写之前先留一份备份，最多 5 份。
+3. 人设被改写之前先留一份备份，最多 2 份。
 
 显示名的字符规则在 test_display_name_rules.py。
 """
@@ -338,14 +338,14 @@ def test_备份_名字与人设一起改_备份照留(web_client, sandbox):
     assert [p.read_bytes() for p in _baks(b.channel)] == [OLD.encode("utf-8")]
 
 
-def test_备份_连着改7次每次都不同_恰好留5份且是最近5次改写之前的内容(web_client, sandbox):
+def test_备份_连着改7次每次都不同_恰好留2份且是最近2次改写之前的内容(web_client, sandbox):
     b = _bot(sandbox, persona="v0\n")
     for i in range(1, 8):
         time.sleep(1.05)                    # 每次落在不同的一秒：时间戳各不相同，谁老谁新没有歧义
         r = _post(web_client, {"persona": "v%d\n" % i})
         assert r.status_code == 200, (i, r.status_code, r.get_json())
     got = [p.read_bytes().decode("utf-8") for p in _baks(b.channel)]
-    assert got == ["v2\n", "v3\n", "v4\n", "v5\n", "v6\n"], got
+    assert got == ["v5\n", "v6\n"], got
     assert b.md.read_bytes() == b"v7\n"
 
 
@@ -375,9 +375,9 @@ def test_备份_清理只删名字合规里最老的_别的文件不碰(web_clie
     r = _post(web_client, {"persona": "新人设\n"})
     assert r.status_code == 200, (r.status_code, r.get_json())
     names = [p.name for p in _baks(b.channel)]
-    assert len(names) == 5, names
-    assert names[:4] == olds[2:], ("该删的是最老的两份", names)
-    assert (b.channel / names[4]).read_bytes() == OLD.encode("utf-8")
+    assert len(names) == 2, names
+    assert names[:1] == olds[5:], ("该删的是最老的五份", names)
+    assert (b.channel / names[1]).read_bytes() == OLD.encode("utf-8")
     for name in bystanders:
         assert (b.channel / name).read_text(encoding="utf-8") == "别碰我：" + name, name
 
