@@ -72,6 +72,7 @@ BAD = [
     ("编号带横线", good_body(bot_id="bot-new")),
     ("编号只有一个字", good_body(bot_id="b")),
     ("编号是保留名templates", good_body(bot_id="templates")),     # GET /bots/templates 用了这个名字（约定 v1.0 5.18.1）
+    ("编号是保留名console", good_body(bot_id="console")),         # 适配服务自己的单元 com.dsh-bot.console
     ("显示名超过32个字", good_body(display_name="名" * 33)),
 ]
 
