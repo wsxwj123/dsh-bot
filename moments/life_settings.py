@@ -666,8 +666,12 @@ class _Dumper(yaml.SafeDumper):
 
 
 def _represent_str(dumper, value):
-    # 含换行的用字面块；写不成字面块的（制表符、行尾空格等）PyYAML 自己改用引号
-    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style="|" if "\n" in value else None)
+    # 含换行的用字面块；写不成字面块的（制表符、行尾空格等）PyYAML 自己改用引号。
+    # 结尾两个以上换行时改用双引号：字面块要写成保留结尾的 |+，原文段后的空行会被它吞进去，自检就拦下了
+    if "\n" not in value:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", value)
+    style = '"' if value.endswith("\n\n") else "|"
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
 
 
 _Dumper.add_representer(str, _represent_str)
@@ -866,10 +870,17 @@ def _backup(bot_id, data, kind="life", suffix=".yml"):
     raise FileExistsError("backup names used up")
 
 
+def _backup_order(name):
+    """备份名按时间先后排：``20261015-084153.yml`` 在 ``20261015-084153-01.yml`` 之前。
+    直接按字符串排时 ``-01`` 会排到不带序号的那份前面，同一秒存了几份时会删错。"""
+    parts = name.split(".", 1)[0].split("-")
+    return parts[0], parts[1], int(parts[2]) if len(parts) > 2 else 0
+
+
 def _rotate(folder, name_re=BACKUP_NAME_RE):
     """6.5：只留最近 5 份，按文件名排序删更早的；只认备份名字（``name_re``）的文件；删失败不报错。"""
     try:
-        names = sorted(n for n in os.listdir(folder) if name_re.match(n))
+        names = sorted((n for n in os.listdir(folder) if name_re.match(n)), key=_backup_order)
     except OSError:
         return
     for name in names[:-BACKUP_KEEP]:
