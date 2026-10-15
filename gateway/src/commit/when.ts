@@ -198,6 +198,38 @@ export function parseWhen(text: string, ctx: WhenCtx): WhenResult | null {
   return null // 只有"明天""周五"，没有时段和钟点：太含糊
 }
 
+// ─── 每天重复 ───
+
+/** 「每天」「每日」「天天」：when 以它开头就按每天重复登记；兜底识别时句子里有它就当作每天要做的事 */
+export const DAILY_RE = /每天|每日|天天/
+
+/** 每天重复的承诺：从 when 里取一天中的时间点（"每天早上七点""07:30""早上七点半"），第一次是今天（这个时间还没过）或明天。
+ *  没说几点（"每天早上"）返回 null，按含糊处理。 */
+export function parseDaily(text: string, ctx: WhenCtx): { h: number; mi: number; at: number } | null {
+  const t = text.replace(/\s+/g, '')
+  const clock = clockOf(t)
+  if (!clock || clock.h > 24 || clock.mi > 59) return null
+  const period = t.match(new RegExp(PERIOD_RE))?.[0]
+  let h = applyPeriod(clock.h, period)
+  if (!period && h >= 1 && h <= 6) h += 12 // 没说上午下午：和"明天三点"一样，1–6 点按下午算
+  h %= 24
+  return { h, mi: clock.mi, at: nextDaily(h, clock.mi, ctx.now, ctx.timeZone) }
+}
+
+/** 每天 h:mi 在 after 之后（不含 after）的第一次 */
+export function nextDaily(h: number, mi: number, after: number, tz: string): number {
+  const l = localParts(after, tz)
+  const today = zoned(l.y, l.mo, l.d, h, mi, tz)
+  return today > after ? today : zoned(l.y, l.mo, l.d + 1, h, mi, tz)
+}
+
+/** 每天 h:mi 在 atOrBefore 及之前的最近一次 */
+export function lastDaily(h: number, mi: number, atOrBefore: number, tz: string): number {
+  const l = localParts(atOrBefore, tz)
+  const today = zoned(l.y, l.mo, l.d, h, mi, tz)
+  return today <= atOrBefore ? today : zoned(l.y, l.mo, l.d - 1, h, mi, tz)
+}
+
 // ─── 兜底：从 bot 发出的话里找许诺 ───
 
 /** 对对方许诺要做的事（宾语是"你"的动作） */
