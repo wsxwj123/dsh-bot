@@ -30,7 +30,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: 生活设定文件的大小上限（2.3 情形 B）
 MAX_FILE = 1024 * 1024
 #: 每只 bot 的备份只留最近这么多份（6.5），只认这种名字
-BACKUP_KEEP = 5
+BACKUP_KEEP = 2
 BACKUP_NAME_RE = re.compile(r"^[0-9]{8}-[0-9]{6}(-[0-9]{2})?\.yml\Z")
 #: events.yaml 读不出类别时，「会遇到的生活事件」每项按这个字数检查（3.2）
 EVENT_MAX_LEN = 40
@@ -878,7 +878,7 @@ def _backup_order(name):
 
 
 def _rotate(folder, name_re=BACKUP_NAME_RE):
-    """6.5：只留最近 5 份，按文件名排序删更早的；只认备份名字（``name_re``）的文件；删失败不报错。"""
+    """6.5：只留最近 2 份，按文件名排序删更早的；只认备份名字（``name_re``）的文件；删失败不报错。"""
     try:
         names = sorted((n for n in os.listdir(folder) if name_re.match(n)), key=_backup_order)
     except OSError:
