@@ -257,8 +257,8 @@ def test_meta_v04_能力清单恰好十个键_多了notify与生活设定(adapte
     body = adapter.ok(adapter.call("GET", au.META))
     want = dict(au.CAPABILITIES, **{"bot.notify": True, "bot.life_settings": True,
                                     "bot.enable": True, "bot.switch_in": True, "bot.group_chat": True,
-                                    "bot.persona": True, "bot.voice": True})
-    assert body.get("capabilities") == want, "能力清单应恰好是十五个键（补充文件 10.1）：%r" % body.get("capabilities")
+                                    "bot.persona": True, "bot.voice": True, "bot.skills": True})
+    assert body.get("capabilities") == want, "能力清单应恰好是十六个键（补充文件 11.1）：%r" % body.get("capabilities")
 
 
 # ============================================================ 敏感信息
