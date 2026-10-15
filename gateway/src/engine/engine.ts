@@ -5,12 +5,12 @@
 //   dsh 进程死了 → 不知道消息进没进它的历史，作废这一段，换新会话、用账本补前情
 //   已经有回复发出去了 → 不再重试（宁可少回一次，也不重复说话）
 //   卡住 → session/cancel；取消不掉就重启 dsh，按"进程死了"处理
-import { existsSync, readFileSync, statSync } from 'fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { expandHome, loadAccess, reloadBrain, type Access, type Brain, type BotConfig, type Route } from '../config'
 import { AcpError, AcpExited, AcpTimeout, type SessionUpdate } from '../dsh/acp'
 import { buildDshEnv, defaultDshCommand, type DshProcess, type DshSpec } from '../dsh/process'
-import { buildPatchRows, modelValue, patchText, promptFingerprint, restartFingerprint, type PatchInput } from '../dsh/profile'
+import { buildPatchRows, modelValue, patchText, promptFingerprint, restartFingerprint, skillsDigest, type PatchInput } from '../dsh/profile'
 import type { InboundRow, Ledger, SegmentRow, TurnKind } from '../ledger'
 import { safeError, type Logger } from '../log'
 import type { McpServer, ToolDef } from '../mcp/server'
@@ -204,6 +204,8 @@ export class Engine {
   private timers: ReturnType<typeof setInterval>[] = []
   private configMtime = 0
   private personaMtime = 0
+  /** access.json 与技能文件的签名（watchKey，补充文件 11.4、11.5）；变了才重算重启指纹 */
+  private watchedKey = ''
   private lastProbeOkAt = 0
   private probeFailures = 0
   private unhealthySince: number | null = null
@@ -569,6 +571,7 @@ export class Engine {
     this.reaping = this.dsh.reapStale(this.dshSpec()).catch(e => this.log.warn('dsh.reap_failed', { err: safeError(e) }))
     this.configMtime = mtime(this.cfg.configPath)
     this.personaMtime = mtime(this.personaPath())
+    this.watchedKey = this.watchKey()
     const g = this.cfg.gw
     this.timers.push(setInterval(() => this.watchConfig(), g.configPollMs))
     this.timers.push(setInterval(() => void this.probe(), g.probeMs))
@@ -647,10 +650,21 @@ export class Engine {
 
   private personaPath(): string { return join(this.cfg.channelDir, 'CLAUDE.md') }
 
+  /** access.json（语言两键，11.4）与 skills/<名>/SKILL.md（11.5）的修改时间、inode、大小；只用来判断要不要重算指纹 */
+  private watchKey(): string {
+    const skillDir = join(this.cfg.channelDir, 'skills')
+    let names: string[] = []
+    try { names = readdirSync(skillDir).sort() } catch {}
+    return JSON.stringify([stamp(join(this.cfg.channelDir, 'access.json')), names.map(n => [n, stamp(join(skillDir, n, 'SKILL.md'))])])
+  }
+
   private patchInput(): PatchInput {
     let persona = ''
     try { persona = readFileSync(this.personaPath(), 'utf8') } catch {}
-    return { persona, brain: this.brain, credentialsPath: this.cfg.credentialsPath, sessionsRoot: join(this.cfg.dshHome, 'sessions'), skillDir: join(this.cfg.channelDir, 'skills') }
+    const skillDir = join(this.cfg.channelDir, 'skills')
+    const access = this.access()
+    return { persona, brain: this.brain, credentialsPath: this.cfg.credentialsPath, sessionsRoot: join(this.cfg.dshHome, 'sessions'), skillDir,
+      languages: { text: access.textLanguage, voice: access.voiceLanguage }, skillsDigest: skillsDigest(skillDir) }
   }
 
   private harnessVersion(): string {
@@ -1762,7 +1776,10 @@ export class Engine {
     const providersChanged = this.checkProviders(false)
     const cm = mtime(this.cfg.configPath)
     const pm = mtime(this.personaPath())
-    if (!providersChanged && cm === this.configMtime && pm === this.personaMtime) return
+    // access.json 的语言两键、技能文件也盯着（11.4、11.5）：只是它们变了不重读配置，下面按重启指纹判断，与人设同一条路
+    const wk = this.watchKey()
+    if (!providersChanged && cm === this.configMtime && pm === this.personaMtime && wk === this.watchedKey) return
+    this.watchedKey = wk
     const before = brainKey(this.brain)
     const beforeCap = this.brain.maxInputTokens ?? null
     if (cm !== this.configMtime || pm !== this.personaMtime) {
@@ -1969,4 +1986,9 @@ export class Engine {
 
 function mtime(p: string): number {
   try { return statSync(p).mtimeMs } catch { return 0 }
+}
+
+/** 修改时间、inode、大小（改名替换后 inode 必变，不怕秒级 mtime 漏判）；不在是空串 */
+function stamp(p: string): string {
+  try { const s = statSync(p); return `${s.mtimeMs}:${s.ino}:${s.size}` } catch { return '' }
 }
