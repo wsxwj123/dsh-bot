@@ -203,14 +203,15 @@ def test_换供应商_写请求只发给这只bot自己的网关_请求体是spe
 
 
 def test_换供应商_bot停用_回409_stopped_对任何网关零请求(adapter):
-    """4.4 第 3 步没过：连第 4 步那一次读清单都不该发生。"""
+    """13.7 修订：停着的只向在跑的 bot 读清单核对，不碰它自己的网关，也不往任何网关写。"""
     gw_stopped, gw_other = adapter.model_gateway(), adapter.model_gateway()
     adapter.running_bot("botalpha", gw_other)
     adapter.bot("botbravo", enabled=False, gw_port=gw_stopped.port)
     payload = {"provider_id": au.VENDOR_B, "model": au.VENDOR_B_MODELS[0]}
-    adapter.expect_error(adapter.call("POST", au.provider_url("botbravo"), payload), 409, "stopped")
+    got = adapter.ok(adapter.call("POST", au.provider_url("botbravo"), payload))
+    assert (got["applied"], got["queued"]) == (False, True), got     # 13.7：写进配置，不再 409
     assert gw_stopped.requests == [], "bot 停用着，却去找了它的网关：%r" % gw_stopped.requests
-    assert gw_other.requests == [], "bot 停用着，却去找了别的 bot 的网关：%r" % gw_other.requests
+    assert gw_other.writes() == [], "bot 停用着，却往别的 bot 的网关写了东西：%r" % gw_other.writes()
 
 
 def test_换供应商_bot启用但网关连不上_回503_unavailable(adapter):
@@ -238,11 +239,16 @@ def test_停用的bot_写接口回409_stopped_不往网关写东西也不重启(
     bot = adapter.bot("botalpha", enabled=False, gw_port=gw.port)
     before = bot.yml.read_bytes()
     make_url, body = WRITE_CALLS[which]
-    adapter.expect_error(adapter.call("POST", make_url("botalpha"), body), 409, "stopped")
+    resp = adapter.call("POST", make_url("botalpha"), body)
+    if which == "换供应商":      # 13.7：停着的换供应商写进配置、回 queued，不再 409
+        assert adapter.ok(resp)["queued"] is True
+    else:
+        adapter.expect_error(resp, 409, "stopped")
     assert gw.writes() == [], "bot 停用着，却往它的网关发了写请求：%r" % gw.writes()
     assert adapter.launchctl.actions() == [], \
         "bot 停用着，却对它的启动项做了动作：%r" % adapter.launchctl.actions()
-    assert bot.yml.read_bytes() == before, "bot 停用着，配置文件却被改了"
+    if which != "换供应商":
+        assert bot.yml.read_bytes() == before, "bot 停用着，配置文件却被改了"
 
 
 # ============================================================ 重启
