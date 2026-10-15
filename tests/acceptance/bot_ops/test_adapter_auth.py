@@ -95,7 +95,7 @@ def test_路由_带了令牌的未知路径_404_not_found(adapter, path):
 
 
 WRONG_METHOD = [
-    ("POST", au.META), ("POST", au.BOTS), ("POST", au.PROVIDERS),
+    ("POST", au.META), ("DELETE", au.BOTS), ("POST", au.PROVIDERS),
     ("DELETE", au.META), ("PUT", au.BOTS),
     ("GET", au.provider_url("botalpha")), ("GET", au.restart_url("botalpha")),
     ("PUT", au.provider_url("botalpha")), ("DELETE", au.restart_url("botalpha")),
