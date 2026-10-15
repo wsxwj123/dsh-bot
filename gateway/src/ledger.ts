@@ -317,6 +317,11 @@ export class Ledger {
       `SELECT id, summary FROM segments WHERE chat_id = ? AND summary IS NOT NULL AND summary != '' ORDER BY id DESC LIMIT 1`).get(chatId)
     return r ? { segmentId: r.id, summary: r.summary } : null
   }
+  /** /summary 用：这个聊天最近一个已经结束、摘要不为空的段（进行中的段、没写成摘要的段都不算） */
+  lastSummarySegment(chatId: string): SegmentRow | null {
+    return this.db.query<SegmentRow, [string]>(
+      `SELECT * FROM segments WHERE chat_id = ? AND state != 'active' AND summary IS NOT NULL AND summary != '' ORDER BY id DESC LIMIT 1`).get(chatId)
+  }
   /** 这个聊天最近一个已经结束的段 */
   lastClosedSegment(chatId: string): SegmentRow | null {
     return this.db.query<SegmentRow, [string]>(`SELECT * FROM segments WHERE chat_id = ? AND state != 'active' ORDER BY id DESC LIMIT 1`).get(chatId)
