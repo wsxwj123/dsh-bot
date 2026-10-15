@@ -138,7 +138,7 @@ def test_只读字段原样交回不算错_改了才按只读拒(env):
 
 
 def test_备份_同一秒轮换删掉较早的之后_新的一份仍接在最后_不拿回删掉的名字(monkeypatch, tmp_path):
-    """6.5 与适配服务 10.2：同一秒连存 7 次、只留 5 份，留下的应是最近 5 份（人设备份：persona 目录、不带后缀）。
+    """6.5 与适配服务 10.2：同一秒连存 7 次、只留 2 份，留下的应是最近 2 份（人设备份：persona 目录、不带后缀）。
 
     从头找第一个空名字的话，轮换删掉这一秒的第一份之后，第 7 份会拿回那个名字，排到最前、随即被删。
     """
@@ -153,10 +153,10 @@ def test_备份_同一秒轮换删掉较早的之后_新的一份仍接在最后
         life._rotate(folder, name_re)
     assert os.path.realpath(folder) == os.path.realpath(str(tmp_path / "backups" / "persona" / "botalpha"))
     names = sorted(os.listdir(folder))
-    assert names == ["20261015-093000-%02d" % i for i in range(2, 7)]
+    assert names == ["20261015-093000-%02d" % i for i in range(5, 7)]
     contents = []
     for name in names:
         with open(os.path.join(folder, name), "rb") as f:
             contents.append(f.read())
-    assert contents == [b"v%d" % i for i in range(2, 7)]
+    assert contents == [b"v%d" % i for i in range(5, 7)]
     assert all(os.stat(os.path.join(folder, n)).st_mode & 0o777 == 0o600 for n in names)
