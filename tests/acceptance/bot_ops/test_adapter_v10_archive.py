@@ -132,6 +132,27 @@ def test_恢复_原处已有同名_409_exists_什么都不移(adapter):
     assert listed == [archive_id], listed
 
 
+def test_恢复_incomplete_把已移走的放回原处_没移走的留在原处不算重名(adapter):
+    """约定 v1.0 5.18.3：归档中途断了（只移走了一部分）为 incomplete；恢复时把已移走的放回原处。"""
+    alpha = au.full_bot(adapter, "botalpha")
+    persona, life = au.persona_path(alpha).read_bytes(), alpha.life.read_bytes()
+    archive_id = do_archive(adapter)
+    folder = archive_root(adapter) / archive_id
+    items = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))["items"]
+    left = next(i for i in items if i["from"] == str(alpha.yml))       # 配置那一样当作没移走：还在原处
+    os.replace(folder / left["to"], left["from"])
+    rows = adapter.ok(adapter.call("GET", au.ARCHIVES))["archives"]
+    assert [(a["archive_id"], a["status"]) for a in rows] == [(archive_id, "incomplete")], rows
+
+    got = adapter.ok(adapter.call("POST", au.restore_url(archive_id), {}))
+
+    assert (got["bot_id"], got["enabled"], got["running"]) == ("botalpha", False, False), got
+    assert au.persona_path(alpha).read_bytes() == persona and alpha.life.read_bytes() == life
+    assert (alpha.botdir / "state" / "ledger.db").read_bytes() == b"fake-ledger-botalpha"
+    assert au.read_cfg(alpha).get("enabled") is False, "恢复后应是停用状态"
+    assert adapter.ok(adapter.call("GET", au.ARCHIVES))["archives"] == []
+
+
 @pytest.mark.parametrize("archive_id,status,code", [
     ("botalpha", 422, "invalid"),
     ("BotAlpha-20261015T080102Z", 422, "invalid"),
