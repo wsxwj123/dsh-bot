@@ -136,15 +136,15 @@ def test_PUT人设_原来没有CLAUDE_md_用空内容的版本号能写入_不�
     no_backup(adapter)
 
 
-def test_PUT人设_连存7次_备份只留最近5份_同一秒内存的也不互相覆盖(adapter):
+def test_PUT人设_连存7次_备份只留最近2份_同一秒内存的也不互相覆盖(adapter):
     texts = [u"第%d版人设：小A。\n" % i for i in range(8)]       # texts[0] 是原文
     bot = persona_bot(adapter, content=texts[0])
     for prev, cur in zip(texts, texts[1:]):
         adapter.ok(put_persona(adapter, {"text": cur, "version": au.persona_version(prev)}))
     backups = au.persona_backups(adapter.sandbox, "botalpha")
     got = sorted(p.read_text(encoding="utf-8") for p in backups)
-    assert got == sorted(texts[2:7]), "应只留最近 5 份（第 2 到第 6 版）且互不覆盖，实际 %r" % got
-    assert [au.mode_of(p) for p in backups] == [0o600] * 5, "备份权限都应为 0600"
+    assert got == sorted(texts[5:7]), "应只留最近 2 份（第 5、第 6 版）且互不覆盖，实际 %r" % got
+    assert [au.mode_of(p) for p in backups] == [0o600] * 2, "备份权限都应为 0600"
     assert au.persona_path(bot).read_bytes() == texts[7].encode("utf-8")
 
 
