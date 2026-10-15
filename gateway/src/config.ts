@@ -352,6 +352,10 @@ export type Access = {
   voiceId?: string
   /** 语音桥的合成模型（约定 v0.8 B.3）；没有就不带，由语音桥按全局设置 */
   voiceModel?: string
+  /** 文字气泡用的语言（约定 v0.9 5.14）；没有按「简体中文」。可能是手改的不合规值，用前过 effectiveLanguages */
+  textLanguage?: string
+  /** voice_text 用的语言；没有跟文字语言 */
+  voiceLanguage?: string
 }
 
 export function readAccess(channelDir: string): Access | null {
