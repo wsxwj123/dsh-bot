@@ -734,7 +734,7 @@ def _checked_yml(fields):
     return text
 
 
-def lay_down(fields):
+def lay_down(fields, port_check=None):
     """B 段：tmp 里建好整棵树 → 一次 `move` 到 `<bot 家>` → 写 yml → 复查端口。
 
     落点全在新系统那套位置（§7）：配置进 `<dsh 配置根>/<bot>.yml`，频道树进
@@ -743,6 +743,9 @@ def lay_down(fields):
     任一步失败：按精确清单逆序删干净，磁盘回到操作前（可断言 yml 不在、bot 家不在、
     注册表查不到它），然后把异常原样抛给调用方定码。回滚只删清单内的东西，
     非空目录一律保留 —— 用户的 bot 家可能早就在那儿，一次手滑就是别人的聊天记录没了。
+
+    ``port_check``：落盘之后复查端口用的函数（抛错即回滚）。不给是管理台这一页的 `_check_port`
+    （查新旧两套配置）；适配服务只许读本系统，传它自己只查本系统的那一份（补充文件 12.2）。
     """
     bot_id = fields["bot_id"]
     home = str(config_sources.dsh_bot_dir(bot_id))
@@ -798,7 +801,10 @@ def lay_down(fields):
         _fix_modes(home)
         _create_file(yml, yml_text)               # 没写完它自己删，不会留下空配置
         made.append((_MADE_FILE, yml))
-        _check_port(fields["port"], skip=bot_id)   # R4：A 段那次 bind 试探到这里已经有窗口
+        if port_check is None:
+            _check_port(fields["port"], skip=bot_id)   # R4：A 段那次 bind 试探到这里已经有窗口
+        else:
+            port_check()
     except BaseException:
         _rollback(made)
         for d in reversed(seeded):                 # 逆序：先摘深的 bots/，再摘配置根
@@ -878,13 +884,16 @@ def _resolve_bun():
     return cand if os.path.isfile(cand) and os.access(cand, os.X_OK) else None
 
 
-def _register_dsh(fields):
+def _register_dsh(fields, deadline=None):
     """macOS：交给 `gateway/scripts/autostart.ts` 装网关单元与主动消息单元（§6 register）。
 
     两条命令**短路**：install 非 0 即止（install-jobs 不跑）。子进程原始输出（含 launchd
     报错原文）一个字不进 `detail`/`manual_hint`（S9）—— 只给机读码与固定命令文本。
     PATH 前置 `~/.pyenv/shims`（目录存在时），让 autostart.ts 的 `Bun.which('python3')`
     解析到 pyenv 那支，与既有 dsh bot 单元口径一致；shims 不在的机器自然回落。
+
+    ``deadline``（``time.monotonic()`` 的时刻）：给了就让每条命令最多跑到那时，到点还没跑的那条
+    不再起、按 ``timeout`` 失败（适配服务整条请求 55 秒封顶，补充文件 12.2）；不给照旧每条 60 秒。
     """
     yml = os.path.join(str(config_sources.dsh_dir()), fields["bot_id"] + ".yml")
     bun = _resolve_bun()
@@ -899,10 +908,15 @@ def _register_dsh(fields):
     if os.path.isdir(shims):
         env["PATH"] = shims + os.pathsep + (env.get("PATH") or "")
     for sub, code in (("install", "install_failed"), ("install-jobs", "install_jobs_failed")):
+        timeout = INSTALL_TIMEOUT
+        if deadline is not None:
+            timeout = min(INSTALL_TIMEOUT, deadline - time.monotonic())
+            if timeout <= 0:
+                return _step("register", "failed", "timeout", manual_hint=hint)
         try:
             rc = subprocess.run([bun, AUTOSTART_TS, sub, yml], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                env=env, timeout=INSTALL_TIMEOUT).returncode
+                                env=env, timeout=timeout).returncode
         except (OSError, subprocess.SubprocessError):
             return _step("register", "failed", code, manual_hint=hint)
         if rc != 0:
