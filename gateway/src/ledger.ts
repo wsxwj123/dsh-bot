@@ -66,6 +66,8 @@ export type CommitmentRow = {
   created_at: number
   closed_at: number | null
   note: string | null
+  /** 每天重复："daily HH:MM"（一天里的时间点）；空 = 一次性 */
+  repeat_rule: string | null
 }
 
 export type TurnRow = {
@@ -146,9 +148,9 @@ export class Ledger {
 
   // ─── 承诺 ───
 
-  addCommitment(c: { chatId: string; text: string; quote?: string | null; whenText?: string | null; dueAt: number; source: CommitmentRow['source'] }): CommitmentRow {
-    const r = this.db.query(`INSERT INTO commitments (chat_id, text, quote, when_text, due_at, next_at, state, source, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
-      .run(c.chatId, c.text, c.quote ?? null, c.whenText ?? null, c.dueAt, c.dueAt, c.source, this.now())
+  addCommitment(c: { chatId: string; text: string; quote?: string | null; whenText?: string | null; dueAt: number; source: CommitmentRow['source']; repeatRule?: string | null }): CommitmentRow {
+    const r = this.db.query(`INSERT INTO commitments (chat_id, text, quote, when_text, due_at, next_at, state, source, created_at, repeat_rule) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
+      .run(c.chatId, c.text, c.quote ?? null, c.whenText ?? null, c.dueAt, c.dueAt, c.source, this.now(), c.repeatRule ?? null)
     return this.commitment(Number(r.lastInsertRowid))!
   }
   commitment(id: number): CommitmentRow | null {
@@ -160,7 +162,7 @@ export class Ledger {
   commitmentsInState(state: CommitmentState, nextBefore = Number.MAX_SAFE_INTEGER): CommitmentRow[] {
     return this.db.query<CommitmentRow, [string, number]>('SELECT * FROM commitments WHERE state = ? AND next_at <= ? ORDER BY next_at').all(state, nextBefore)
   }
-  updateCommitment(id: number, f: Partial<Pick<CommitmentRow, 'state' | 'next_at' | 'attempts' | 'inbound_id' | 'note'>>): void {
+  updateCommitment(id: number, f: Partial<Pick<CommitmentRow, 'state' | 'due_at' | 'next_at' | 'attempts' | 'inbound_id' | 'note'>>): void {
     const keys = Object.keys(f) as (keyof typeof f)[]
     if (keys.length === 0) return
     const closing = f.state && ['done', 'failed', 'cancelled'].includes(f.state)
@@ -190,6 +192,8 @@ export class Ledger {
     const segCols = new Set(this.db.query<{ name: string }, []>('PRAGMA table_info(segments)').all().map(c => c.name))
     if (!segCols.has('memory_seen')) this.db.exec('ALTER TABLE segments ADD COLUMN memory_seen INTEGER NOT NULL DEFAULT 0')
     if (!segCols.has('prompt_key')) this.db.exec('ALTER TABLE segments ADD COLUMN prompt_key TEXT')
+    const comCols = new Set(this.db.query<{ name: string }, []>('PRAGMA table_info(commitments)').all().map(c => c.name))
+    if (!comCols.has('repeat_rule')) this.db.exec('ALTER TABLE commitments ADD COLUMN repeat_rule TEXT')
     this.setMeta('schema_version', String(SCHEMA_VERSION))
   }
 
