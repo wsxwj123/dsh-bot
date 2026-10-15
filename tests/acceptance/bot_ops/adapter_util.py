@@ -758,3 +758,90 @@ def tree_mark(root):
             p = Path(dirpath) / n
             out[str(p.relative_to(root))] = "dir" if p.is_dir() and not p.is_symlink() else file_mark(p)
     return out
+
+
+# ---------------------------------------------------------------- v1.0（补充文件第 12 节）
+# 依据：INTERFACE-适配服务.md 第 12 节；INTERFACE-适配约定-v1.0-dsh侧.md A 到 D。下面是第 12 节几份用例共用的小件。
+
+#: 12.1：第 11 节的十六个键，加 bot.create、bot.archive、bot.delete、bot.profile，都报 true，共二十个键
+CAPABILITIES_V10 = dict(CAPABILITIES_V09, **{"bot.create": True, "bot.archive": True,
+                                             "bot.delete": True, "bot.profile": True})
+ARCHIVES = PREFIX + "/archives"
+#: 草案 C：删除成功时回的那句话（原文）
+DELETED_MESSAGE = "已删除本地数据。Telegram 上的 bot 照样能用，以后可以用新的人设和对应的 bot 令牌再加回来"
+#: 12.3、12.4：UTC 时间的写法，形如 20261015T080102Z
+UTC_STAMP = r"[0-9]{8}T[0-9]{6}Z"
+#: 新建用的假值（与已有假 bot 的 Telegram 令牌不同；getMe 桩回的 id 是 123456789）
+NEW_TG_TOKEN = "712345678:NEW-FAKE-TG-TOKEN-do-not-leak-0123456789ab"
+NEW_FISH_KEY = "FISH-FAKE-KEY-do-not-leak-0123456789"
+NEW_CHAT = 1009876543
+
+
+def archive_url(bot_id):
+    return "%s/%s/archive" % (BOTS, bot_id)
+
+
+def delete_url(bot_id):
+    return "%s/%s/delete" % (BOTS, bot_id)
+
+
+def profile_url(bot_id):
+    return "%s/%s/profile" % (BOTS, bot_id)
+
+
+def restore_url(archive_id):
+    return "%s/%s/restore" % (ARCHIVES, archive_id)
+
+
+def use_trash(sandbox, monkeypatch):
+    """12.4 的测试接缝：废纸篓指到临时目录（先建好），返回它。绝不碰真的 ~/.Trash。"""
+    trash = sandbox.tmp / "trash"
+    trash.mkdir(exist_ok=True)
+    monkeypatch.setenv("DSH_CONSOLE_TRASH_DIR", str(trash))
+    return trash
+
+
+def full_bot(adapter, bot_id, life="own"):
+    """一只家当齐全的假 bot：配置、bot 目录（频道、人设、账本占位）、两份装着的启动项、生活设定文件。
+
+    life："own" 给它一份自己的生活设定文件；"none" 不给；别的值当作已有文件的路径（与别的 bot 共用）。
+    返回 adapter.bot 的结果，多一个 life（文件路径或 None）。
+    """
+    bot = adapter.bot(bot_id)
+    put_file(persona_path(bot), "# %s 的人设\n" % bot_id)
+    put_file(bot.botdir / "state" / "ledger.db", b"fake-ledger-" + bot_id.encode())
+    put_plists(adapter.sandbox, bot_id)
+    bot.life = None
+    if life == "own":
+        life_dir = adapter.sandbox.dsh_home / "life"
+        life_dir.mkdir(exist_ok=True)
+        bot.life = put_file(life_dir / ("%s.yml" % bot_id), "events: []\n")
+    elif life != "none":
+        bot.life = Path(life)
+    if bot.life is not None:
+        set_cfg(bot, life_config=str(bot.life))
+    return bot
+
+
+def bot_paths(sandbox, bot):
+    """12.3 列的那些原位置：bot 目录、配置、两个启动项（装着与收起两种写法）、生活设定文件。"""
+    paths = [bot.botdir, bot.yml]
+    for label in unit_labels(bot.id):
+        paths += [sandbox.agents / (label + ".plist"), sandbox.agents / (label + ".plist.disabled")]
+    if getattr(bot, "life", None) is not None:
+        paths.append(bot.life)
+    return paths
+
+
+def find_file(root, name, data):
+    """root 下面有没有名叫 name、内容是 data 的文件（搬走的东西还在不在）。"""
+    for dirpath, _dirs, files in os.walk(str(root)):
+        if name in files and (Path(dirpath) / name).read_bytes() == data:
+            return True
+    return False
+
+
+def stuck_running(adapter, monkeypatch, bot_id):
+    """停不下来：print 一直说主单元在跑，等的上限缩到 1 秒。"""
+    adapter.launchctl.set_print_text(print_text(unit_labels(bot_id)[0], running=True))
+    monkeypatch.setenv("DSH_CONSOLE_STOP_WAIT", "1")
