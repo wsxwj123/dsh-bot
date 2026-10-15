@@ -1099,9 +1099,12 @@ def _write_enabled(bot_id, enabled):
 
 
 def _stop_bot(bot, seams, deadline):
-    """「停」（约定 5.8，补充文件 9.2）：先记成停用，再停启动项，每秒查一次，等到确认不在跑。"""
+    """「停」（约定 5.8，补充文件 9.2）：先记成停用，再停启动项，每秒查一次，等到确认不在跑。
+
+    在不在跑按 ``_polling``（约定 v1.0：与 5.2 的 polling 同一判定，宁可误报）：launchctl 答不上来算「可能还在跑」，
+    照样等，到上限回 503，不报 ``running: false``——壳见到 false 就会去启另一边。"""
     bot_id = bot["id"]
-    if not bot["enabled"] and not _unit_running(bot_id, seams) and not any(
+    if not bot["enabled"] and _polling(bot_id, seams) is False and not any(
             bot_launchd.unit_state(bot_id, timer, seams) == "installed" for timer in (False, True)):
         return {"ok": True, "enabled": False, "running": False}       # 已是目标状态，不重复操作
     if bot["enabled"]:
@@ -1112,10 +1115,10 @@ def _stop_bot(bot, seams, deadline):
         raise Refuse(503, "unavailable", "已记成停用，但停止它的启动项失败：%s" % reason)
     wait = _stop_wait()
     until = min(time.monotonic() + wait, deadline)
-    while _unit_running(bot_id, seams):
+    while _polling(bot_id, seams) is not False:
         left = until - time.monotonic()
         if left <= 0:
-            raise Refuse(503, "unavailable", "已记成停用，也发了停止命令，但等了 %g 秒它仍在跑" % wait)
+            raise Refuse(503, "unavailable", "已记成停用，也发了停止命令，但等了 %g 秒它仍在跑（或查不到它停没停）" % wait)
         time.sleep(min(STOP_POLL, left))
     return {"ok": True, "enabled": False, "running": False}
 
@@ -1917,7 +1920,8 @@ def _create_bot():
     running = fields["enabled"] and deadline - time.monotonic() > bot_launchd.LAUNCHCTL_TIMEOUT \
         and _unit_running(bot_id, seams)    # enabled 为 false 时没有装载，不必再问
     person = _person({"id": bot_id, "cfg": {"life_id": fields["person"]} if fields["person"] else {}})
-    return {"ok": True, "bot_id": bot_id, "person": person, "username": username, "running": running}
+    return {"ok": True, "bot_id": bot_id, "person": person, "username": username,
+            "enabled": fields["enabled"], "running": running}           # 约定 v1.0 5.18.1 的成功体
 
 
 def _archive_root():
@@ -2005,7 +2009,7 @@ def _keep_disabled(bot_id, seams):
 
 def _restore(archive_id):
     """恢复（12.3）：``archive_id`` 不合规 422、不存在 404 → 按 manifest 整份移回原处；原处任何一处已有东西
-    409，什么都不移。恢复后是停用状态，不装载启动项。"""
+    409，什么都不移。恢复后是停用状态，不装载启动项。incomplete 的只移回归档里还在的（约定 v1.0 5.18.3）。"""
     if _json_object(allow_empty=True):
         raise _invalid("请求体只能是 {}")
     m = ARCHIVE_ID_RE.match(archive_id)
@@ -2018,8 +2022,12 @@ def _restore(archive_id):
     try:
         with hub_addbot.hold_addbot_lock():
             items = _read_manifest(folder, bot_id, seams)
-            if items is None or not all(os.path.lexists(stored) for _src, stored in items):
-                raise Refuse(500, "internal", "这份归档的清单认不出来，或者里面的东西不全，没有恢复")
+            if items is None:
+                raise Refuse(500, "internal", "这份归档的清单认不出来，没有恢复")
+            # incomplete（归档中途断了）：没移走的本来就还在原处，不算重名；只把已移走的放回去
+            items = [(src, stored) for src, stored in items if os.path.lexists(stored)]
+            if not items:
+                raise Refuse(500, "internal", "这份归档里什么都没有，没有恢复")
             if any(os.path.lexists(src) for src, _stored in items):
                 raise Refuse(409, "exists", "原处已经有同名的 bot 或文件，没有恢复")
             moved = []
