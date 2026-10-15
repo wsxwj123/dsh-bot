@@ -9,6 +9,7 @@ v0.8 的人设、语音照 ``INTERFACE-适配约定-v0.8-dsh侧.md`` 与补充�
 v0.9 的技能读写、语音的两个语言键照 v0.9 两份草案（``INTERFACE-适配约定-v0.9-*.md``）与补充文件第 11 节；技能存盘同人设。
 v1.0 的新建、归档与恢复、删除、显示名照 ``INTERFACE-适配约定-v1.0-dsh侧.md`` 与补充文件第 12 节；新建与显示名调管理台
 新建页、编辑页那几个函数（``hub_addbot``），停 bot 用 9.2 的「停」。
+v1.0 的补充（列表四个键、迁出标记、新建新字段、归档 shell_meta、删除先抹 .env、令牌转交、停着换供应商）照补充文件第 13 节。
 起服务：仓库根执行 ``python3 -m moments.adapter_service``；测试用 ``create_app()``。
 只支持这一种启动方式：监听地址只许回环、令牌文件不在就拒绝启动，这两道检查都在 ``main()`` 里。
 ``flask run`` 等别的方式拉起 ``create_app()`` 会绕过它们（例如对外监听），不要这样起。
@@ -84,6 +85,7 @@ CAPABILITIES = {
     "bot.archive": True,
     "bot.delete": True,
     "bot.profile": True,
+    "bot.token_handoff": True,
 }
 DEFAULT_LABEL = "各 bot 配置文件里写的那一组"
 
@@ -163,13 +165,40 @@ CREATE_BUDGET = 55.0
 #: 新建装启动项失败时撤回要的时间：两条 bootout，每条最多一个 launchctl 超时。装启动项要在整条时限减去它之前做完。
 UNDO_RESERVE = 2 * bot_launchd.LAUNCHCTL_TIMEOUT
 CREATE_KEYS = ("bot_id", "telegram_token", "chat_id", "display_name", "persona_text", "persona_template",
-               "fish_voice_id", "fish_api_key", "port")
+               "fish_voice_id", "fish_api_key", "port", "enabled", "person", "telegram_username",
+               "telegram_user_id", "purpose")
 PROFILE_NAME_MAX = 32
 UTC_STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 ARCHIVE_ID_RE = re.compile(r"^([a-z][a-z0-9_]{1,31})-([0-9]{8}T[0-9]{6}Z)\Z")
 MANIFEST = "manifest.json"
 DEFAULT_TRASH_DIR = "~/.Trash"
 DELETED = "已删除本地数据。Telegram 上的 bot 照样能用，以后可以用新的人设和对应的 bot 令牌再加回来"   # 草案 C 原文
+#: v1.0 补充（补充文件第 13 节）
+#: 13.6：op_id 的写法（第一组是种类）与五种种类；令牌转交的限频窗口（秒）与记录条数上限
+OP_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-([a-z]{4,7})-[0-9a-f]{8}\Z")
+OP_KINDS = ("create", "switch", "archive", "restore", "delete")
+OP_ID_BAD = "op_id 的写法不对：要像 20261015T051700Z-switch-1a2b3c4d，种类是 create、switch、archive、restore、delete 之一"
+HANDOFF_WINDOW = 600
+HANDOFF_KEEP = 200
+HANDOFF_FILE = "token-handoff.json"
+#: .env 里令牌那一行（整串取出来，只交给令牌转交的成功响应）
+ENV_TOKEN_LINE_RE = re.compile(r"^[ \t]*TELEGRAM_BOT_TOKEN[ \t]*=[ \t]*[\"']?([^\"'\s]+)[\"']?[ \t]*$", re.M)
+#: 13.2：迁出标记的文件名、认得的去向、一行的写法
+MOVED_MARKER = ".moved"
+MOVED_TARGETS = ("pending", "claude")
+MOVED_LINE_RE = re.compile(r"^to=([a-z]+) op=(\S+) at=(\S+)\n?\Z")
+MOVED_REFUSED = "这只 bot 已迁到另一种底层，请在管理台用切换底层"
+#: 13.3：新建的编号规则（person 同）、purpose 的两种取值、自动挑端口的范围
+CREATE_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}\Z")
+CREATE_PURPOSES = ("new", "switch_in")
+CREATE_PORTS = range(17850, 17900)
+#: 13.4：shell_meta 序列化后的上限；归档请求体按 JSON 转义最坏 6 倍放宽；manifest 带上 shell_meta 后读的上限
+SHELL_META_MAX = 64 * 1024
+ARCHIVE_MAX_BODY = 6 * SHELL_META_MAX + 1024
+MANIFEST_MAX = 1024 * 1024
+QUEUED = "已保存，下次启用时生效"      # 13.7
+#: 令牌转交的记录读、判、写在同一把锁里（进程内）
+_handoff_lock = threading.Lock()
 
 #: 配置文件没写 brain 时网关自己用的默认值（gateway/src/config.ts 的 parseBrain）。
 CONFIG_DEFAULT_PROVIDER = "deepseek-official"
@@ -336,7 +365,8 @@ def _respond():
         path = _raw_path()
         if path == "/hub" or path.startswith("/hub/"):
             return _hub_respond(path)       # 名单外的 404、错方法的 405 也从这里以 Refuse 抛出来
-        return _json(_dispatch())
+        result = _dispatch()
+        return result if isinstance(result, Response) else _json(result)      # 要带响应头的（13.6）自己组好
     except Refuse as r:
         payload = {"ok": False, "code": r.code, "message": r.message}
         if r.fields is not None:
@@ -521,8 +551,9 @@ def _person(bot):
     return bot["id"]
 
 
-def _bot_row(bot, seams):
-    """列表里的一行（约定 5.2 的八个键，v0.6 起加 ``person``）。在线程池里跑：只用传进来的值，不读环境与配置。"""
+def _bot_row(bot, seams, moved_to=None):
+    """列表里的一行（约定 5.2 的八个键，v0.6 起加 ``person``，13.1 加 ``enabled``、``polling``、``username``、
+    ``moved_to``）。在线程池里跑：只用传进来的值，不读环境与配置（迁出标记由 ``_bots`` 先读好传进来）。"""
     bot_id = bot["id"]
     brain = _config_brain(bot["cfg"])
     live = None
@@ -537,8 +568,11 @@ def _bot_row(bot, seams):
         else:
             state, state_text = "broken", "没在运行：没有新鲜的心跳，启动项也不在跑"
         live = _live_brain(bot["channel"])
+    polling = _polling(bot_id, seams)
+    # 9.4、13.1：网关在跑（判不出也算，宁可多问一次）才问健康接口，同跑提示与用户名都从这一次里取
+    health = _gateway_health(bot["channel"]) if state == "running" or polling is not False else {}
     detail = {}
-    if state == "running" and _gateway_health(bot["channel"]).get("conflict") is True:
+    if state == "running" and health.get("conflict") is True:
         detail = {"telegram_conflict": True}    # 9.4：同一个 Telegram 令牌有别的程序在收消息
     if live is None:
         provider, model, effort, source = brain["provider"], brain["model"], brain["effort"], "default"
@@ -553,7 +587,9 @@ def _bot_row(bot, seams):
     return {"bot_id": bot_id, "display_name": bot["display_name"], "person": _person(bot),
             "state": state, "state_text": state_text,
             "provider": {"id": provider, "name": provider, "model": model, "effort": effort},
-            "provider_source": source, "pending": None, "detail": detail}
+            "provider_source": source, "pending": None, "detail": detail,
+            "enabled": bot["enabled"], "polling": polling, "username": _username(health, bot["cfg"]),
+            "moved_to": moved_to}
 
 
 # ---------------------------------------------------------------- 五个接口
@@ -592,8 +628,9 @@ def _bots():
         return {"ok": True, "bots": []}
     # 接缝、每只的启停、每只的配置都在处理请求的线程里读好，线程池里不再读环境与配置。
     seams = bot_launchd.resolve_seams()
+    moved = {bot["id"]: _moved_to(bot["id"]) for bot in bots}
     with ThreadPoolExecutor(max_workers=min(MAX_ROW_WORKERS, len(bots))) as pool:
-        futures = [pool.submit(_bot_row, bot, seams) for bot in bots]
+        futures = [pool.submit(_bot_row, bot, seams, moved[bot["id"]]) for bot in bots]
         return {"ok": True, "bots": [f.result() for f in futures]}
 
 
@@ -704,7 +741,8 @@ def _set_provider(bot_id):
     if not has_provider and not has_effort:
         raise _invalid("请求里没有要改的内容：给 provider_id 加 model，或者给 effort")
     bot = _require_bot(bot_id)
-    _require_enabled(bot)                   # 补充文件 4.4 第 3 步：停用先于读清单，停用时什么都不读
+    if not bot["enabled"]:                  # 13.7（第 3 步修订）：停着的不再 409，核对过写进配置，下次启用时生效
+        return _queue_provider(bot, body, has_provider, has_effort)
     # 前三步都过了，下面才开始找这只 bot 自己的网关（不找别的 bot 的）。
     channel = bot["channel"]
     if not gateway_client.available(channel):
@@ -1091,7 +1129,7 @@ def _start_bot(bot, seams, deadline):
     if not ok:
         raise Refuse(503, "unavailable", "已记成启用，但启动它的启动项失败：%s" % reason)
     # 再问一次 print 最多要一个 launchctl 超时：剩的时间不够就不问，按「还没在跑」报
-    running = deadline - time.monotonic() > bot_launchd.LAUNCHCTL_TIMEOUT and _unit_running(bot_id, seams)
+    running = deadline - time.monotonic() > bot_launchd.LAUNCHCTL_TIMEOUT and _polling(bot_id, seams)   # 13.1 同一判定
     return {"ok": True, "enabled": True, "running": running}
 
 
@@ -1146,12 +1184,23 @@ def _switch_in(bot, import_from, seams, deadline):
 
 
 def _set_enabled(bot_id):
-    """启停（约定 5.8，补充文件 9.2）；带 ``import_from`` 时先切进导入（5.9，9.3）。整条请求 55 秒封顶。"""
+    """启停（约定 5.8，补充文件 9.2、13.2）；带 ``import_from`` 时先切进导入（5.9，9.3）。整条请求 55 秒封顶。
+
+    13.2：``op_id`` 只用于记录；``moved_to`` 只随停用有效（在停之前写或删迁出标记，停不下来的 503 也已改过标记，
+    宁可拦住）；有迁出标记时启用一律 ``409 moved``（含切进），什么都不做。
+    """
     deadline = time.monotonic() + ENABLE_BUDGET - 1.0     # 留一秒收尾
     body = _json_object()
     enabled, import_from = body.get("enabled"), body.get("import_from")
-    if type(enabled) is not bool or set(body) - {"enabled", "import_from"}:
-        raise _invalid("请求体只能有 enabled（true 或 false）和可选的 import_from")
+    if type(enabled) is not bool or set(body) - {"enabled", "import_from", "op_id", "moved_to"}:
+        raise _invalid("请求体只能有 enabled（true 或 false），和可选的 import_from、op_id、moved_to")
+    if "op_id" in body and not _valid_op_id(body["op_id"]):
+        raise _invalid(OP_ID_BAD)
+    if "moved_to" in body:
+        if enabled:
+            raise _invalid("启用时不能带 moved_to；要清迁出标记，先发一次带 moved_to: null 的停用")
+        if body["moved_to"] is not None and body["moved_to"] not in MOVED_TARGETS:
+            raise _invalid("moved_to 只能是 pending、claude 或 null")
     if "import_from" in body:
         if not enabled:
             raise _invalid("停用时不能带 import_from")
@@ -1160,8 +1209,14 @@ def _set_enabled(bot_id):
             raise _invalid("import_from 只能用字母、数字、点、横线、下划线，1 到 64 个字符")
     bot = _require_bot(bot_id)
     seams = bot_launchd.resolve_seams()
+    if "op_id" in body:
+        _log.info("enable request: bot=%s op=%s enabled=%s", bot_id, body["op_id"], enabled)
     if not enabled:
+        if "moved_to" in body:
+            _write_moved(bot_id, body["moved_to"], body.get("op_id"))
         return _stop_bot(bot, seams, deadline)
+    if _moved_to(bot_id) is not None:
+        raise Refuse(409, "moved", MOVED_REFUSED)
     if "import_from" not in body:
         if bot["enabled"] and _unit_running(bot_id, seams):
             return {"ok": True, "enabled": True, "running": True}     # 已是目标状态，不重复操作
@@ -1584,7 +1639,7 @@ def _create_fields(body, bots):
     if not set(body) <= set(CREATE_KEYS):
         raise _invalid("请求体只能有 %s" % "、".join(CREATE_KEYS))
     bot_id, token, chat_id, port = (body.get(k) for k in ("bot_id", "telegram_token", "chat_id", "port"))
-    if not (isinstance(bot_id, str) and _valid_bot_id(bot_id) and config_sources.is_qualified_bot_id(bot_id)):
+    if not (isinstance(bot_id, str) and CREATE_ID_RE.match(bot_id) and config_sources.is_qualified_bot_id(bot_id)):
         raise _invalid("bot_id 只能是小写字母开头的 2 到 32 位小写字母、数字、下划线，也不能是保留名")
     if not isinstance(token, str) or not hub_addbot.TOKEN_RE.match(token):
         raise _invalid("telegram_token 的形状不对")      # 不带原值
@@ -1592,6 +1647,22 @@ def _create_fields(body, bots):
         raise _invalid("chat_id 要是整数（主人的私聊编号）")
     if port is not None and not (hub_addbot._is_int(port) and 1024 <= port <= 65535):
         raise _invalid("port 要是 1024 到 65535 的整数")
+    # 13.3 的几个可选字段
+    enabled, person = body.get("enabled", True), body.get("person")
+    username, user_id = body.get("telegram_username"), body.get("telegram_user_id")
+    if type(enabled) is not bool:
+        raise _invalid("enabled 只能是 true 或 false")
+    if person is not None and not (isinstance(person, str) and CREATE_ID_RE.match(person)):
+        raise _invalid("person 的规则同 bot_id：小写字母开头的 2 到 32 位小写字母、数字、下划线")
+    if username is not None:
+        username = username.strip().lstrip("@") if isinstance(username, str) else ""
+        if not BOT_USERNAME_RE.match(username):
+            raise _invalid("telegram_username 的形状不对：5 到 32 位字母、数字、下划线，开头可带 @")
+    if user_id is not None and not (type(user_id) is int and user_id > 0):
+        raise _invalid("telegram_user_id 要是正整数")
+    if body.get("purpose", "new") not in CREATE_PURPOSES:     # dsh 侧 new 与 switch_in 流程相同
+        raise _invalid("purpose 只能是 new 或 switch_in")
+    extra = {"enabled": enabled, "person": person, "telegram_username": username, "telegram_user_id": user_id}
     name = hub_addbot._optional(body, "display_name")
     try:
         name = bot_id if name is None else hub_addbot._display_name(name)
@@ -1599,8 +1670,11 @@ def _create_fields(body, bots):
         fish_key = hub_addbot._fish_key(hub_addbot._optional(body, "fish_api_key"))
     except HubError as e:
         raise _hub_invalid(e) from None
-    return {"bot_id": bot_id, "token": token, "chat_id": chat_id, "port": port, "display_name": name,
-            "persona": _create_persona(body, bots), "fish_voice_id": voice, "fish_api_key": fish_key}
+    if len(name) > PROFILE_NAME_MAX:        # 13.3：新建的显示名去首尾空白后 1 到 32 个字
+        raise _invalid("display_name 去掉首尾空白后要是 1 到 %d 个字" % PROFILE_NAME_MAX)
+    return dict({"bot_id": bot_id, "token": token, "chat_id": chat_id, "port": port, "display_name": name,
+                 "persona": _create_persona(body, bots), "fish_voice_id": voice, "fish_api_key": fish_key},
+                **extra)
 
 
 def _bot_slots(bot_id, seams, life=None):
@@ -1642,7 +1716,7 @@ def _prune(folder):
             os.rmdir(dirpath)
 
 
-def _stash(bot_id, items, folder):
+def _stash(bot_id, items, folder, extra=None):
     """把 ``items`` 整份移进新建的 ``folder``（0700），先写 manifest.json 记下每样原来的位置（12.3、12.4）。
 
     只改名、不复制不删（同一块盘上）。中途出错：已移的按原路移回去再抛；全都移回去了才把 manifest 与空目录
@@ -1652,6 +1726,7 @@ def _stash(bot_id, items, folder):
     os.mkdir(folder, 0o700)
     manifest = {"bot_id": bot_id, "at": _utc_time(_utc_stamp()),
                 "items": [{"from": path, "to": rel} for path, rel in items]}
+    manifest.update(extra or {})            # 13.4：归档另记显示名、person、shell_meta
     moved = []
     try:
         hub_addbot._create_file(os.path.join(folder, MANIFEST),
@@ -1704,18 +1779,17 @@ def _port_in_use(port, bot_id, bots):
 
 
 def _create_port(port, bot_id, bots):
-    """12.2 的 ``port``：给了就查本系统别的 bot 没占、本机没人在听；不给就挑一个本机空闲的。"""
+    """12.2 的 ``port``：给了就查本系统别的 bot 没占、本机没人在听；不给就在 17850–17899 里挑第一个没被本系统
+    任何配置、任何归档占用且本机没人在听的（13.3）。"""
     if port is not None:
         if _port_in_use(port, bot_id, bots) or hub_addbot._listening(port):
             raise _invalid("端口 %d 已被占用" % port)
         return port
-    for _ in range(20):
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
-        if port >= 1024 and not _port_in_use(port, bot_id, bots):
+    taken = {b["cfg"].get("dispatcher_port") for b in bots if b["id"] != bot_id} | _archived_ports()
+    for port in CREATE_PORTS:
+        if port not in taken and not hub_addbot._listening(port):
             return port
-    raise Refuse(503, "unavailable", "挑不到空闲的本机端口，没有新建")
+    raise Refuse(503, "unavailable", "17850 到 17899 里没有空着的端口，没有新建")
 
 
 def _recheck_port(port, bot_id):
@@ -1753,7 +1827,7 @@ def _create_yml(fields, bots):
     while namespace in used:
         namespace = str(uuid.uuid4())
     target = os.path.abspath(os.path.join(str(config_sources.dsh_bot_dir(fields["bot_id"])), "channel"))
-    text = hub_addbot._render_yml(fields, target, namespace)
+    text = hub_addbot._render_yml(fields, target, namespace) + _create_extra(fields)
     try:
         hub_addbot._readback(text, {"id": fields["bot_id"], "display_name": fields["display_name"],
                                     "bot_channel_path": target, "namespace_uuid": namespace})
@@ -1784,8 +1858,15 @@ def _create_locked(fields, bots, seams, deadline):
     probe = hub_addbot.getme(fields["token"])
     if not probe.get("ok"):
         if probe.get("stage") in ("malformed", "invalid_token", "rejected"):
-            raise _invalid("telegram_token 不对：Telegram 不认这个令牌")
-        raise Refuse(503, "unavailable", "现在问不到 Telegram，没有新建，可以稍后重试")
+            raise Refuse(422, "token_rejected", "telegram_token 不对：Telegram 不认这个令牌")
+        raise Refuse(503, "telegram_unreachable", "现在连不上 Telegram，没有新建，可以稍后重试")
+    # 13.3：给了用户名或 user_id 就与 getMe 问到的核对（用户名不分大小写、不管开头的 @）
+    got_name = probe.get("username") if isinstance(probe.get("username"), str) else ""
+    if fields["telegram_username"] is not None \
+            and fields["telegram_username"].lower() != got_name.lstrip("@").lower():
+        raise Refuse(422, "token_rejected", "telegram_username 与这个令牌对应的 bot 对不上")
+    if fields["telegram_user_id"] is not None and probe.get("bot_id") != fields["telegram_user_id"]:
+        raise Refuse(422, "token_rejected", "telegram_user_id 与这个令牌对应的 bot 对不上")
     owner = _token_owner(probe.get("bot_id"), bots)
     if owner is not None:
         raise _invalid("这个 Telegram 令牌已经被 %s 用着了" % owner)
@@ -1797,7 +1878,8 @@ def _create_locked(fields, bots, seams, deadline):
         _log.error("create lay_down failed: %s", type(e).__name__)
         raise Refuse(500, "internal", "写新 bot 的文件失败，已撤回") from None
     try:
-        step = hub_addbot._register_dsh(fields, deadline=deadline - UNDO_RESERVE) \
+        # 13.3：enabled 为 false 时启动项文件按停用收起（只写成 .plist.disabled），不装载、不启动
+        step = hub_addbot._register_dsh(fields, deadline=deadline - UNDO_RESERVE, stashed=not fields["enabled"]) \
             if sys.platform == "darwin" else {}
     except Exception:                       # noqa: BLE001
         step = {}
@@ -1831,9 +1913,10 @@ def _create_bot():
     except HubError as e:                   # 只有锁会抛到这里：管理台正在建 bot 或改配置
         raise _config_failure(e, "新 bot 的配置") from None
     bot_id = fields["bot_id"]
-    running = deadline - time.monotonic() > bot_launchd.LAUNCHCTL_TIMEOUT and _unit_running(bot_id, seams)
-    return {"ok": True, "bot_id": bot_id, "person": _person({"id": bot_id, "cfg": {}}),
-            "username": username, "running": running}
+    running = fields["enabled"] and deadline - time.monotonic() > bot_launchd.LAUNCHCTL_TIMEOUT \
+        and _unit_running(bot_id, seams)    # enabled 为 false 时没有装载，不必再问
+    person = _person({"id": bot_id, "cfg": {"life_id": fields["person"]} if fields["person"] else {}})
+    return {"ok": True, "bot_id": bot_id, "person": person, "username": username, "running": running}
 
 
 def _archive_root():
@@ -1841,23 +1924,29 @@ def _archive_root():
 
 
 def _archive(bot_id):
-    """归档（草案 B，补充文件 12.3）：请求体 ``{}`` → 名单（404）→ 按 5.8 停掉（停不下来 503，什么都不移）→
-    整份移进 ``<DSH_BOT_HOME>/archive/<编号>-<UTC 时间>/``。不删任何东西。"""
+    """归档（草案 B，补充文件 12.3、13.4）：请求体 ``{}`` 或只带 ``shell_meta``（422）→ 名单（404）→ 按 5.8 停掉
+    （停不下来 503，什么都不移）→ 整份移进 ``<DSH_BOT_HOME>/archive/<编号>-<UTC 时间>/``。不删任何东西。
+    manifest 另记显示名、person 与原样的 ``shell_meta``（列表要用）。"""
     deadline = time.monotonic() + ENABLE_BUDGET - 1.0
-    if _json_object(allow_empty=True):
-        raise _invalid("请求体只能是 {}")
+    request.max_content_length = ARCHIVE_MAX_BODY + 1
+    body = _json_object(allow_empty=True, limit=ARCHIVE_MAX_BODY, too_big="请求体太大")
+    meta = body.get("shell_meta")
+    if set(body) - {"shell_meta"} or ("shell_meta" in body and not _shell_meta_ok(meta)):
+        raise _invalid("请求体只能是 {}，或只带 shell_meta（JSON 对象，序列化后不超过 64 KiB）")
     bots = _own_bots()
     bot = _require_bot(bot_id, bots)
     seams = bot_launchd.resolve_seams()
     _stop_bot(bot, seams, deadline)
     archive_id = "%s-%s" % (bot_id, _utc_stamp())
     folder = os.path.join(_archive_root(), archive_id)
-    _move_out(bot, bots, seams, lambda items: _stash(bot_id, items, folder), "archive")
+    extra = {"display_name": bot["display_name"], "person": _person(bot), "shell_meta": meta}
+    _move_out(bot, bots, seams, lambda items: _stash(bot_id, items, folder, extra), "archive")
     return {"ok": True, "archive_id": archive_id}
 
 
 def _archives():
-    """归档列表（12.3）：``<DSH_BOT_HOME>/archive/`` 下名字合规、带 manifest.json 的目录，按时间倒序。"""
+    """归档列表（12.3、13.4）：``<DSH_BOT_HOME>/archive/`` 下名字合规、带 manifest.json 的目录，按时间倒序。
+    每项另给显示名与 person（manifest 没记的用编号）、``status``（manifest 列的都还在归档里为 complete）、``shell_meta``。"""
     root = _archive_root()
     try:
         names = os.listdir(root)
@@ -1869,7 +1958,13 @@ def _archives():
         when = _utc_time(m.group(2)) if m else None
         folder = os.path.join(root, name)
         if when and not os.path.islink(folder) and os.path.isfile(os.path.join(folder, MANIFEST)):
-            rows.append({"archive_id": name, "bot_id": m.group(1), "archived_at": when})
+            data = _manifest_data(folder)
+            shown, person, meta = data.get("display_name"), data.get("person"), data.get("shell_meta")
+            rows.append({"archive_id": name, "bot_id": m.group(1),
+                         "display_name": shown.strip() if _text(shown) else m.group(1),
+                         "person": person.strip() if _text(person) else m.group(1),
+                         "archived_at": when, "status": _archive_status(folder, data),
+                         "shell_meta": meta if isinstance(meta, dict) else None})
     rows.sort(key=lambda row: (row["archived_at"], row["archive_id"]), reverse=True)
     return {"ok": True, "archives": rows}
 
@@ -1880,12 +1975,7 @@ def _read_manifest(folder, bot_id, seams):
     原位置只认这只 bot 那几处（``_bot_slots``，生活设定文件只认允许目录下的 .yml），归档里的位置只认
     这个目录里面的相对路径：清单被人改过，也不会把东西移到别处去。
     """
-    try:
-        with os.fdopen(os.open(os.path.join(folder, MANIFEST), os.O_RDONLY | _NOFOLLOW), "rb") as f:
-            data = json.loads(f.read(MAX_BODY + 1).decode("utf-8"))
-    except (OSError, ValueError, RecursionError):
-        return None
-    items = data.get("items") if isinstance(data, dict) else None
+    items = _manifest_data(folder).get("items")
     if not isinstance(items, list) or not items:
         return None
     slots = {path for path, _rel in _bot_slots(bot_id, seams)}
@@ -1922,7 +2012,7 @@ def _restore(archive_id):
         raise _invalid("archive_id 要是 <bot 编号>-<UTC 时间，形如 20261015T080102Z>")
     bot_id, folder = m.group(1), os.path.join(_archive_root(), archive_id)
     if os.path.islink(folder) or not os.path.isdir(folder):
-        raise Refuse(404, "not_found", "没有这份归档")
+        raise Refuse(404, "unknown_archive", "没有这份归档")      # 13.4
     seams = bot_launchd.resolve_seams()
     try:
         with hub_addbot.hold_addbot_lock():
@@ -1947,7 +2037,7 @@ def _restore(archive_id):
     except HubError as e:
         raise _config_failure(e, "这只 bot 的文件") from None
     _keep_disabled(bot_id, seams)
-    return {"ok": True, "bot_id": bot_id}
+    return {"ok": True, "bot_id": bot_id, "enabled": False, "running": False}      # 13.4
 
 
 def _delete(bot_id):
@@ -1962,7 +2052,15 @@ def _delete(bot_id):
     bot = _require_bot(bot_id, bots)
     seams = bot_launchd.resolve_seams()
     _stop_bot(bot, seams, deadline)
-    _move_out(bot, bots, seams, lambda items: _discard(bot_id, items), "delete")
+    def drop_env_then_discard(items):
+        # 13.5：Telegram 令牌所在的 .env 先直接删掉，不进废纸篓；删不掉整次 500，别的一样都没移
+        env = _channel_file(bot, ".env")
+        if env is not None:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(env)
+        _discard(bot_id, items)
+
+    _move_out(bot, bots, seams, drop_env_then_discard, "delete")
     return {"ok": True, "message": DELETED}
 
 
@@ -2009,10 +2107,315 @@ def _profile_put(bot_id):
     return {"ok": True, "display_name": name}
 
 
+# ---------------------------------------------------------------- v1.0 补充（补充文件第 13 节）
+
+def _polling(bot_id, seams):
+    """13.1：这只的网关进程此刻在不在跑。``launchctl print`` 说 running 为 True；launchd 里没有它、或说的是别的
+    状态为 False；launchctl 没跑成（超时、起不来）或输出里认不出状态为 None。5.8 响应里的 ``running`` 同这一判定。
+
+    不用 ``bot_launchd.print_state``：它把「没跑成」与「没有这个单元」都并成没在运行，这里要分开报。
+    """
+    label = bot_launchd.label_of(bot_id)
+    if label is None:
+        return False
+    code, text, why = bot_launchd._run(["print", "gui/%d/%s" % (bot_launchd._uid(), label)], seams=seams)
+    if why:
+        return None
+    if code != 0:
+        return False
+    state = bot_launchd.parse_print(text)[0]
+    return None if state is None else state == "running"
+
+
+def _username(health, cfg):
+    """13.1：网关健康接口里的 ``telegram.username``；问不到取配置里记下的 ``telegram_username``；都没有为 None。不带 @。"""
+    for value in (health.get("username"), cfg.get("telegram_username")):
+        if _text(value) and value.strip().lstrip("@"):
+            return value.strip().lstrip("@")
+    return None
+
+
+def _moved_path(bot_id):
+    """13.2：迁出标记 ``<DSH_BOT_HOME>/bots/<编号>/.moved``。``bot_id`` 已与名单精确匹配过。"""
+    return os.path.join(str(config_sources.dsh_bot_dir(bot_id)), MOVED_MARKER)
+
+
+def _moved_to(bot_id):
+    """13.1、13.2：迁出标记里的去向（``pending`` 或 ``claude``）；没有标记为 None。
+
+    标记在（软链、目录也算在）但读不出、格式不对、去向不认识，一律按 ``pending`` 报，启用照样拒绝（宁可拦住）。
+    """
+    path = _moved_path(bot_id)
+    if not os.path.lexists(path):
+        return None
+    try:
+        with os.fdopen(os.open(path, os.O_RDONLY | _NOFOLLOW), "rb") as f:
+            m = MOVED_LINE_RE.match(f.read(4096).decode("utf-8"))
+    except (OSError, ValueError):
+        return "pending"
+    return m.group(1) if m and m.group(1) in MOVED_TARGETS else "pending"
+
+
+def _write_moved(bot_id, moved_to, op):
+    """13.2：给了去向就写标记（一行 ``to=<去向> op=<op_id 或 -> at=<UTC 时间>``，0600，原子写），给 None 就删掉。
+    写不成、删不掉回 500，这时还没去停它。"""
+    path = _moved_path(bot_id)
+    try:
+        if moved_to is None:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+            return
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        life_settings._replace(path, "to=%s op=%s at=%s\n" % (moved_to, op or "-", _utc_stamp()), 0o600)
+    except OSError:
+        raise Refuse(500, "internal", "改这只 bot 的迁出标记失败，没有停它") from None
+
+
+def _valid_op_id(value, kinds=OP_KINDS):
+    """13.6 的 op_id：整串合正则，且种类在 ``kinds`` 里（正则过了、种类不认识也算不合规）。"""
+    m = OP_ID_RE.match(value) if isinstance(value, str) else None
+    return m is not None and m.group(1) in kinds
+
+
+def _queue_provider(bot, body, has_provider, has_effort):
+    """13.7：停着的 bot 换供应商、模型、强度——核对过就写进它配置的 brain 段，不启动，回 queued。
+
+    供应商与模型用在跑的 bot 的网关读来的清单核对（``_provider_catalog``）：一只都问不到、或回的东西认不出，都算
+    核对不了，503，什么都不写；不在清单 404，这家没有这个模型 422。只改强度不用核对。不碰这只自己的网关。
+    网关下次启动按配置这一组起：它账本里的单独指定（brain_override）记着当时配置那一组，配置这一组变了就清掉
+    （gateway/src/engine/engine.ts 的 withOverride）。
+    """
+    changes = {}
+    if has_provider:
+        try:
+            catalog = _provider_catalog()
+        except Refuse:
+            raise
+        except Exception as e:              # noqa: BLE001  认不出的回复同样是核对不了；只记类名
+            _log.error("provider catalog failed: %s", type(e).__name__)
+            raise Refuse(503, "unavailable", "读不到供应商清单，没法核对，这次没有保存") from None
+        _require_offered(catalog, body["provider_id"], body["model"])
+        changes.update(provider=body["provider_id"], model=body["model"])
+    if has_effort:
+        changes["reasoning_effort"] = body["effort"]
+    _write_brain(bot["id"], changes)
+    return {"ok": True, "applied": False, "queued": True, "new_segment": False, "message": QUEUED}
+
+
+def _brain_text(text, changes):
+    """配置全文 → 把 brain 段的几项改成 ``changes`` 之后的全文，不 dump 整份。
+
+    brain 是非空映射：逐项行级改值（``hub_config.set_scalar``，每改一项重新解析一次，下标才不会错位）；
+    brain 是空的、null 或标量：整段换成一个流式映射；没有 brain 段：补一个（整份是 JSON 写法时插在第一个键前面）。
+    """
+    from moments import hub_config         # 延迟 import：同 _write_enabled
+    root = hub_config.compose(text)
+    if not isinstance(root, yaml.MappingNode) or not root.value:
+        raise ValueError("config root is not a mapping")
+    node = hub_config.find(root, ["brain"])
+    if isinstance(node, yaml.MappingNode) and node.value:
+        for key, value in changes.items():
+            text = hub_config.set_scalar(text, hub_config.compose(text), "brain." + key, value, "str")
+        return text
+    literal = json.dumps(changes, ensure_ascii=False)        # 流式映射，也是合法的 YAML
+    if node is not None:
+        return hub_config.splice(text, [(node.start_mark.index, node.end_mark.index, " " + literal)])
+    if root.flow_style:
+        at = root.value[0][0].start_mark.index
+        return text[:at] + "brain: %s, " % literal + text[at:]
+    return text + ("" if text.endswith("\n") else "\n") + "brain: %s\n" % literal
+
+
+def _write_brain(bot_id, changes):
+    """13.7：把 ``changes``（provider、model、reasoning_effort 里的几项）写进这只 bot 配置的 brain 段。
+
+    持管理台写配置那把锁；读回来核对只变了这几项（别的键、brain 里别的项一个不差）；原文先备份到
+    ``<DSH_BOT_HOME>/backups/config/<bot_id>/``（0600，只留 2 份，同生活设定的备份）；原子写、保持原权限。
+    """
+    from moments import hub_config         # 延迟 import：同 _write_enabled
+    path = os.path.join(str(config_sources.dsh_dir()), bot_id + ".yml")
+    try:
+        with hub_addbot.hold_addbot_lock():
+            with open(path, "rb") as f:
+                raw = f.read()
+            text = raw.decode("utf-8")
+            new_text = _brain_text(text, changes)
+            old, new = yaml.safe_load(text), yaml.safe_load(new_text)
+            old_brain = old.get("brain") if isinstance(old.get("brain"), dict) else {}
+            if not isinstance(new, dict) or new.get("brain") != dict(old_brain, **changes) or \
+                    {k: v for k, v in new.items() if k != "brain"} != {k: v for k, v in old.items() if k != "brain"}:
+                raise Refuse(500, "internal", "改这只 bot 的配置时读回来对不上，没有保存")
+            folder = life_settings._backup(bot_id, raw, kind="config", suffix=".yml")
+            hub_config.atomic_write(new_text, path)
+            life_settings._rotate(folder)   # 写盘成功之后才清理旧备份
+    except HubError as e:
+        raise _config_failure(e, "这只 bot 的配置") from None
+    except (OSError, ValueError, AttributeError, yaml.YAMLError):    # 读不了、不是 UTF-8、解析不出、顶层不是映射
+        raise Refuse(500, "internal", "写这只 bot 的配置失败") from None
+
+
+def _create_extra(fields):
+    """13.3 新建另写进配置的几行：``enabled``（false 时）、``life_id``（person 与编号不同时）、
+    ``telegram_username``、``telegram_user_id``（给了才写）。值都按 JSON 写（也是合法 YAML），读回来核对过。"""
+    want = {}
+    if not fields["enabled"]:
+        want["enabled"] = False
+    if fields["person"] and fields["person"] != fields["bot_id"]:
+        want["life_id"] = fields["person"]
+    if fields["telegram_username"]:
+        want["telegram_username"] = fields["telegram_username"]
+    if fields["telegram_user_id"] is not None:
+        want["telegram_user_id"] = fields["telegram_user_id"]
+    text = "".join("%s: %s\n" % (key, json.dumps(value)) for key, value in want.items())
+    if (yaml.safe_load(text) or {}) != want:
+        raise _invalid("新字段写进配置之后读不回原样")
+    return text
+
+
+def _archived_ports():
+    """13.3：各份归档里那份配置（``configs/<编号>.yml``）记下的 ``dispatcher_port``；读不出的跳过。"""
+    ports = set()
+    root = _archive_root()
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return ports
+    for name in names:
+        m = ARCHIVE_ID_RE.match(name)
+        if not m:
+            continue
+        path = os.path.join(root, name, "configs", m.group(1) + ".yml")
+        try:
+            with os.fdopen(os.open(path, os.O_RDONLY | _NOFOLLOW), "rb") as f:
+                cfg = yaml.safe_load(f.read(MAX_BODY))
+        except (OSError, ValueError, yaml.YAMLError):
+            continue
+        if isinstance(cfg, dict) and hub_addbot._is_int(cfg.get("dispatcher_port")):
+            ports.add(cfg["dispatcher_port"])
+    return ports
+
+
+def _templates():
+    """13.3：本系统的人设模板 ``[{"id", "label"}]``——频道目录（落点、软链同 10.2）下有人设文件的本系统 bot，
+    新建时 ``persona_template`` 给它的编号就用它的人设。另一套系统的频道目录在归属边界外，不列。"""
+    items = []
+    for bot in _own_bots():
+        path = _channel_file(bot, "CLAUDE.md")
+        if path is not None and os.path.isfile(path):
+            items.append({"id": bot["id"], "label": bot["display_name"]})
+    return {"ok": True, "templates": items}
+
+
+def _shell_meta_ok(meta):
+    """13.4：``shell_meta`` 是 JSON 对象，按 UTF-8 序列化后不超过 64 KiB（存得进 manifest 的才收）。"""
+    if not isinstance(meta, dict):
+        return False
+    try:
+        return len(json.dumps(meta, ensure_ascii=False).encode("utf-8")) <= SHELL_META_MAX
+    except (UnicodeEncodeError, ValueError, RecursionError):
+        return False
+
+
+def _manifest_data(folder):
+    """归档的 manifest.json（JSON 对象）；不是软链才读，读不出、太大、不是对象都回 ``{}``。"""
+    try:
+        with os.fdopen(os.open(os.path.join(folder, MANIFEST), os.O_RDONLY | _NOFOLLOW), "rb") as f:
+            raw = f.read(MANIFEST_MAX + 1)
+        data = json.loads(raw.decode("utf-8")) if len(raw) <= MANIFEST_MAX else None
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _archive_status(folder, data):
+    """13.4：manifest 里列的每一样都还在归档里为 ``complete``；少了任何一样、或清单认不出为 ``incomplete``。"""
+    items = data.get("items")
+    if not isinstance(items, list) or not items:
+        return "incomplete"
+    for item in items:
+        rel = item.get("to") if isinstance(item, dict) else None
+        if not isinstance(rel, str) or os.path.isabs(rel) or os.path.normpath(rel) != rel \
+                or rel.split(os.sep)[0] in ("", ".", "..") or not os.path.lexists(os.path.join(folder, rel)):
+            return "incomplete"
+    return "complete"
+
+
+def _read_bot_token(bot):
+    """13.6：这只 bot 频道目录 ``.env`` 里的 ``TELEGRAM_BOT_TOKEN``；读不到 500（话里不带路径与文件内容）。"""
+    path = _channel_file(bot, ".env")
+    token = ""
+    if path is not None:
+        try:
+            with os.fdopen(os.open(path, os.O_RDONLY | _NOFOLLOW), "rb") as f:
+                hit = ENV_TOKEN_LINE_RE.search(f.read(MAX_BODY).decode("utf-8"))
+            token = hit.group(1) if hit else ""
+        except (OSError, ValueError):
+            token = ""
+    if not hub_addbot.TOKEN_RE.match(token):
+        raise Refuse(500, "internal", "读不到这只 bot 的 Telegram 令牌")
+    return token
+
+
+def _handoff_path():
+    return os.path.join(str(config_sources.dsh_home()), "state", HANDOFF_FILE)
+
+
+def _handoff_records(path):
+    """已交记录 ``[{"bot_id", "op_id", "at"}]``（at 是 Unix 秒）。文件不在是空；读不出、认不出回 500：
+    判不了「交没交过」就不交。"""
+    try:
+        with open(path, "rb") as f:
+            data = json.loads(f.read().decode("utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, RecursionError):
+        data = None
+    records = data.get("records") if isinstance(data, dict) else None
+    if not isinstance(records, list):
+        raise Refuse(500, "internal", "令牌转交的记录读不出来，这次没有交出令牌")
+    return [r for r in records if isinstance(r, dict)]
+
+
+def _token_handoff(bot_id):
+    """令牌转交（补充文件 13.6）：形状（422）→ 名单（404）→ 同一个 op_id 交过（409）→ 这只 10 分钟内交过（429）→
+    读令牌（500）→ 记下（只记 bot_id、op_id、时间，只留最近 200 条，0600，原子写）→ 回令牌。
+
+    记下之后才回令牌：记不下就不交（500），「每个 op_id 只交一次」才算数。令牌只出现在这一个成功响应体里，
+    日志只记 bot_id、op_id、结果。读、判、写在同一把锁里。不要求先停用。
+    """
+    body = _json_object()
+    if set(body) != {"op_id", "to", "purpose"} or not _valid_op_id(body["op_id"], ("switch",)) \
+            or body["to"] != "claude" or body["purpose"] != "switch":
+        raise _invalid('请求体只能是 {"op_id": "<…-switch-…>", "to": "claude", "purpose": "switch"}')
+    op = body["op_id"]
+    bot = _require_bot(bot_id)
+    with _handoff_lock:
+        path = _handoff_path()
+        records = _handoff_records(path)
+        now = time.time()
+        if any(r.get("op_id") == op for r in records):
+            _log.info("token handoff: bot=%s op=%s result=already_handed", bot_id, op)
+            raise Refuse(409, "already_handed", "这个 op_id 已经交过令牌了")
+        if any(r.get("bot_id") == bot_id and type(r.get("at")) in (int, float) and now - r["at"] < HANDOFF_WINDOW
+               for r in records):
+            _log.info("token handoff: bot=%s op=%s result=too_many", bot_id, op)
+            raise Refuse(429, "too_many", "这只 bot 10 分钟内已经交过一次令牌，请稍后再试")
+        token = _read_bot_token(bot)
+        records = (records + [{"bot_id": bot_id, "op_id": op, "at": int(now)}])[-HANDOFF_KEEP:]
+        try:
+            os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+            life_settings._replace(path, json.dumps({"records": records}, ensure_ascii=False) + "\n", 0o600)
+        except OSError:
+            raise Refuse(500, "internal", "令牌转交的记录写不进去，这次没有交出令牌") from None
+    _log.info("token handoff: bot=%s op=%s result=ok", bot_id, op)
+    return _json({"ok": True, "telegram_token": token}, 200, {"Cache-Control": "no-store"})
+
+
 #: 不带 bot 编号的接口：路径 → {方法: 处理函数}（键的先后就是 405 的 Allow 头）
 _TOP_ROUTES = {
     PREFIX + "/meta": {"GET": _meta},
     PREFIX + "/bots": {"GET": _bots, "POST": _create_bot},
+    PREFIX + "/bots/templates": {"GET": _templates},
     PREFIX + "/providers": {"GET": _providers},
     PREFIX + "/archives": {"GET": _archives},
 }
@@ -2029,6 +2432,7 @@ _BOT_ROUTES = {
     "archive": {"POST": _archive},
     "delete": {"POST": _delete},
     "profile": {"GET": _profile_get, "PUT": _profile_put},
+    "token_handoff": {"POST": _token_handoff},
 }
 #: ``/bots/<bot_id>/skills/<通用名>`` 上的接口（11.2）：处理函数多收一个通用名
 _SKILL_ROUTES = {"GET": _skill_get, "PUT": _skill_put}
