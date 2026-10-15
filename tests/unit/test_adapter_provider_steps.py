@@ -105,8 +105,10 @@ STOPPED = {
 def test_第3步_bot停用_回409_stopped_先于读清单_对任何网关零请求(client, gateway_calls, body):
     _put_bot(enabled=False)
     status, got = _post(client, body)
-    assert (status, got["code"]) == (409, "stopped"), got
-    assert gateway_calls == [], "停用的 bot 不该为它读清单，也不该发写请求：%r" % gateway_calls
+    # 13.7：停着的不再 409。只改强度直接写进配置回 queued；带供应商的要向在跑的 bot 核对，这里一只都没有，503
+    want = (200, None) if "provider_id" not in body else (503, "unavailable")
+    assert (status, got.get("code")) == want, got
+    assert gateway_calls == [], "不该找停着的 bot 自己的网关，也不该发写请求：%r" % gateway_calls
 
 
 # ---------------------------------------------------------------- 第 4、5 步
