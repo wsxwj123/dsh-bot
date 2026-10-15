@@ -6,6 +6,7 @@
 v0.6、v0.7 的启停、切进导入、同跑提示、群设置、``group_turn`` 照 ``INTERFACE-适配约定-v0.7摘录.md``
 与补充文件第 9 节；切进导入的水位线与写账本在 ``scripts/import_history.py``。
 v0.8 的人设、语音照 ``INTERFACE-适配约定-v0.8-dsh侧.md`` 与补充文件第 10 节；人设的备份、原子写用 ``life_settings`` 那一套。
+v0.9 的技能读写、语音的两个语言键照 v0.9 两份草案（``INTERFACE-适配约定-v0.9-*.md``）与补充文件第 11 节；技能存盘同人设。
 起服务：仓库根执行 ``python3 -m moments.adapter_service``；测试用 ``create_app()``。
 只支持这一种启动方式：监听地址只许回环、令牌文件不在就拒绝启动，这两道检查都在 ``main()`` 里。
 ``flask run`` 等别的方式拉起 ``create_app()`` 会绕过它们（例如对外监听），不要这样起。
@@ -72,6 +73,7 @@ CAPABILITIES = {
     "bot.group_chat": True,
     "bot.persona": True,
     "bot.voice": True,
+    "bot.skills": True,
 }
 DEFAULT_LABEL = "各 bot 配置文件里写的那一组"
 
@@ -136,6 +138,15 @@ PERSONA_STALE = "人设刚被别处改过，请刷新后再改"
 VOICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
 #: 白名单与语音桥那边一致，有增减时两边一起改（v0.8 草案 B.2）
 TTS_MODELS = ("s1", "s2-pro", "s2.1-pro", "s2.1-pro-free", "drama-3")
+#: 接口里的键 → access.json 里的键（v0.8 草案 B 两个，11.3 加两个语言键）；先后就是回应里的先后
+VOICE_KEYS = (("voice_id", "voiceId"), ("tts_model", "voiceModel"),
+              ("text_language", "textLanguage"), ("voice_language", "voiceLanguage"))
+#: 11.3：语言名去掉首尾空白后的字符数上限，与整个值里不许出现的字符
+LANGUAGE_MAX = 20
+LANGUAGE_BAD_RE = re.compile(r"[\r\n\[\]<>{}`|]")
+#: 11.2：通用技能名表；文件是 <频道目录>/skills/skill-<通用名>/SKILL.md
+SKILL_NAMES = ("image", "voice", "group", "moments", "proactive", "nsfw", "gif")
+SKILL_STALE = "技能刚被别处改过，请刷新后再改"
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 #: 配置文件没写 brain 时网关自己用的默认值（gateway/src/config.ts 的 parseBrain）。
@@ -263,15 +274,18 @@ def _dispatch():
     head = PREFIX + "/bots/"
     if path.startswith(head):
         parts = path[len(head):].split("/")
-        if len(parts) == 2 and parts[1] in _BOT_ROUTES:
-            methods = _BOT_ROUTES[parts[1]]
+        if len(parts) == 2:
+            methods = _BOT_ROUTES.get(parts[1])
+        else:                               # 只有技能多一段：/bots/<bot_id>/skills/<通用名>（11.2）
+            methods = _SKILL_ROUTES if len(parts) == 3 and parts[1] == "skills" else None
+        if methods is not None:
             _require_method(method, ", ".join(methods))
             if not _valid_bot_id(parts[0]):
                 refuse = _invalid("bot 编号不合规：只能用字母、数字、点、下划线、横线，1 到 64 个字符")
                 if parts[1] == "life":
                     refuse.fields = {}      # 生活设定的 422 一律带 fields（INTERFACE-生活设定 第 1 节）
                 raise refuse
-            return methods[method](parts[0])
+            return methods[method](parts[0], *parts[2:])
     raise Refuse(404, "not_found", "没有这个接口")
 
 
@@ -1279,8 +1293,8 @@ def _persona_path(bot):
     return path
 
 
-def _read_persona(path):
-    """人设文件 → ``(原始字节, 权限)``，不存在是 ``(b"", None)``；读不出 500。
+def _read_persona(path, what="人设"):
+    """人设或技能文件 → ``(原始字节, 权限)``，不存在是 ``(b"", None)``；读不出 500。
 
     ``O_NOFOLLOW``：查过之后才被换成软链的，也不跟过去读。
     """
@@ -1291,25 +1305,28 @@ def _read_persona(path):
     except FileNotFoundError:
         return b"", None
     except OSError:
-        raise Refuse(500, "internal", "这只 bot 的人设文件读不出来") from None
+        raise Refuse(500, "internal", "这只 bot 的%s文件读不出来" % what) from None
+
+
+def _text_view(raw, what):
+    """读人设、读技能的回应：原文全文与版本号；不是 UTF-8 回 500。"""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Refuse(500, "internal", "这只 bot 的%s文件不是合法的 UTF-8 文本" % what) from None
+    return {"ok": True, "text": text, "version": _persona_version(raw)}
 
 
 def _persona_get(bot_id):
     """读人设（v0.8 草案 A.1，补充文件 10.2）：原文全文与版本号。停用的 bot 照常能读；不是 UTF-8 回 500。"""
-    raw = _read_persona(_persona_path(_require_bot(bot_id)))[0]
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        raise Refuse(500, "internal", "这只 bot 的人设文件不是合法的 UTF-8 文本") from None
-    return {"ok": True, "text": text, "version": _persona_version(raw)}
+    return _text_view(_read_persona(_persona_path(_require_bot(bot_id)))[0], "人设")
 
 
-def _persona_put(bot_id):
-    """改人设（v0.8 草案 A.2，补充文件 10.2、10.6）。停用的 bot 也能改；不重启（网关自己盯着这个文件）。
+def _text_body():
+    """改人设、改技能的请求体（A.2；技能同它，11.2）→ ``(text, version)``，不合规 422。
 
-    先后：请求体（422）→ 名单（404）→ 落点（500）→ 锁里比版本号（409）→ 全文没变就不写 → 原文备份到
-    ``<DSH_BOT_HOME>/backups/persona/<bot_id>/`` → 原子写、保持原权限（原来没有就 0600）→ 备份只留 5 份。
-    写盘的就是 ``text`` 的 UTF-8 原样，去首尾空白只用来判断是不是空。
+    只许 ``text``、``version`` 两个键；``text`` 去掉首尾空白后不能为空、按 UTF-8 不超过 256 KiB；
+    ``version`` 是 16 位小写十六进制。
     """
     request.max_content_length = PERSONA_MAX_BODY + 1      # 分块传输的读到上限多一个字节即停
     body = _json_object(limit=PERSONA_MAX_BODY, too_big="请求体太大")
@@ -1323,64 +1340,155 @@ def _persona_put(bot_id):
         raise _invalid("text 按 UTF-8 不能超过 256 KiB")
     if not isinstance(version, str) or not PERSONA_VERSION_RE.match(version):
         raise _invalid("version 要是 16 位小写十六进制")
-    bot = _require_bot(bot_id)
-    path, data = _persona_path(bot), text.encode("utf-8")
+    return text, version
+
+
+def _save_text(bot_id, path, text, version, what, stale, backup, missing=None):
+    """人设（10.2）与技能（11.2）共用的存盘，全程在管理台编辑页写人设那把锁里（同进程内有效，9.7）。
+
+    文件不在且给了 ``missing``：抛它，不新建 → 比版本号（409，``stale`` 是那句提示）→ 全文没变就不写 →
+    原文备份（``backup`` = 备份子目录、文件名后缀、轮换只认的名字）→ 原子写、保持原权限（原来没有就 0600）→
+    写盘成功之后备份只留 5 份。写盘的就是 ``text`` 的 UTF-8 原样，去首尾空白只用来判断是不是空。
+    """
+    kind, suffix, name_re = backup
+    data = text.encode("utf-8")
     try:
-        with hub_addbot.hold_addbot_lock():          # 与管理台编辑页写人设同一把锁（同进程内有效，9.7）
-            old, mode = _read_persona(path)
+        with hub_addbot.hold_addbot_lock():
+            old, mode = _read_persona(path, what)
+            if mode is None and missing is not None:
+                raise missing
             if _persona_version(old) != version:
-                raise Refuse(409, "stale", PERSONA_STALE)
+                raise Refuse(409, "stale", stale)
             if data == old:
                 return {"ok": True, "version": version, "message": PERSONA_SAME}
             try:
-                folder = None if mode is None else life_settings._backup(bot_id, old, kind="persona", suffix="")
+                folder = None if mode is None else life_settings._backup(bot_id, old, kind=kind, suffix=suffix)
                 life_settings._replace(path, text, 0o600 if mode is None else mode)
             except OSError:
-                raise Refuse(500, "internal", "写这只 bot 的人设失败") from None
+                raise Refuse(500, "internal", "写这只 bot 的%s失败" % what) from None
             if folder:
-                life_settings._rotate(folder, PERSONA_BACKUP_RE)      # 写盘成功之后才清理
+                life_settings._rotate(folder, name_re)      # 写盘成功之后才清理
     except HubError as e:
-        raise _config_failure(e, "这只 bot 的人设") from None
+        raise _config_failure(e, "这只 bot 的" + what) from None
     return {"ok": True, "version": _persona_version(data), "message": PERSONA_SAVED}
 
 
+def _persona_put(bot_id):
+    """改人设（v0.8 草案 A.2，补充文件 10.2、10.6）。停用的 bot 也能改；不重启（网关自己盯着这个文件）。
+
+    先后：请求体（422）→ 名单（404）→ 落点（500）→ 锁里比版本号（409）→ 全文没变就不写 → 原文备份到
+    ``<DSH_BOT_HOME>/backups/persona/<bot_id>/`` → 原子写、保持原权限（原来没有就 0600）→ 备份只留 5 份。
+    """
+    text, version = _text_body()
+    path = _persona_path(_require_bot(bot_id))
+    return _save_text(bot_id, path, text, version, "人设", PERSONA_STALE, ("persona", "", PERSONA_BACKUP_RE))
+
+
+def _no_such_skill():
+    return Refuse(404, "no_such_skill", "这只 bot 没有这个技能")
+
+
+def _skill_name(name):
+    """11.2：只认通用名表里的名字，原样比对（大小写、前缀、扩展名都不认）；不在表里 422，不看文件。"""
+    if name not in SKILL_NAMES:
+        raise _invalid("技能名只能是 %s 之一" % "、".join(SKILL_NAMES))
+
+
+def _skill_path(bot, name):
+    """11.2：``<频道目录>/skills/skill-<通用名>/SKILL.md``。落点不对、路上任何一层是软链：500，不读不写。
+
+    ``_channel_file`` 管频道目录的落点与 SKILL.md 本身；中间 ``skills``、``skill-<通用名>`` 两层是软链也会把
+    读写领到频道目录外（另一套系统的技能目录在归属边界外），所以再比一次解析后的真实路径：一层软链都没有
+    才相等。还不存在的层 ``realpath`` 原样保留，交给读文件那一步回 404。
+    """
+    path = _channel_file(bot, os.path.join("skills", "skill-" + name, "SKILL.md"))
+    if path is None or os.path.realpath(path) != path:
+        raise Refuse(500, "internal", "这只 bot 的技能文件不在它自己的目录里，或者是软链，不读也不改")
+    return path
+
+
+def _skill_get(bot_id, name):
+    """读技能（v0.9 dsh 侧草案 A.1，补充文件 11.2）：原文全文与版本号。文件不在 404，停用的 bot 照常能读。"""
+    _skill_name(name)
+    raw, mode = _read_persona(_skill_path(_require_bot(bot_id), name), "技能")
+    if mode is None:
+        raise _no_such_skill()
+    return _text_view(raw, "技能")
+
+
+def _skill_put(bot_id, name):
+    """改技能（草案 A.2，补充文件 11.2）：除了「文件不在 404、不新建」，全部同改人设（``_save_text``）。
+
+    先后：技能名（422）→ 请求体（422）→ 名单（404）→ 落点与软链（500）→ 锁里看文件在不在（404）→ 版本号（409）。
+    备份放 ``<DSH_BOT_HOME>/backups/skills/<bot_id>/``，名字是时间加通用名（如 ``20261015-084153.image.md``），
+    轮换只数同一个通用名的，所以每个技能各留最近 5 份。
+    """
+    _skill_name(name)
+    text, version = _text_body()
+    path = _skill_path(_require_bot(bot_id), name)
+    suffix = ".%s.md" % name
+    name_re = re.compile(r"^[0-9]{8}-[0-9]{6}(-[0-9]{2})?" + re.escape(suffix) + r"\Z")
+    return _save_text(bot_id, path, text, version, "技能", SKILL_STALE, ("skills", suffix, name_re),
+                      missing=_no_such_skill())
+
+
 def _voice_view(obj):
-    """B.1、B.2 的回应：``voiceId``、``voiceModel`` 照原样；没写的（或不是非空字符串）为 null，别的键一律不回。"""
-    voice_id, model = obj.get("voiceId"), obj.get("voiceModel")
-    return {"ok": True, "voice_id": voice_id if _text(voice_id) else None,
-            "tts_model": model if _text(model) else None}
+    """B.1、B.2 与 11.3 的回应：四个键照 access.json 原样，不填缺省；没写的（或不是非空字符串）为 null，别的键一律不回。"""
+    view = {"ok": True}
+    for api_key, file_key in VOICE_KEYS:
+        value = obj.get(file_key)
+        view[api_key] = value if _text(value) else None
+    return view
 
 
 def _voice_get(bot_id):
-    """读语音（v0.8 草案 B.1，补充文件 10.3）。停用的 bot 照常能读；access.json 读不出 500。"""
+    """读语音（v0.8 草案 B.1，补充文件 10.3、11.3）。停用的 bot 照常能读；access.json 读不出 500。"""
     return _voice_view(_load_access(_require_bot(bot_id))[1])
 
 
-def _voice_put(bot_id):
-    """改语音（v0.8 草案 B.2，补充文件 10.3、10.6）：给了的键整键替换、null 删键、没给的不动。
+def _language(value, key):
+    """11.3：语言名 → 要存的值（去掉首尾空白）；null 原样（删键）。不合规 422。
 
-    只改这两个键，access.json 别的键原样，原子写、保持原权限，与群设置同一把锁；读不出 500，不新建、
-    不覆盖。不重启：网关下次发语音时现读。停用的 bot 也能改。
+    去掉首尾空白后 1 到 20 个字符（按字符数，不按字节）；整个值里不许有换行、回车与 ``[ ] < > { } ` |``：
+    语言名原样写进提示词，这些字符会弄乱提示词里的标签与格式。
+    """
+    if value is None:
+        return None
+    if (not isinstance(value, str) or LANGUAGE_BAD_RE.search(value)
+            or not 1 <= len(value.strip()) <= LANGUAGE_MAX):
+        raise _invalid("%s 要是 1 到 %d 个字符的语言名，不能有换行与 [ ] < > { } ` |；或者 null" % (key, LANGUAGE_MAX))
+    return value.strip()
+
+
+def _voice_put(bot_id):
+    """改语音（v0.8 草案 B.2，补充文件 10.3、10.6、11.3）：给了的键整键替换、null 删键、没给的不动。
+
+    只改这四个键，access.json 别的键原样，原子写、保持原权限，与群设置同一把锁；读不出 500，不新建、
+    不覆盖。不重启：语音两键网关下次发语音时现读，语言两键网关自己盯着（11.4）。停用的 bot 也能改。
     """
     from moments import hub_config         # 延迟 import：同 _write_enabled
     body = _json_object()
-    if not body or set(body) - {"voice_id", "tts_model"}:
-        raise _invalid("请求体只能有 voice_id、tts_model，至少给一个")
+    if not body or set(body) - {api_key for api_key, _ in VOICE_KEYS}:
+        raise _invalid("请求体只能有 voice_id、tts_model、text_language、voice_language，至少给一个")
     voice_id, model = body.get("voice_id"), body.get("tts_model")
     if voice_id is not None and not (isinstance(voice_id, str) and VOICE_ID_RE.match(voice_id)):
         raise _invalid("voice_id 只能用字母、数字、下划线、横线，1 到 64 个字符；或者 null")
     if model is not None and model not in TTS_MODELS:
         raise _invalid("tts_model 只能是 %s 之一，或者 null" % "、".join(TTS_MODELS))
+    values = dict(body)
+    for key in ("text_language", "voice_language"):
+        if key in body:
+            values[key] = _language(body[key], key)
     bot = _require_bot(bot_id)
     try:
         with hub_addbot.hold_addbot_lock():
             path, obj = _load_access(bot)
             new = dict(obj)
-            for api_key, file_key in (("voice_id", "voiceId"), ("tts_model", "voiceModel")):
-                if api_key in body and body[api_key] is None:
+            for api_key, file_key in VOICE_KEYS:
+                if api_key in values and values[api_key] is None:
                     new.pop(file_key, None)
-                elif api_key in body:
-                    new[file_key] = body[api_key]
+                elif api_key in values:
+                    new[file_key] = values[api_key]
             if new != obj:                  # 本来就是这样就不写
                 hub_config.atomic_write(json.dumps(new, ensure_ascii=False, indent=2) + "\n", path)
     except HubError as e:
@@ -1400,6 +1508,8 @@ _BOT_ROUTES = {
     "persona": {"GET": _persona_get, "PUT": _persona_put},
     "voice": {"GET": _voice_get, "PUT": _voice_put},
 }
+#: ``/bots/<bot_id>/skills/<通用名>`` 上的接口（11.2）：处理函数多收一个通用名
+_SKILL_ROUTES = {"GET": _skill_get, "PUT": _skill_put}
 
 
 # ---------------------------------------------------------------- 管理台三页（页面服务）
