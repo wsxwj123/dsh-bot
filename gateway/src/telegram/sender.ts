@@ -19,6 +19,8 @@ export type PartResult = {
 }
 
 export type SendRequest = {
+  /** 这一次不按空行拆段（access.splitOnParagraph 不生效）：/compact、/summary 的回复要那句话和摘要原文在同一条里 */
+  keepParagraphs?: boolean
   chatId: string
   turnId: number | null
   /** 用于幂等键：同一轮第几次调用发送 */
@@ -142,7 +144,7 @@ export class Sender {
   ) {}
 
   async send(req: SendRequest): Promise<PartResult[]> {
-    const access = this.o.access()
+    const access = req.keepParagraphs ? { ...this.o.access(), splitOnParagraph: false } : this.o.access()
     const items = planParts(req.text, req.files ?? [], access)
     const delay = access.splitOnParagraph ? Math.max(0, access.paragraphDelay ?? 0) : 0
     const replyMode = access.replyToMode ?? 'first'
