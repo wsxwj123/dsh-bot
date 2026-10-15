@@ -200,6 +200,11 @@ def _check_base_url(raw, allow_private=False, resolve=None):
         raise HubError(400, "bad_base_url", "base_url 不是合法 URL（端口或 IPv6 括号有误）")
     if parts.scheme not in ("http", "https") or not host:
         raise HubError(400, "bad_base_url", "base_url 必须是 http(s):// 绝对地址")
+    if not parts.netloc.isascii():
+        # B31 后半：全角数字、句号「。」、零宽字符这类写法 ipaddress 认不出是 IP，域名解析又可能失败
+        # 走「解析不出就放行」，而真正发请求的一方会按 IDNA 把它们换回 127.0.0.1 之类。只收 ASCII 主机名。
+        raise HubError(400, "bad_base_url",
+                       "base_url 的主机名里不能有全角、中文或看不见的字符；中文域名请先换成 xn-- 开头的写法")
     if "[" in parts.netloc and _as_ip(host) is None:
         # RFC 3986：方括号里只能是 IP 字面量。`[gggg::1]` / `[v1.fe80::a]` 解析不出地址，
         # 落进域名分支就等于"解析不出 → 放行"，成了内网判定的旁路。
