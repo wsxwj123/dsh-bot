@@ -19,7 +19,7 @@ from . import adapter_util as au
 from .adapter_util import adapter, console_guard  # noqa: F401  夹具
 
 NEW = "botnew"
-CREATE_KEYS = {"ok", "bot_id", "person", "username", "running"}
+CREATE_KEYS = {"ok", "bot_id", "person", "username", "enabled", "running"}   # 约定 v1.0 5.18.1 加了 enabled
 
 
 def good_body(**over):
@@ -48,7 +48,7 @@ def test_meta_能力清单恰好二十个键_新增四项都为真(adapter):
 
 
 @pytest.mark.parametrize("port", [None, "free"], ids=["不给端口_自动挑", "指定端口_照写"])
-def test_新建_成功_回五个键_文件落在本系统_装了启动项_密钥不出现(adapter, telegram, bun, caplog, port):
+def test_新建_成功_回六个键_文件落在本系统_装了启动项_密钥不出现(adapter, telegram, bun, caplog, port):
     sb = adapter.sandbox
     want_port = au.free_port() if port == "free" else None
     persona = "# 新人设\n你是测试用的 bot。\n"
@@ -58,8 +58,9 @@ def test_新建_成功_回五个键_文件落在本系统_装了启动项_密钥
         body["port"] = want_port
     resp = adapter.call("POST", au.BOTS, body)
     got = adapter.ok(resp)
-    assert set(got) == CREATE_KEYS, "成功应恰好回 ok、bot_id、person、username、running：%r" % (got,)
+    assert set(got) == CREATE_KEYS, "成功应恰好回 ok、bot_id、person、username、enabled、running：%r" % (got,)
     assert (got["bot_id"], got["person"], got["username"]) == (NEW, NEW, "my_bot"), got
+    assert got["enabled"] is True, "不给 enabled 时缺省为 true：%r" % (got,)
     assert got["running"] is True, "假 launchctl 说在跑，running 应为 true：%r" % (got,)
     no_secret(resp)
     assert au.NEW_FISH_KEY not in caplog.text and au.NEW_TG_TOKEN.split(":")[1] not in caplog.text, "日志里出现了密钥"
