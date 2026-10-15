@@ -188,6 +188,8 @@ def test_停用的bot换供应商_写进配置_回queued_不启动_不碰它的�
                    "message": au.QUEUED_MESSAGE}, got
     cfg = au.read_cfg(bot)
     assert {k: (cfg.get("brain") or {}).get(k) for k in want} == want, cfg
+    chosen = (cfg.get("brain") or {}).get("chosen_at")
+    assert isinstance(chosen, str) and chosen, "每次替停着的 bot 写 brain 都要带 chosen_at（网关凭它清掉聊天里临时切的）：%r" % cfg
     assert cfg.get("enabled") is False and cfg.get("id") == "botbravo", cfg
     assert gw_stopped.requests == [], "不该去找停着的 bot 自己的网关"
     assert gw_live.writes() == [], "不该往任何网关写"
