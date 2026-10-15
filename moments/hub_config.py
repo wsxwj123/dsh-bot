@@ -42,7 +42,7 @@ PLACEHOLDER = "__KEEP_EXISTING__"
 GLOBAL_YML = "_global.yml"
 SAVE_PREFIX = GLOBAL_YML + ".bak."
 RESTORE_PREFIX = GLOBAL_YML + ".pre-restore."
-SAVE_KEEP = 5                       # §2.4：save 类只留 5 份，restore 类不占配额
+SAVE_KEEP = 2                       # §2.4：save 类、restore 类各只留 2 份，各算各的，互不挤占
 MAX_RAW_BYTES = 1024 * 1024         # §3.2 检查 2
 REQUIRED_TOP_KEYS = ("user_display_name", "max_calls_per_5h", "moments", "jiwen")
 
@@ -378,7 +378,15 @@ def make_backup(kind, content):
     """
     prefix = SAVE_PREFIX if kind == "save" else RESTORE_PREFIX
     base = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    for bid in [base] + ["%s-%02d" % (base, i) for i in range(1, 100)]:
+    bids = [base] + ["%s-%02d" % (base, i) for i in range(1, 100)]
+    # 接在这一秒已有的最后一份之后取名：轮转删掉这一秒较早的几份之后，新的一份若拿回删掉的
+    # 名字就会排到最前、随即被当成最老的删掉（只留 2 份时同一秒连存 3 次就会碰上）
+    try:
+        taken = set(os.listdir(configs_dir()))
+    except OSError:
+        taken = set()                   # 目录读不了：下面 os.open 照常报 config_write_failed
+    start = max((i + 1 for i, bid in enumerate(bids) if prefix + bid in taken), default=0)
+    for bid in bids[start:]:
         target = os.path.join(configs_dir(), prefix + bid)
         try:
             # O_BINARY（只有 Windows 有）：备份是拿来逐字节还原的，走 CRT 文本模式的话
@@ -424,13 +432,16 @@ def atomic_write(text, path=None):
                 os.unlink(tmp)
 
 
-def rotate_saves():
-    """§2.4 第 5 步：**必须在写盘成功之后**跑。按文件名时间戳排序删最老的，不看 mtime。"""
+def rotate_saves(kind="save"):
+    """§2.4 第 5 步：**必须在写盘成功之后**跑。按文件名时间戳排序删最老的，不看 mtime。
+
+    只数、只删 ``kind`` 这一类：save 与 restore 各留 ``SAVE_KEEP`` 份，restore 再多也挤不掉 save（R3-3）。"""
+    prefix = SAVE_PREFIX if kind == "save" else RESTORE_PREFIX
     try:
         # 过 BACKUP_ID_RE：不然本地放一个 _global.yml.bak.zzz 就能把真备份逐个挤掉，
         # 而 list_backups 过滤了正则、页面上还看不到这个占位的
         names = sorted(n for n in os.listdir(configs_dir())
-                       if n.startswith(SAVE_PREFIX) and BACKUP_ID_RE.match(n[len(SAVE_PREFIX):]))
+                       if n.startswith(prefix) and BACKUP_ID_RE.match(n[len(prefix):]))
     except OSError:
         return
     for name in names[:-SAVE_KEEP] if len(names) > SAVE_KEEP else []:
@@ -501,15 +512,14 @@ def commit(new_text, kind="save", backup=True):
 
     backup=False 给低权面的单枚举翻转用（如 /api/image_provider 切生图 provider）：
     行级编辑器 + 原子写本身保真，改错了再切回即可；若照常备份，低权用户高频切换
-    会把 admin 参数页的 5 份 save 备份全部挤掉（跨权限副作用）。"""
+    会把 admin 参数页的 2 份 save 备份全部挤掉（跨权限副作用）。"""
     if not backup:
         atomic_write(new_text)
         return None
     current = read_global()
     bid = make_backup(kind, current if current is not None else "")
     atomic_write(new_text)
-    if kind == "save":          # restore 类不挤 save 的 5 份配额（R3-3）
-        rotate_saves()
+    rotate_saves(kind)          # save、restore 各轮转各的（各留 2 份），restore 不挤 save 的配额（R3-3）
     return bid
 
 
