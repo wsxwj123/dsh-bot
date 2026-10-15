@@ -105,7 +105,7 @@ BAD_CHANNEL_PATH_DETAIL = ("频道目录不在这只 bot 的新系统家目录�
                            "这一页不读也不改它")
 
 #: §0 第 7 条的保留名：`com.dsh-bot.` 前缀下不属于 bot 的单元名
-RESERVED_IDS = ("jiwen", "director", "voicecall")
+RESERVED_IDS = ("jiwen", "director", "voicecall", "console")      # console：适配服务自己的单元 com.dsh-bot.console
 
 
 def argv_blob(fake):
