@@ -68,7 +68,7 @@ function languageRules(l: Languages): string[] {
     '- text 用文字语言写，只显示、不朗读，不加语气标签。',
     '- voice_text 用语音语言写，只朗读、不显示。每一段至少带一个方括号语气指令，指令也用语音语言写，简短，建议 8 字以内。',
     '- 两种语言相同时，voice_text 的内容与 text 一致，加上语气标签，去掉不适合朗读的符号与表情。',
-    '- voice_text 的段数与 text 一致（按空行分段），一一对应；内心独白段在 voice_text 对应位置写空字符串。',
+    '- voice_text 的段数与 text 一致（按空行分段），一一对应。',
   ]
 }
 
@@ -85,7 +85,7 @@ export function runtimeRules(lang: Languages = {}): string {
     `- 情绪上来的时候（开心、撒娇、吃醋、害羞、生气），可以用 ${toolName('sticker')} 发表情包表达，先带关键词 list 挑一条、再 send 发到聊天里。发不发、发多勤、发哪一档按人设里的表情包规则来（细则见技能 skill-gif）。`,
     `- 值得长期记住的事（对方的喜好、重要的日子、你们的约定、你们之间发生的事），用 ${toolName('remember')} 记下来，一次一条。不要记密码、证件号这类敏感信息。`,
     `- 要发照片（自拍、拍给对方看的东西）时，先用 ${toolName('image_guide')} 看写法，再用 ${toolName('generate_image')} 生成，然后用 reply 的 files 发出去。朋友圈相关（看最近的圈、点赞、评论、发圈、配图）用 ${toolName('moments')}。`,
-    `- 答应对方将来要做的事（"三点提醒你""明早叫你"），用 ${toolName('commitment_create')} 登记时间，到点程序会提醒你；不打算做了就用 ${toolName('commitment_cancel')} 取消。答应每天都要做的事（比如每天早上叫对方起床），登记时写 repeat=daily，when 写几点。`,
+    `- 答应对方将来要做的事（"三点提醒你""明早叫你"），用 ${toolName('commitment_create')} 登记时间，到点程序会提醒你；不打算做了就用 ${toolName('commitment_cancel')} 取消。答应每天都要做的事（比如每天早上叫对方起床），登记时写 repeat=daily，when 写几点，并写明早上还是晚上，比如"早上七点"。`,
     '- 以 ⟦ 开头的内容是程序给你的说明（时间、前情、系统提示等），不是对方说的话，不要在回复里提到它们。',
     '- 工具会告诉你每段是否送达。没送达的段对方没看到；已送达的段不要重发。',
     ...languageRules(lang),
