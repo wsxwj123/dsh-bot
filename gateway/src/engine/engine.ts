@@ -375,13 +375,14 @@ export class Engine {
       },
       {
         name: 'commitment_create',
-        description: '登记一件答应对方将来要做的事（比如"三点提醒你""明早叫你起床""周五陪你看电影"）。到点时程序会提醒你去做。',
+        description: '登记一件答应对方将来要做的事（比如"三点提醒你""明早叫你起床""周五陪你看电影"）。到点时程序会提醒你去做。每天都要做的事（比如每天早上叫对方起床）repeat 写 daily，when 写几点。',
         inputSchema: {
           type: 'object',
           properties: {
             content: { type: 'string', description: '要做的事，一句话' },
             when: { type: 'string', description: '什么时候：可以写"今晚八点""明天早上""30分钟后""起床后""下班后""周五晚上"，或 2026-10-07T09:00' },
             quote: { type: 'string', description: '你当时对对方说的原话（可选）' },
+            repeat: { type: 'string', enum: ['daily'], description: '每天都要做的事写 daily（when 写一天里的几点，比如"早上七点"、07:30）；一次性的不填' },
           },
           required: ['content', 'when'],
         },
@@ -395,7 +396,7 @@ export class Engine {
       },
       {
         name: 'commitment_cancel',
-        description: '取消一件承诺（不打算做了、对方说不用了、登记错了）。',
+        description: '取消一件承诺（不打算做了、对方说不用了、登记错了）。每天重复的会整个取消，以后都不再提醒。',
         inputSchema: { type: 'object', properties: { id: { type: 'number', description: '承诺编号' }, reason: { type: 'string' } }, required: ['id'] },
         call: (args, ctx) => engine().toolCommit('cancel', args, ctx),
       },
