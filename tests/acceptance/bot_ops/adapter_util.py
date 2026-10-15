@@ -718,3 +718,43 @@ def file_mark(path):
 
 def mode_of(path):
     return os.stat(str(path)).st_mode & 0o7777
+
+
+# ---------------------------------------------------------------- v0.9（补充文件第 11 节）
+# 依据：INTERFACE-适配服务.md 11.1 到 11.3；INTERFACE-适配约定-v0.9-dsh侧.md A；claude 侧草案第一节。
+
+#: 11.1：第 10 节的十五个键，加 bot.skills，报 true，共十六个键
+CAPABILITIES_V09 = dict(CAPABILITIES_V08, **{"bot.skills": True})
+
+#: 11.2：通用技能名表，不在表里的一律 422
+SKILL_NAMES = ("image", "voice", "group", "moments", "proactive", "nsfw", "gif")
+
+
+def skill_url(bot_id, name):
+    return "%s/%s/skills/%s" % (BOTS, bot_id, name)
+
+
+def skill_path(bot, name):
+    """11.2：通用名 → <频道目录>/skills/skill-<通用名>/SKILL.md。"""
+    return channel_of(bot) / "skills" / ("skill-" + name) / "SKILL.md"
+
+
+def skill_backups(sandbox, bot_id, name=None):
+    """11.2：<DSH_BOT_HOME>/backups/skills/<bot_id>/ 下的文件，按名字排好；name 给了只要文件名里带这个通用名的。"""
+    d = sandbox.dsh_home / "backups" / "skills" / bot_id
+    if not d.is_dir():
+        return []
+    return sorted(p for p in d.iterdir() if p.is_file() and (name is None or name in p.name))
+
+
+def tree_mark(root):
+    """一棵目录下全部条目的指纹：相对路径 → file_mark（目录记 "dir"，软链不跟过去）。根不在就是 None。"""
+    root = Path(root)
+    if not os.path.lexists(str(root)):
+        return None
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(str(root)):
+        for n in dirnames + filenames:
+            p = Path(dirpath) / n
+            out[str(p.relative_to(root))] = "dir" if p.is_dir() and not p.is_symlink() else file_mark(p)
+    return out
