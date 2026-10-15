@@ -4,7 +4,7 @@
 依据：INTERFACE-适配服务.md 9.2（「停」）与 12.3；INTERFACE-适配约定-v1.0-dsh侧.md B。不读实现。
 归档目录里怎么摆、manifest.json 长什么样，接口只说「保持原来的相对结构」「记下每个文件原来的位置」，
 这里只验：原位置都空了、东西整份还在归档目录里、manifest.json 是 JSON 对象且写着每个原位置。
-接口没写死、这里自定的一处：archive_id 合规但不存在回 404 not_found。
+archive_id 合规但不存在回 404 unknown_archive（13.4）。
 """
 import json
 import os
@@ -92,7 +92,8 @@ def test_归档列表_三个键_按时间倒序(adapter):
     got = adapter.ok(adapter.call("GET", au.ARCHIVES))["archives"]
     assert [a.get("archive_id") for a in got] == [second, first], "应按时间倒序：%r" % got
     for a in got:
-        assert set(a) == {"archive_id", "bot_id", "archived_at"}, a
+        assert set(a) == {"archive_id", "bot_id", "display_name", "person", "archived_at", "status",
+                      "shell_meta"}, a      # 13.4
         assert a["bot_id"] == a["archive_id"].rsplit("-", 1)[0], a
         assert isinstance(a["archived_at"], str) and a["archived_at"].strip(), a
 
@@ -136,7 +137,7 @@ def test_恢复_原处已有同名_409_exists_什么都不移(adapter):
     ("BotAlpha-20261015T080102Z", 422, "invalid"),
     ("botalpha-2026-10-15", 422, "invalid"),
     ("..", 422, "invalid"),
-    ("botalpha-20261015T080102Z", 404, "not_found"),
+    ("botalpha-20261015T080102Z", 404, "unknown_archive"),
 ], ids=["没有时间", "编号有大写", "时间写法不对", "两个点", "合规但不存在"])
 def test_恢复_archive_id不合规422_不存在404(adapter, archive_id, status, code):
     alpha = adapter.bot("botalpha")
