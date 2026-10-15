@@ -47,6 +47,7 @@ def test_新建_enabled假_新字段写进配置_不启动_person与username对�
                      telegram_user_id=123456789, purpose="switch_in")
     got = adapter.ok(adapter.call("POST", au.BOTS, body))
     assert (got["bot_id"], got["person"], got["running"]) == (NEW, "lucy", False), got
+    assert got.get("enabled") is False, "成功体要带 enabled（约定 v1.0 5.18.1）：%r" % got
     cfg = new_cfg(adapter)
     assert cfg.get("enabled") is False and cfg.get("life_id") == "lucy", cfg
     assert str(cfg.get("telegram_username")).lower() == "my_bot", "用户名应去掉 @ 记进配置：%r" % cfg
@@ -70,6 +71,7 @@ BAD = [
     ("purpose不认识", good_body(purpose="other")),
     ("编号带横线", good_body(bot_id="bot-new")),
     ("编号只有一个字", good_body(bot_id="b")),
+    ("编号是保留名templates", good_body(bot_id="templates")),     # GET /bots/templates 用了这个名字（约定 v1.0 5.18.1）
     ("显示名超过32个字", good_body(display_name="名" * 33)),
 ]
 
@@ -117,11 +119,12 @@ def test_新建_不给端口_在17850到17899挑第一个没被配置归档占�
         holder = None
     try:
         want = next(p for p in range(17850, 17900) if p not in (17850, 17851) and not listening(p))
-        adapter.ok(adapter.call("POST", au.BOTS, good_body()))
+        got = adapter.ok(adapter.call("POST", au.BOTS, good_body()))
     finally:
         if holder is not None:
             holder.close()
     assert new_cfg(adapter)["dispatcher_port"] == want, "应挑 %d：%r" % (want, new_cfg(adapter))
+    assert got.get("enabled") is True, "成功体要带 enabled，缺省为 true（约定 v1.0 5.18.1）：%r" % got
 
 
 def test_模板列表_列本系统有人设的bot_每项只有id与label_另一套系统的不列(adapter):
