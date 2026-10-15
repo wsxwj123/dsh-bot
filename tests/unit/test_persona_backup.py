@@ -3,7 +3,7 @@
 怎么答、没给的键不动、人设改写前留备份。
 
 起因：编辑弹窗读取失败后仍能保存，而它每次把三个键全交上来 —— 填一个名字点保存，人设被
-写成空文件。后端这一侧的保险：空的人设正文不接受；人设被改写之前先留一份备份，最多 5 份。
+写成空文件。后端这一侧的保险：空的人设正文不接受；人设被改写之前先留一份备份，最多 2 份。
 
 验收那层靠真的隔一秒去量「同一秒」「连改 7 次」；这里把时钟钉死，直接量备份的命名、同秒
 冲突、清理挑谁删、以及失败恢复时备份跟不跟着走。落盘只在 tmp_path 下；bot 名全是假名；
@@ -166,12 +166,12 @@ def test_备份名里的时间戳_整串匹配(tail, ok):
     assert (ab.PERSONA_BAK_ID_RE.match(tail) is not None) is ok
 
 
-def test_清理_超过5份_删最老的_留最近5份(w):
+def test_清理_超过2份_删最老的_留最近2份(w):
     names = ["CLAUDE.md.bak.2020010%d-000000" % d for d in range(1, 9)]
     for n in names:
         (w.ch / n).write_text(n, encoding="utf-8")
     ab._prune_persona_backups(str(w.ch))
-    assert _baks(w.ch) == names[3:]
+    assert _baks(w.ch) == names[6:]
 
 
 def test_清理_同一秒里不带后缀的比带后缀的老(w):
@@ -180,11 +180,11 @@ def test_清理_同一秒里不带后缀的比带后缀的老(w):
     for n in names:
         (w.ch / n).write_text(n, encoding="utf-8")
     ab._prune_persona_backups(str(w.ch))
-    assert _baks(w.ch) == names[1:], "该删的是没带后缀的那份（同一秒里最先建的）"
+    assert _baks(w.ch) == names[4:], "没带后缀的那份是同一秒里最先建的，该在删掉的那几份里"
 
 
-def test_清理_恰好5份_一份都不删(w):
-    names = ["CLAUDE.md.bak.2020010%d-000000" % d for d in range(1, 6)]
+def test_清理_恰好2份_一份都不删(w):
+    names = ["CLAUDE.md.bak.2020010%d-000000" % d for d in range(1, 3)]
     for n in names:
         (w.ch / n).write_text(n, encoding="utf-8")
     ab._prune_persona_backups(str(w.ch))
@@ -200,7 +200,7 @@ def test_清理_名字不合规的不算备份_不占名额也不会被删(w):
         (w.ch / n).write_text("别碰我：" + n, encoding="utf-8")
     ab._prune_persona_backups(str(w.ch))
     left = {p.name for p in w.ch.iterdir()}
-    assert left == set(olds[1:]) | set(bystanders) | {"CLAUDE.md", "access.json"}
+    assert left == set(olds[4:]) | set(bystanders) | {"CLAUDE.md", "access.json"}
     for n in bystanders:
         assert (w.ch / n).read_text(encoding="utf-8") == "别碰我：" + n
 
@@ -260,13 +260,13 @@ def test_保存_原来没有人设文件_不留备份(w):
     assert _baks(w.ch) == [] and w.md.read_bytes() == "第一份\n".encode("utf-8")
 
 
-def test_保存_连改7次_留下的是最近5次改写之前的内容(w):
+def test_保存_连改7次_留下的是最近2次改写之前的内容(w):
     w.md.write_text("v0\n", encoding="utf-8")
     for i in range(1, 8):
         w.clock.tick()
         assert ab.edit_save(BOT, {"persona": "v%d\n" % i})[1] == 200
     assert [(w.ch / n).read_text(encoding="utf-8") for n in _baks(w.ch)] == \
-        ["v2\n", "v3\n", "v4\n", "v5\n", "v6\n"]
+        ["v5\n", "v6\n"]
 
 
 def test_保存_同一秒连改两次_两份都在_后一份带01(w):
