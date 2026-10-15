@@ -845,3 +845,42 @@ def stuck_running(adapter, monkeypatch, bot_id):
     """停不下来：print 一直说主单元在跑，等的上限缩到 1 秒。"""
     adapter.launchctl.set_print_text(print_text(unit_labels(bot_id)[0], running=True))
     monkeypatch.setenv("DSH_CONSOLE_STOP_WAIT", "1")
+
+
+# ---------------------------------------------------------------- v1.0 补充（补充文件第 13 节）
+# 依据：INTERFACE-适配服务.md 第 13 节。下面是第 13 节几份用例共用的小件。
+
+#: 13.8：第 12 节的二十个键，加 bot.token_handoff，报 true，共二十一个键
+CAPABILITIES_V10S = dict(CAPABILITIES_V10, **{"bot.token_handoff": True})
+#: 13.1：bots() 每一行新加的四个只读键
+ROW_KEYS_V10S = {"enabled", "polling", "username", "moved_to"}
+#: 13.6：op_id 的五种种类
+OP_KINDS = ("create", "switch", "archive", "restore", "delete")
+#: 13.3：人设模板列表
+TEMPLATES = BOTS + "/templates"
+#: 13.7：停着的 bot 换供应商成功时回的那一句
+QUEUED_MESSAGE = "已保存，下次启用时生效"
+
+
+def op_id(kind="switch", tail="1a2b3c4d"):
+    """13.6 的 op_id：<UTC 时间>-<种类>-<8 位小写十六进制>。"""
+    return "20261015T051700Z-%s-%s" % (kind, tail)
+
+
+def handoff_url(bot_id):
+    return "%s/%s/token_handoff" % (BOTS, bot_id)
+
+
+def moved_marker(sandbox, bot_id):
+    """13.2：迁出标记 <DSH_BOT_HOME>/bots/<编号>/.moved"""
+    return sandbox.dsh_home / "bots" / bot_id / ".moved"
+
+
+def handoff_records(sandbox):
+    """13.6：已交记录 <DSH_BOT_HOME>/state/token-handoff.json"""
+    return sandbox.dsh_home / "state" / "token-handoff.json"
+
+
+def rows_by_id(adapter):
+    """GET /bots 的每一行，按 bot_id 放进字典。"""
+    return {r["bot_id"]: r for r in adapter.ok(adapter.call("GET", BOTS))["bots"]}
