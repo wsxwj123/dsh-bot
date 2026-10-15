@@ -79,7 +79,7 @@ def test_GET语音_access_json不存在或读不出_回500internal_也不凭空�
 WRITES = {
     "两个都给_都整键替换": ({"voice_id": "new_Voice-02", "tts_model": "s2.1-pro"}, True, "new_Voice-02", "s2.1-pro"),
     "只给voice_id_voiceModel保持原样": ({"voice_id": "new_Voice-02"}, True, "new_Voice-02", "s1"),
-    "只给tts_model_voiceId保持原样": ({"tts_model": "drama-3-preview"}, True, "alpha_voice_01", "drama-3-preview"),
+    "只给tts_model_voiceId保持原样": ({"tts_model": "drama-3"}, True, "alpha_voice_01", "drama-3"),
     "voice_id给null_删掉voiceId这个键": ({"voice_id": None}, True, ABSENT, "s1"),
     "tts_model给null_删掉voiceModel这个键": ({"tts_model": None}, True, "alpha_voice_01", ABSENT),
     "停用的bot也能写": ({"voice_id": "new_Voice-02"}, False, "new_Voice-02", "s1"),
