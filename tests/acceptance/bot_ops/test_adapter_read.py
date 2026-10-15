@@ -14,7 +14,7 @@ from . import botops_util as u
 from .adapter_util import adapter, console_guard  # noqa: F401  夹具
 
 #: 补充文件第 7 节与 9.1：4.1 表里的八个，加 bot.notify、bot.life_settings，再加 bot.enable、
-#: bot.switch_in、bot.group_chat（v0.6/v0.7），再加 bot.persona、bot.voice（v0.8，补充文件 10.1），再加 bot.skills（v0.9，补充文件 11.1），再加 bot.create、bot.archive、bot.delete、bot.profile（v1.0，补充文件 12.1），恰好二十个键
+#: bot.switch_in、bot.group_chat（v0.6/v0.7），再加 bot.persona、bot.voice（v0.8，补充文件 10.1），再加 bot.skills（v0.9，补充文件 11.1），再加 bot.create、bot.archive、bot.delete、bot.profile（v1.0，补充文件 12.1），再加 bot.token_handoff（补充文件 13.8），恰好二十一个键
 CAPABILITIES_TEN = {
     "bot.restart.graceful": False,
     "bot.restart.force": True,
@@ -36,6 +36,7 @@ CAPABILITIES_TEN = {
     "bot.archive": True,
     "bot.delete": True,
     "bot.profile": True,
+    "bot.token_handoff": True,
 }
 
 
@@ -50,7 +51,7 @@ def test_meta_固定取值与十项能力如约(adapter):
     assert isinstance(caps, dict), "capabilities 应是对象：%r" % (caps,)
     missing = sorted(set(CAPABILITIES_TEN) - set(caps))
     extra = sorted(set(caps) - set(CAPABILITIES_TEN))
-    assert not missing and not extra, "能力清单应恰好是约定的二十个键：缺 %r，多 %r" % (missing, extra)
+    assert not missing and not extra, "能力清单应恰好是约定的二十一个键：缺 %r，多 %r" % (missing, extra)
     for key, want in CAPABILITIES_TEN.items():
         assert caps[key] is want, "能力 %s 应为布尔 %r，实际 %r" % (key, want, caps[key])
 
