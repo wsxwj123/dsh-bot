@@ -125,6 +125,11 @@ export function brainKey(b: Brain): string {
   return `${b.provider}/${b.model}/${b.reasoningEffort ?? ''}`
 }
 
+/** 覆盖记录认的配置键：brainKey 再带上管理台选定的时刻（适配服务 13.7）。没有 chosenAt 时与 brainKey 相同，已存的覆盖照旧有效 */
+export function overrideKey(b: Brain): string {
+  return b.chosenAt ? `${brainKey(b)}#${b.chosenAt}` : brainKey(b)
+}
+
 /** 供应商身份：名字；自建的再加 @<epoch>（身份变了就换段，方案 3.2 第 6 条）。身份里不含 / */
 export function identityOf(key: string): string {
   const i = key.indexOf('/')
@@ -1524,7 +1529,7 @@ export class Engine {
     let o: { provider?: string; model?: string; effort?: string; configKey?: string } | null = null
     try { o = JSON.parse(this.ledger.getMeta('brain_override') || 'null') } catch { o = null }
     if (!o || !o.provider || !o.model) return file
-    if (o.configKey !== brainKey(file)) {
+    if (o.configKey !== overrideKey(file)) {
       this.ledger.setMeta('brain_override', '')
       this.log.info('brain.override_cleared', { reason: 'config changed' })
       return file
@@ -1566,8 +1571,8 @@ export class Engine {
     const file = this.configBrain
     const base = c ?? { provider: this.brain.provider, model: this.brain.model }
     const rec = c
-      ? { provider: c.provider, model: c.model, ...(effort ? { effort } : {}), configKey: brainKey(file) }
-      : effort ? { provider: base.provider, model: base.model, effort, configKey: brainKey(file) } : null
+      ? { provider: c.provider, model: c.model, ...(effort ? { effort } : {}), configKey: overrideKey(file) }
+      : effort ? { provider: base.provider, model: base.model, effort, configKey: overrideKey(file) } : null
     // 切到配置文件里那个模型、且不设强度 = 不需要覆盖
     const same = !rec || (base.provider === file.provider && base.model === file.model && !effort)
     this.ledger.setMeta('brain_override', same ? '' : JSON.stringify(rec))
