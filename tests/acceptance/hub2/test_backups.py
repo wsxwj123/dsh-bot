@@ -52,7 +52,7 @@ def test_备份列表_不回显备份内容(api, global_yml):
     assert "user_display_name" not in blob, "§3.4：响应不含备份内容"
 
 
-def test_连续保存6次_save类恰好留5份且最老那份已从磁盘删除(api, global_yml, configs_dir):
+def test_连续保存6次_save类恰好留2份且更老的4份已从磁盘删除(api, global_yml, configs_dir):
     """BRIEF S4 / §3.5 的 S4 断言。"""
     made = []
     for i in range(6):
@@ -60,10 +60,11 @@ def test_连续保存6次_save类恰好留5份且最老那份已从磁盘删除(
         assert code == 200, body
         made.append(body["backup"])
     ids = u.backup_ids(_list(api), kind="save")
-    assert len(ids) == 5, f"轮转没生效：{ids}"
-    assert made[0] not in ids
-    assert not (configs_dir / f"_global.yml.bak.{made[0]}").exists()
-    for kept in made[1:]:
+    assert len(ids) == 2, f"轮转没生效：{ids}"
+    for gone in made[:4]:
+        assert gone not in ids
+        assert not (configs_dir / f"_global.yml.bak.{gone}").exists()
+    for kept in made[4:]:
         assert (configs_dir / f"_global.yml.bak.{kept}").exists()
 
 
@@ -86,8 +87,10 @@ def test_同秒时间戳冲突_追加两位序号且不覆盖既有备份(api, g
     assert code == 200, body
     assert body["backup"] not in planted, "覆盖了同名备份"
     assert re.fullmatch(r"\d{8}-\d{6}-\d{2}", body["backup"]), body["backup"]
-    for ts, content in planted.items():
-        assert (configs_dir / f"_global.yml.bak.{ts}").read_bytes() == content
+    # 只留 2 份：种下的较早那份被轮转删掉；较晚那份必须原样还在，与新的一份一起留下
+    newer = max(planted)
+    assert (configs_dir / f"_global.yml.bak.{newer}").read_bytes() == planted[newer], "覆盖了同名备份"
+    assert sorted(u.backup_ids(_list(api), kind="save")) == sorted([newer, body["backup"]])
 
 
 def test_写盘失败_500且最老的备份没被提前删掉(api, global_yml, configs_dir):
@@ -124,17 +127,19 @@ def test_回滚_文件恢复成备份内容且生成pre_restore类备份(api, gl
     assert u.mode_of(pre) == 0o600
 
 
-def test_回滚_pre_restore不挤占save的5份配额(api, global_yml):
-    """R3-3：连续 restore 5 次后，最初那份 save 备份仍在。"""
+def test_回滚_pre_restore不挤占save的2份配额_自己也只留最近2份(api, global_yml):
+    """R3-3：连续 restore 5 次后，最初那份 save 备份仍在；pre-restore 类自己一个配额，只留最近 2 份。"""
     _, first = _save(api, global_yml, 0.0012)
     oldest = first["backup"]
+    pres = []
     for _ in range(5):
         code, body = api.post(f"/hub/api/params/backups/{oldest}/restore",
                               {"version": u.version_of(global_yml)})
         assert code == 200, body
+        pres.append(body["backup"])
     listing = _list(api)
     assert oldest in u.backup_ids(listing, kind="save"), "最初想回到的那份被挤掉了"
-    assert len(u.backup_ids(listing, kind="restore")) == 5
+    assert sorted(u.backup_ids(listing, kind="restore")) == sorted(pres[3:]), "pre-restore 应只留最近 2 份"
 
 
 def test_回滚_备份id不存在_404_backup_not_found(api, global_yml):
