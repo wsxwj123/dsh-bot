@@ -160,6 +160,8 @@ SKILL_STALE = "技能刚被别处改过，请刷新后再改"
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 #: v1.0（补充文件第 12 节）：新建整条请求的时限与请求体的键；显示名的字数上限；归档与废纸篓的目录名、清单
 CREATE_BUDGET = 55.0
+#: 新建装启动项失败时撤回要的时间：两条 bootout，每条最多一个 launchctl 超时。装启动项要在整条时限减去它之前做完。
+UNDO_RESERVE = 2 * bot_launchd.LAUNCHCTL_TIMEOUT
 CREATE_KEYS = ("bot_id", "telegram_token", "chat_id", "display_name", "persona_text", "persona_template",
                "fish_voice_id", "fish_api_key", "port")
 PROFILE_NAME_MAX = 32
@@ -1795,12 +1797,13 @@ def _create_locked(fields, bots, seams, deadline):
         _log.error("create lay_down failed: %s", type(e).__name__)
         raise Refuse(500, "internal", "写新 bot 的文件失败，已撤回") from None
     try:
-        step = hub_addbot._register_dsh(fields, deadline=deadline) if sys.platform == "darwin" else {}
+        step = hub_addbot._register_dsh(fields, deadline=deadline - UNDO_RESERVE) \
+            if sys.platform == "darwin" else {}
     except Exception:                       # noqa: BLE001
         step = {}
     if step.get("state") != "done":
         _undo_create(bot_id, seams)
-        if step.get("detail") == "timeout" or time.monotonic() >= deadline:
+        if step.get("detail") == "timeout" or time.monotonic() >= deadline - UNDO_RESERVE:
             raise Refuse(503, "unavailable", "装启动项没在时限内做完，已撤回这次写的文件与启动项")
         raise Refuse(503, "unavailable", "装启动项失败，已撤回这次写的文件与启动项")
     return probe.get("username")
