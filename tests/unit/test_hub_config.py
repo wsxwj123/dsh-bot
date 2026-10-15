@@ -187,22 +187,20 @@ def test_备份_同秒连开多份不覆盖且都是600(cfg, tmp_path):
         assert oct(os.stat(p).st_mode)[-3:] == "600"
 
 
-def test_轮转_只留5份save且删的是最老的(cfg, tmp_path):
+def test_轮转_只留2份save且删的是最老的(cfg, tmp_path):
     ids = [hc.make_backup("save", "x") for _ in range(6)]
     hc.rotate_saves()
     left = [b["id"] for b in hc.list_backups() if b["kind"] == "save"]
-    assert len(left) == 5 and ids[0] not in left
-    assert not (tmp_path / (hc.SAVE_PREFIX + ids[0])).exists()
+    assert sorted(left) == ids[4:]
+    assert not any((tmp_path / (hc.SAVE_PREFIX + i)).exists() for i in ids[:4])
 
 
-def test_轮转_restore类不挤占save的配额(cfg, tmp_path):
+def test_轮转_restore类自己留2份_不挤占save的配额(cfg, tmp_path):
     keep = hc.make_backup("save", "要保住的那份")
-    for _ in range(6):
-        hc.make_backup("restore", "x")
-        hc.rotate_saves()
+    ids = [hc.commit("k: %d\n" % i, kind="restore") for i in range(6)]
     listing = hc.list_backups()
     assert keep in [b["id"] for b in listing if b["kind"] == "save"]
-    assert len([b for b in listing if b["kind"] == "restore"]) == 6
+    assert sorted(b["id"] for b in listing if b["kind"] == "restore") == ids[4:]
 
 
 def test_写盘失败时不动备份集合(cfg, tmp_path):
