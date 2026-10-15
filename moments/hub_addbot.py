@@ -841,6 +841,9 @@ def set_enabled(bot_id, enabled):
     """
     from moments import hub_config          # 延迟 import：只有这一个函数要它
     _edit_target(bot_id)                    # 400 / 404 都由放行闸给；归属先于任何文件读写判完
+    if enabled and os.path.lexists(os.path.join(str(config_sources.dsh_bot_dir(bot_id)), ".moved")):
+        # 适配服务 13.2：已迁到另一种底层的 bot 不许从这里启用（标记在就拦，不管内容）；停用照常
+        raise HubError(409, "moved", "这只 bot 已迁到另一种底层，请在管理台用切换底层")
     path = _dsh_yml(bot_id)
     try:
         with open(path, encoding="utf-8") as f:
@@ -884,7 +887,7 @@ def _resolve_bun():
     return cand if os.path.isfile(cand) and os.access(cand, os.X_OK) else None
 
 
-def _register_dsh(fields, deadline=None):
+def _register_dsh(fields, deadline=None, stashed=False):
     """macOS：交给 `gateway/scripts/autostart.ts` 装网关单元与主动消息单元（§6 register）。
 
     两条命令**短路**：install 非 0 即止（install-jobs 不跑）。子进程原始输出（含 launchd
@@ -894,6 +897,8 @@ def _register_dsh(fields, deadline=None):
 
     ``deadline``（``time.monotonic()`` 的时刻）：给了就让每条命令最多跑到那时，到点还没跑的那条
     不再起、按 ``timeout`` 失败（适配服务整条请求 55 秒封顶，补充文件 12.2）；不给照旧每条 60 秒。
+    ``stashed``：两条命令都带 ``--stashed``，启动项文件只写成收起的 ``.plist.disabled``，不装载、不启动
+    （适配服务 13.3 新建时 ``enabled`` 为 false）。
     """
     yml = os.path.join(str(config_sources.dsh_dir()), fields["bot_id"] + ".yml")
     bun = _resolve_bun()
@@ -914,7 +919,8 @@ def _register_dsh(fields, deadline=None):
             if timeout <= 0:
                 return _step("register", "failed", "timeout", manual_hint=hint)
         try:
-            rc = subprocess.run([bun, AUTOSTART_TS, sub, yml], stdin=subprocess.DEVNULL,
+            rc = subprocess.run([bun, AUTOSTART_TS, sub, yml] + (["--stashed"] if stashed else []),
+                                stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 env=env, timeout=timeout).returncode
         except (OSError, subprocess.SubprocessError):
