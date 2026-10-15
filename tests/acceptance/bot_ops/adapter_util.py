@@ -654,7 +654,7 @@ class InjectInbox:
 CAPABILITIES_V08 = dict(CAPABILITIES_V07, **{"bot.persona": True, "bot.voice": True})
 
 #: v0.8 草案 B.2：tts_model 的白名单
-TTS_MODELS = ("s1", "s2-pro", "s2.1-pro", "s2.1-pro-free", "drama-3-preview")
+TTS_MODELS = ("s1", "s2-pro", "s2.1-pro", "s2.1-pro-free", "drama-3")
 PERSONA_SAVED = "已保存，几秒内生效"                 # A.2 成功
 PERSONA_SAME = "没有改动"                            # A.2 和当前全文完全相同
 PERSONA_STALE = "人设刚被别处改过，请刷新后再改"     # A.2 409 stale
