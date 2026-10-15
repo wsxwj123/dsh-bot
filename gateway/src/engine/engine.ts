@@ -31,7 +31,7 @@ import {
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, summaryPrompt,
 } from './format'
-import { formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, type KeyStatus, type ModelChoice, type ProviderView } from './commands'
+import { compactReply, formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, splitReply, summaryReply, type KeyStatus, type ModelChoice, type ProviderView } from './commands'
 import { mergeRoutes, normName, readProviders, ProvidersUnreadable, DEFAULT_CONTEXT, type ProvidersSnapshot, type MergedProviders, type ProviderEntry, type ProviderApi } from '../providers/store'
 
 /**
@@ -74,7 +74,7 @@ function str(v: unknown): string | undefined {
 }
 
 /** 主人能用的命令（/start 等其它命令照样被网关吞掉，不交给模型） */
-const OWNER_COMMANDS = new Set(['clear', 'compact', 'model', 'models', 'provider', 'providers', 'help', 'commands'])
+export const OWNER_COMMANDS = new Set(['clear', 'compact', 'summary', 'model', 'models', 'provider', 'providers', 'help', 'commands'])
 
 /** 预算小的时候，新段开头的原话最多占预算的这个比例（按一个字一个 token 算，宁可少带） */
 const SEED_RECENT_RATIO = 0.1
@@ -1212,7 +1212,7 @@ export class Engine {
    * 换段：先在旧会话里写交接摘要（这一轮工具全锁），写不成就用账本流水单独写一份；
    * 摘要不像样或为空就不存（新段开头沿用上一份）。然后关掉旧会话，下一轮开新会话。
    */
-  async rollSegment(chatId: string, seg: SegmentRow, reason: string, focus?: string, o?: { inSessionMs?: number; skipInSession?: boolean }): Promise<{ how: 'in-session' | 'ledger' | 'none' | 'crashed'; chars: number }> {
+  async rollSegment(chatId: string, seg: SegmentRow, reason: string, focus?: string, o?: { inSessionMs?: number; skipInSession?: boolean }): Promise<{ how: 'in-session' | 'ledger' | 'none' | 'crashed'; chars: number; summary: string | null }> {
     this.log.info('segment.roll_start', { chat: chatId, segment: seg.id, reason, used: seg.used_tokens, budget: this.budgetFor(seg) })
     const got: { summary: string | null; how: 'in-session' | 'ledger' | 'none' } = { summary: null, how: 'none' }
     let crashed = false
@@ -1234,7 +1234,7 @@ export class Engine {
     } else {
       await acquire()
     }
-    if (crashed) return { how: 'crashed', chars: 0 }
+    if (crashed) return { how: 'crashed', chars: 0, summary: null }
     if (got.summary) this.ledger.setSegmentSummary(seg.id, got.summary)
     this.ledger.closeSegment(seg.id, 'closed', reason)
     if (seg.session_id) {
@@ -1244,7 +1244,7 @@ export class Engine {
     const chars = got.summary?.length ?? 0
     this.ledger.event(chatId, 'segment_rolled', { segment: seg.id, reason, summary: got.how, summary_chars: chars, used: seg.used_tokens })
     this.log.info('segment.rolled', { chat: chatId, segment: seg.id, reason, summary: got.how, summary_chars: chars })
-    return { how: got.how, chars }
+    return { how: got.how, chars, summary: got.summary }
   }
 
   private async resumeForSummary(seg: SegmentRow): Promise<void> {
@@ -1348,6 +1348,7 @@ export class Engine {
       switch (cmd.name) {
         case 'clear': text = await this.cmdClear(row.chat_id); break
         case 'compact': text = await this.cmdCompact(row.chat_id, cmd.args); break
+        case 'summary': text = summaryReply(this.ledger.lastSummarySegment(row.chat_id), this.cfg.gw.timezone); break
         case 'model': text = await this.cmdModel(row.chat_id, cmd.args); break
         case 'models': text = await this.cmdModel(row.chat_id, 'list'); break
         case 'provider': case 'providers': text = await this.cmdProvider(row.chat_id, cmd.args); break
@@ -1360,7 +1361,8 @@ export class Engine {
     this.ledger.settleInbound([row.id], 'done', cmd.name)
     this.log.info('command.done', { chat: row.chat_id, name: cmd.name })
     // text 为 null：这个命令自己异步回复（/provider refresh 要立刻让出命令队列，好让「同一家正在刷新」能被接住）
-    if (text !== null) await this.sender.send({ chatId: row.chat_id, turnId: null, callSeq: 0, text, kind: 'system' }).catch(() => {})
+    // 超过 Telegram 单条上限的（/summary、附了摘要的 /compact）按段拆成几条依次发，不截断
+    if (text !== null) for (const part of splitReply(text)) await this.sender.send({ chatId: row.chat_id, turnId: null, callSeq: 0, text: part, kind: 'system' }).catch(() => {})
   }
 
   /** 清空 = 这一段收尾写一份摘要（写不出来或为空就沿用上一份，不覆盖）+ 下一条消息开新段、不再带清空前的原话 */
@@ -1389,9 +1391,7 @@ export class Engine {
     await this.ensureDsh()
     const r = await this.rollSegment(chatId, seg, 'compact', focus || undefined)
     this.log.info('command.compact', { chat: chatId, segment: seg.id, summary: r.how, summary_chars: r.chars, focus: focus.length > 0 })
-    if (r.how === 'crashed') return '【系统】压缩时模型进程出了问题。下一条消息会用聊天记录补写摘要，再开新会话。'
-    if (r.how === 'none') return '【系统】已换新会话，但这次摘要没写成，沿用上一份摘要；最近的原话照常带上。'
-    return `【系统】已把这段对话压缩成一份摘要（${r.chars} 字，压缩前约 ${seg.used_tokens ?? '?'} token）。下一条消息从新会话开始，带着摘要和最近的原话。`
+    return compactReply(r, seg.used_tokens)
   }
 
   private async cmdModel(chatId: string, args: string): Promise<string> {
