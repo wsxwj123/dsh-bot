@@ -29,7 +29,7 @@ from moments.provider_model import HubError
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="假件是 sh 脚本")
 
-RESERVED = ["jiwen", "director", "voicecall", "templates"]
+RESERVED = ["jiwen", "director", "voicecall", "templates", "console"]
 BAD_FILE = "Bad-Name"
 BROKEN = "id: [oops\n  x: : :\n"
 TOKEN = "123456789:test-AAaaBBccDDddEEeeFFggHHhh11"
