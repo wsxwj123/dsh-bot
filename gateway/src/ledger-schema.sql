@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS commitments (
   inbound_id INTEGER,
   created_at INTEGER NOT NULL,
   closed_at INTEGER,
-  note TEXT
+  note TEXT,
+  repeat_rule TEXT
 );
 CREATE INDEX IF NOT EXISTS commitments_due ON commitments(state, next_at);
