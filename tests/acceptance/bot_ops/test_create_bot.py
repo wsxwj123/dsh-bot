@@ -164,7 +164,7 @@ def test_新建_同名配置已存在_409_bot_exists且不覆盖(client, sandbox
     assert cfg.read_text(encoding="utf-8") == before, "既有配置被改"
 
 
-@pytest.mark.parametrize("reserved", ["jiwen", "director", "voicecall"])
+@pytest.mark.parametrize("reserved", ["jiwen", "director", "voicecall", "console"])
 def test_新建_保留单元名_409_bot_exists且detail点明被新系统占用(
         client, sandbox, telegram, reserved):
     r = _post(client, u.free_port(), bot_id=reserved)
