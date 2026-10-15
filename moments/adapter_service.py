@@ -141,9 +141,9 @@ TTS_MODELS = ("s1", "s2-pro", "s2.1-pro", "s2.1-pro-free", "drama-3")
 #: 接口里的键 → access.json 里的键（v0.8 草案 B 两个，11.3 加两个语言键）；先后就是回应里的先后
 VOICE_KEYS = (("voice_id", "voiceId"), ("tts_model", "voiceModel"),
               ("text_language", "textLanguage"), ("voice_language", "voiceLanguage"))
-#: 11.3：语言名去掉首尾空白后的字符数上限，与整个值里不许出现的字符
+#: 11.3：语言名去掉首尾空白后的字符数上限，与整个值里不许出现的字符（换行与 ``str.splitlines`` 同一个口径）
 LANGUAGE_MAX = 20
-LANGUAGE_BAD_RE = re.compile(r"[\r\n\[\]<>{}`|]")
+LANGUAGE_BAD_RE = re.compile(r"[\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029\[\]<>{}`|]")
 #: 11.2：通用技能名表；文件是 <频道目录>/skills/skill-<通用名>/SKILL.md
 SKILL_NAMES = ("image", "voice", "group", "moments", "proactive", "nsfw", "gif")
 SKILL_STALE = "技能刚被别处改过，请刷新后再改"
@@ -1348,7 +1348,7 @@ def _save_text(bot_id, path, text, version, what, stale, backup, missing=None):
 
     文件不在且给了 ``missing``：抛它，不新建 → 比版本号（409，``stale`` 是那句提示）→ 全文没变就不写 →
     原文备份（``backup`` = 备份子目录、文件名后缀、轮换只认的名字）→ 原子写、保持原权限（原来没有就 0600）→
-    写盘成功之后备份只留 5 份。写盘的就是 ``text`` 的 UTF-8 原样，去首尾空白只用来判断是不是空。
+    写盘成功之后备份只留 2 份。写盘的就是 ``text`` 的 UTF-8 原样，去首尾空白只用来判断是不是空。
     """
     kind, suffix, name_re = backup
     data = text.encode("utf-8")
@@ -1377,7 +1377,7 @@ def _persona_put(bot_id):
     """改人设（v0.8 草案 A.2，补充文件 10.2、10.6）。停用的 bot 也能改；不重启（网关自己盯着这个文件）。
 
     先后：请求体（422）→ 名单（404）→ 落点（500）→ 锁里比版本号（409）→ 全文没变就不写 → 原文备份到
-    ``<DSH_BOT_HOME>/backups/persona/<bot_id>/`` → 原子写、保持原权限（原来没有就 0600）→ 备份只留 5 份。
+    ``<DSH_BOT_HOME>/backups/persona/<bot_id>/`` → 原子写、保持原权限（原来没有就 0600）→ 备份只留 2 份。
     """
     text, version = _text_body()
     path = _persona_path(_require_bot(bot_id))
@@ -1421,7 +1421,7 @@ def _skill_put(bot_id, name):
 
     先后：技能名（422）→ 请求体（422）→ 名单（404）→ 落点与软链（500）→ 锁里看文件在不在（404）→ 版本号（409）。
     备份放 ``<DSH_BOT_HOME>/backups/skills/<bot_id>/``，名字是时间加通用名（如 ``20261015-084153.image.md``），
-    轮换只数同一个通用名的，所以每个技能各留最近 5 份。
+    轮换只数同一个通用名的，所以每个技能各留最近 2 份。
     """
     _skill_name(name)
     text, version = _text_body()
