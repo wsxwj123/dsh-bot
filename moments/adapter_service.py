@@ -135,7 +135,7 @@ PERSONA_SAME = "没有改动"
 PERSONA_STALE = "人设刚被别处改过，请刷新后再改"
 VOICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
 #: 白名单与语音桥那边一致，有增减时两边一起改（v0.8 草案 B.2）
-TTS_MODELS = ("s1", "s2-pro", "s2.1-pro", "s2.1-pro-free", "drama-3-preview")
+TTS_MODELS = ("s1", "s2-pro", "s2.1-pro", "s2.1-pro-free", "drama-3")
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 #: 配置文件没写 brain 时网关自己用的默认值（gateway/src/config.ts 的 parseBrain）。
