@@ -1361,8 +1361,9 @@ export class Engine {
     this.ledger.settleInbound([row.id], 'done', cmd.name)
     this.log.info('command.done', { chat: row.chat_id, name: cmd.name })
     // text 为 null：这个命令自己异步回复（/provider refresh 要立刻让出命令队列，好让「同一家正在刷新」能被接住）
-    // 超过 Telegram 单条上限的（/summary、附了摘要的 /compact）按段拆成几条依次发，不截断
-    if (text !== null) for (const part of splitReply(text)) await this.sender.send({ chatId: row.chat_id, turnId: null, callSeq: 0, text: part, kind: 'system' }).catch(() => {})
+    // /summary、附了摘要的 /compact：那句话与摘要原文放在同一条里（不按空行拆段），超过 Telegram 单条上限才按段拆成几条依次发，不截断
+    const keepParagraphs = cmd.name === 'compact' || cmd.name === 'summary'
+    if (text !== null) for (const part of splitReply(text)) await this.sender.send({ chatId: row.chat_id, turnId: null, callSeq: 0, text: part, kind: 'system', keepParagraphs }).catch(() => {})
   }
 
   /** 清空 = 这一段收尾写一份摘要（写不出来或为空就沿用上一份，不覆盖）+ 下一条消息开新段、不再带清空前的原话 */
