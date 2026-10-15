@@ -16,9 +16,10 @@ test('语言一节按 access.json 现填：文字语言缺省简体中文、语�
   expect(runtimeRules({ text: '  English ' })).toContain('文字语言是English，语音语言是English。')
   expect(runtimeRules({ voice: '日文' })).toContain('文字语言是简体中文，语音语言是日文。')
   expect(runtimeRules({ text: '日[文', voice: 42 })).toBe(dflt)
-  for (const s of ['text 与 voice_text 都要写', '不加语气标签', '方括号语气指令', '8 字以内', '去掉不适合朗读的符号与表情', '内心独白段在 voice_text 对应位置写空字符串']) {
+  for (const s of ['text 与 voice_text 都要写', '不加语气标签', '方括号语气指令', '8 字以内', '去掉不适合朗读的符号与表情', '段数与 text 一致']) {
     expect(dflt).toContain(s)
   }
+  expect(dflt).not.toContain('内心独白段')   // 用户过目后删掉：dsh 按空行分段，写空段会错位
   const rows = buildPatchRows({ ...input(), languages: { voice: '日文' } }) as any[]
   expect(rows.find(r => r.id === 'system-prompt').config.personaSuffix).toContain('语音语言是日文')
 })
