@@ -30,6 +30,12 @@ def launch_default(key, channel_dir):
     return True
 
 
+#: 写成字符串的真假（带引号的 yes/no/on/off/true/false）：PyYAML 把不带引号的这几个词认成真假，网关的 Bun.YAML
+#: 只认 true/false、别的读成字符串；两边都按这张表认，管理台、定时任务和网关看到的开关才一致
+WORD_BOOL = dict([(w, True) for w in ("yes", "Yes", "YES", "on", "On", "ON", "true", "True", "TRUE")]
+                 + [(w, False) for w in ("no", "No", "NO", "off", "Off", "OFF", "false", "False", "FALSE")])
+
+
 def read(cfg, channel_dir):
     """→ ``(九个键的布尔值, 警告列表)``。存储里不是真假的值按关，并在警告里说一句。"""
     block = cfg.get("features") if isinstance(cfg, dict) else None
@@ -41,8 +47,9 @@ def read(cfg, channel_dir):
     for key, _ in KEYS:
         if block is not None and key in block:
             value = block[key]
-            out[key] = value if type(value) is bool else False
-            if type(value) is not bool:
+            value = value if type(value) is bool else WORD_BOOL.get(value) if isinstance(value, str) else None
+            out[key] = value is True
+            if value is None:
                 warnings.append("features.%s 的值不是真或假，按关处理" % key)
         else:
             out[key] = launch_default(key, channel_dir)
