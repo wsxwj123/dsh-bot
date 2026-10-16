@@ -83,10 +83,14 @@ export type GatewayOpts = {
   lastUserDir: string
   /** 语音服务（仓库里的 voice-bridge）地址，只用本机 */
   voiceBridgeUrl: string
-  /** 生图：novelai | comfyui | off */
+  /** 生图：novelai | comfyui | off。设了 global_cfg 时引擎按共用开关，novelai、comfyui 只在开关读不到时兜底；off 始终不生图 */
   imageProvider: string
-  /** 生图技能目录（SKILL.md 是写法说明）；默认仓库里的 skills/<provider>-skill */
+  /** NovelAI 的生图技能目录（SKILL.md 是写法说明）；默认仓库里的 skills/novelai-skill */
   imageSkillDir?: string
+  /** ComfyUI 的生图技能目录（共用的 comfyui-skill，约定 v1.1 5.21）；默认仓库里的 skills/comfyui-skill */
+  comfyuiSkillDir?: string
+  /** 壳的全局配置文件（生图引擎的共用开关在里面，约定 v1.1 5.21）；不设就只看 image_provider */
+  globalCfg?: string
   /** 生图结果所在目录（允许 reply 发出去），默认 ~/resource/media */
   imageDirs: string[]
   /** 朋友圈数据库；不设就用仓库里的 state.db */
@@ -244,6 +248,8 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     voiceBridgeUrl: str(g.voice_bridge_url, 'http://127.0.0.1:7788'),
     imageProvider: str(g.image_provider, 'novelai'),
     imageSkillDir: typeof g.image_skill_dir === 'string' && g.image_skill_dir ? g.image_skill_dir : undefined,
+    comfyuiSkillDir: typeof g.comfyui_skill_dir === 'string' && g.comfyui_skill_dir ? g.comfyui_skill_dir : undefined,
+    globalCfg: typeof g.global_cfg === 'string' && g.global_cfg ? g.global_cfg : undefined,
     imageDirs: Array.isArray(g.image_dirs) ? g.image_dirs.map(String) : ['~/resource/media'],
     botlifeDb: typeof g.botlife_db === 'string' && g.botlife_db ? g.botlife_db : undefined,
     situationTtlMs: num(g.situation_ttl_ms, 5 * 60_000, 'gateway.situation_ttl_ms'),
