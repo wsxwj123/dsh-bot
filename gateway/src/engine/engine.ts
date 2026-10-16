@@ -600,8 +600,10 @@ export class Engine {
   }
 
   /**
-   * 对方发来消息的这一轮，附带几行"生活状态"（旧系统每条私聊都带，这里只在变化时或新会话开头带，省 token）：
-   * 关系数值的提示（relationship.json 的 prompt_snippet）、她此刻在干什么、被晾之后迟到的反应（带完即清）。
+   * 对方发来消息的这一轮，附带几行"生活状态"：关系数值的提示（relationship.json 的 prompt_snippet）、
+   * 她此刻在干什么、被晾之后迟到的反应（带完即清）。
+   * 私聊每条都带前两行，与 claude 大脑（dispatcher/worker-manager.ts 给真人私聊加的前缀）一致；
+   * 群里照旧只在新会话开头和内容变了时带。
    */
   /** 私聊时附带"群里近况"（M5）：这个 bot 在的群里，上次带过之后又有人说话了，就带最近几句（最多 8 句，只看 12 小时内）。
    *  会话按聊天分开（群里的话不进私聊会话），只靠这一小段让它接得上话 */
@@ -621,15 +623,16 @@ export class Engine {
 
   private lifeLines(chatId: string, segmentId: number, fresh: boolean): string[] {
     const out: string[] = []
+    const every = !isGroupChat(chatId)
     try {
       const snippet = JSON.parse(readFileSync(join(this.cfg.channelDir, 'relationship.json'), 'utf8'))?.prompt_snippet
       if (typeof snippet === 'string' && snippet.trim()) {
         const k = `rel_seen:${segmentId}`
-        if (fresh || this.ledger.getMeta(k) !== snippet) { out.push(`⟦关系状态⟧ ${snippet.trim()}`); this.ledger.setMeta(k, snippet) }
+        if (every || fresh || this.ledger.getMeta(k) !== snippet) { out.push(`⟦关系状态⟧ ${snippet.trim()}`); this.ledger.setMeta(k, snippet) }
       }
     } catch {}
     const situ = situLine(this.situation.current())
-    if (situ && (fresh || this.ledger.getMeta(`situ_seen:${chatId}`) !== situ)) { out.push(situ); this.ledger.setMeta(`situ_seen:${chatId}`, situ) }
+    if (situ && (every || fresh || this.ledger.getMeta(`situ_seen:${chatId}`) !== situ)) { out.push(situ); this.ledger.setMeta(`situ_seen:${chatId}`, situ) }
     const late = takeHangArchive(this.cfg.stateDir, chatId)
     if (late) out.push(hangText(late))
     if (out.length) this.log.info('life.lines', { chat: chatId, relationship: out.some(l => l.startsWith('⟦关系状态')), situation: !!situ && out.includes(situ), late: !!late })
