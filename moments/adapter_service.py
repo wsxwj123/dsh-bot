@@ -1389,46 +1389,91 @@ def _features_get(bot_id):
 
 
 def _features_text(text, changes):
-    """把 ``changes`` 写进 yml 的 features 块：块在就逐键改（行级编辑器，别的字节不动）；块不在就新加一个。"""
+    """把 ``changes`` 写进 yml 的 features 块：块里有键就逐键改（行级编辑器，别的字节不动）；块不在就新加一个；
+    写成空的（``features:``、``{}``、``null``）当没有这一块，把那个空值换成新写的一组开关。别的写法拒绝，不猜。"""
     from moments import hub_config         # 延迟 import：同 _write_enabled
     lit = {k: "true" if v else "false" for k, v in changes.items()}
+    flow = "{%s}" % ", ".join('"%s": %s' % kv for kv in lit.items())
     root = hub_config.compose(text)
     block = hub_config.find(root, ["features"])
     if isinstance(block, yaml.MappingNode) and block.value:
         for key, value in changes.items():
             text = hub_config.set_scalar(text, hub_config.compose(text), "features." + key, value, "bool")
         return text
+    if isinstance(block, yaml.MappingNode) or (isinstance(block, yaml.ScalarNode) and block.tag == "tag:yaml.org,2002:null"):
+        at, end = block.start_mark.index, block.end_mark.index
+        return text[:at] + (" " if at == end else "") + flow + text[end:]
     if block is not None:
-        raise HubError(500, "bad_features", "配置里的 features 写法认不出来")
+        raise Refuse(500, "internal", "这只 bot 配置里的 features 写法不对（应是一组开关），请先修好配置再改")
     if isinstance(root, yaml.MappingNode) and root.flow_style and root.value:
         at = root.value[0][0].start_mark.index      # 整份是 JSON 的配置：插在第一个键前面
-        return text[:at] + '"features": {%s}, ' % ", ".join('"%s": %s' % kv for kv in lit.items()) + text[at:]
+        return text[:at] + '"features": %s, ' % flow + text[at:]
     lines = "".join("  %s: %s\n" % kv for kv in lit.items())
     return text + ("\n" if text and not text.endswith("\n") else "") + "features:\n" + lines
 
 
-def _follow_skill(bot, generic, on):
-    """技能跟着开关走（约定 v1.1 5.17）：关掉在技能头部写上 disable-model-invocation: true，打开去掉；
-    文件保留、正文一字不动。打开时技能文件不在，按仓库模板放上（成人内容取这只 bot 人设里的例句）；
-    yml 写了 skills_manual: true 的 bot 技能由人手管，不自动放、不重新生成，但停用与恢复照做。
-    落点不对、是软链的不碰（同 5.17 读写）；没有头部的动不了，也不碰。"""
-    from moments import hub_config         # 延迟 import：同 _write_enabled
+def _skill_change(bot, generic, on, place, warnings):
+    """技能跟着开关走（约定 v1.1 5.17）：算出这个技能要怎么改 → ``(路径, 原文, 新全文)``，新放的原文为 None；不用改回 None。
+
+    关掉在技能头部写上 disable-model-invocation: true，打开去掉；文件保留、正文一字不动。``place`` 为真（这次
+    刚打开）且技能文件不在，按仓库模板放上（成人内容取这只 bot 人设里的例句）；yml 写了 skills_manual: true 的
+    bot 技能由人手管，不自动放，但停用与恢复照做。落点不对、是软链（同 5.17 读写）、读不出、没有头部的不碰，
+    在 ``warnings`` 里说一句，不悄悄跳过。模板读不出整次失败。"""
+    name = "skill-" + generic
     try:
         path = _skill_path(bot, generic)
     except Refuse:
-        return
+        warnings.append("%s 不在这只 bot 自己的目录里或者是软链，没有跟着开关改" % name)
+        return None
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
     except FileNotFoundError:
-        if on and bot["cfg"].get("skills_manual") is not True:
-            _place_skill(path, skill_templates.render(generic, persona=_persona_text(bot)))
-        return
+        if not (on and place and bot["cfg"].get("skills_manual") is not True):
+            return None
+        try:
+            return path, None, skill_templates.render(generic, persona=_persona_text(bot))
+        except (OSError, ValueError):
+            raise Refuse(500, "internal", "%s 的模板读不出来，开关没有改" % name) from None
     except (OSError, ValueError):
-        return
+        warnings.append("%s 读不出来，没有跟着开关改" % name)
+        return None
     new_text = feature_switch.set_skill_disabled(text, disabled=not on)
-    if new_text is not None and new_text != text:
-        hub_config.atomic_write(new_text, path)
+    if new_text is None:
+        warnings.append("%s 开头没有技能头部，没有跟着开关改" % name)
+        return None
+    return None if new_text == text else (path, text, new_text)
+
+
+def _write_skills(plans):
+    """按 ``_skill_change`` 算好的内容逐个写技能；中途出错把已经写了的还原再往上抛。返回写了的 ``(路径, 原文)``。"""
+    from moments import hub_config         # 延迟 import：同 _write_enabled
+    done = []
+    try:
+        for path, old, new in plans:
+            if old is None:
+                _place_skill(path, new)
+            else:
+                hub_config.atomic_write(new, path)
+            done.append((path, old))
+    except BaseException:
+        _undo_skills(done)
+        raise
+    return done
+
+
+def _undo_skills(done):
+    """把 ``_write_skills`` 写了的还原：改过的写回原文，新放的连同它的目录拿掉。还原失败只记日志。"""
+    from moments import hub_config         # 延迟 import：同 _write_enabled
+    for path, old in reversed(done):
+        try:
+            if old is None:
+                os.unlink(path)
+                os.rmdir(os.path.dirname(path))
+            else:
+                hub_config.atomic_write(old, path)
+        except (OSError, HubError) as e:
+            _log.error("skill rollback failed: %s", type(e).__name__)
 
 
 def _persona_text(bot):
@@ -1441,16 +1486,30 @@ def _persona_text(bot):
 
 
 def _place_skill(path, text):
-    """按模板放一个技能：建好 skill-<通用名> 目录，原子写，权限 0644（同手放的那几个）。"""
+    """按模板放一个技能：建好 skill-<通用名> 目录，原子写，权限 0600（nsfw 技能里有从人设抄来的成人例句，同 _save_text）。"""
     from moments import hub_config         # 延迟 import：同 _write_enabled
     os.makedirs(os.path.dirname(path), exist_ok=True)
     hub_config.atomic_write(text, path)
-    os.chmod(path, 0o644)
+    os.chmod(path, 0o600)
+
+
+def _running_now(bot):
+    """这只 bot 现在在不在跑（改开关的回话用）。查不出回 None、只记日志：开关已经存好，不能因为这一步回 500。"""
+    if not bot["enabled"]:
+        return False
+    try:
+        return bot_launchd.row_state(bot["id"], bot_launchd.resolve_seams())[0] in ("online", "starting")
+    except Exception as e:                  # noqa: BLE001
+        _log.error("row_state failed: %s", type(e).__name__)
+        return None
 
 
 def _features_put(bot_id):
     """改功能开关（约定 5.19.3）：只改给了的键；打开缺必需项回 422 requirement_missing；锁被占 409 busy。
-    改了的开关等这只 bot 空闲时换新会话生效（5.19.5）：网关盯着自己的 yml，见 features 变了就排一次空闲重载。"""
+    改了的开关等这只 bot 空闲时换新会话生效（5.19.5）：网关盯着自己的 yml，见 features 变了就排一次空闲重载。
+
+    技能跟着开关走（5.17）：请求里给的每个键都把技能对齐一次（不只变了的），上次没跟上的这次补齐。先在锁里把
+    技能和 yml 的新内容都算好，算不出整次失败、一个字不写；再先写技能、最后写 yml，yml 写不进去就把技能还原。"""
     from moments import hub_config         # 延迟 import：同 _write_enabled
     body = _json_object()
     want = body.get("features")
@@ -1474,6 +1533,7 @@ def _features_put(bot_id):
             if missing:
                 raise Refuse(422, "requirement_missing", "打不开：缺少必需的设置", fields=missing)
             changed = [k for k, _label in feature_switch.KEYS if k in want and want[k] != current[k]]
+            new_text = None
             if changed:
                 with open(path, encoding="utf-8") as f:
                     text = f.read()
@@ -1481,24 +1541,36 @@ def _features_put(bot_id):
                 got = (yaml.safe_load(new_text) or {}).get("features") or {}
                 if any(got.get(k) is not want[k] for k in changed):
                     raise Refuse(500, "internal", "开关写进配置之后读不回来，配置没有改")
-                hub_config.atomic_write(new_text, path)
-                for key in changed:              # 技能跟着开关走（5.17）
-                    if key in feature_switch.SKILL_OF:
-                        _follow_skill(bot, feature_switch.SKILL_OF[key], on=want[key])
+            warnings = []
+            plans = [p for p in (_skill_change(bot, feature_switch.SKILL_OF[k], want[k], k in changed, warnings)
+                                 for k, _label in feature_switch.KEYS if k in want and k in feature_switch.SKILL_OF) if p]
+            written = _write_skills(plans)
+            if new_text is not None:
+                try:
+                    hub_config.atomic_write(new_text, path)
+                except BaseException:
+                    _undo_skills(written)
+                    raise
     except HubError as e:
         raise _config_failure(e, "这只 bot 的配置") from None
     except yaml.YAMLError:
         raise Refuse(500, "internal", "这只 bot 的配置读不出来，没有改") from None
+    except OSError as e:
+        _log.error("features put failed: %s", type(e).__name__)
+        raise Refuse(500, "internal", "写技能文件或配置失败，开关没有改") from None
     after = dict(current, **{k: want[k] for k in changed})
-    running = bot["enabled"] and bot_launchd.row_state(bot_id, bot_launchd.resolve_seams())[0] in ("online", "starting")
-    if not changed:
+    wrote = bool(changed or written)
+    running = _running_now(bot) if wrote else False
+    if not wrote:
         message = "开关本来就是这样，没有改动。"
     elif running:
         message = "已保存。这只 bot 空闲时换新会话后生效，不打断正在回的话。"
+    elif running is None:
+        message = "已保存。这只 bot 空闲时或下次启动时生效。"
     else:
         message = "已保存。这只 bot 现在没在跑，下次启动时生效。"
     return {"ok": True, "message": message, "features": after, "changed": changed,
-            "applied": not changed, "queued": bool(changed) and running}
+            "applied": not wrote, "queued": wrote and running is True, "warnings": warnings}
 
 
 # ---------------------------------------------------------------- v1.1 刚发现的群（约定 5.20）
