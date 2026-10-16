@@ -19,7 +19,8 @@ from . import adapter_util as au
 from .adapter_util import adapter, console_guard  # noqa: F401  夹具
 
 NEW = "botnew"
-CREATE_KEYS = {"ok", "bot_id", "person", "username", "enabled", "running"}   # 约定 v1.0 5.18.1 加了 enabled
+CREATE_KEYS = {"ok", "bot_id", "person", "username", "enabled", "running",   # 约定 v1.0 5.18.1 加了 enabled
+               "features", "skills", "features_skipped"}                     # v1.1 5.18.1 多带的三个键
 
 
 def good_body(**over):
@@ -58,7 +59,7 @@ def test_新建_成功_回六个键_文件落在本系统_装了启动项_密钥
         body["port"] = want_port
     resp = adapter.call("POST", au.BOTS, body)
     got = adapter.ok(resp)
-    assert set(got) == CREATE_KEYS, "成功应恰好回 ok、bot_id、person、username、enabled、running：%r" % (got,)
+    assert set(got) == CREATE_KEYS, "成功应恰好回 ok、bot_id、person、username、enabled、running 与 v1.1 的三个键：%r" % (got,)
     assert (got["bot_id"], got["person"], got["username"]) == (NEW, NEW, "my_bot"), got
     assert got["enabled"] is True, "不给 enabled 时缺省为 true：%r" % (got,)
     assert got["running"] is True, "假 launchctl 说在跑，running 应为 true：%r" % (got,)
