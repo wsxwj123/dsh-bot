@@ -89,6 +89,18 @@ def test_网关不在跑_两项能力为null_照样列记录(adapter):
     assert [r["chat_id"] for r in body["groups"]] == [NEW_A] and body["groups"][0]["sees_all"] is True, body
 
 
+def test_停用的bot_不去问网关_两项能力为null_照样列记录(adapter):
+    gw = serve_caps(adapter.model_gateway(), True, True)
+    bot = adapter.running_bot("botalpha", gw)
+    au.set_cfg(bot, enabled=False)
+    au.write_access(bot, {"allowFrom": [au.CHAT_ID]})
+    write_seen(bot, {NEW_A: seen("2026-10-16T07:00:00Z")})
+    body = adapter.ok(adapter.call("GET", discovered_url("botalpha")))
+    assert body["can_read_all"] is None and body["can_join_groups"] is None, body
+    assert [r["chat_id"] for r in body["groups"]] == [NEW_A], body
+    assert not [r for r in gw.requests if au.GW_HEALTH in str(r)], gw.requests
+
+
 @pytest.mark.parametrize("content", [None, "{坏的", "[]"], ids=["没有记录文件", "文件坏了", "不是对象"])
 def test_没有记录或记录坏了_回空列表(adapter, alpha, content):
     if content is not None:
@@ -126,3 +138,9 @@ def test_没有这只bot回404_能力键报true_只许GET(adapter, alpha):
     assert meta["capabilities"].get("bot.groups_discovered") is True, meta
     resp = adapter.call("POST", discovered_url("botalpha"), {})
     assert resp.status_code == 405, resp.status_code
+
+
+def test_记退群时间失败_退群照样生效_不回500(adapter, alpha):
+    (alpha.botdir / "state" / "groups-console-left.json").mkdir(parents=True)
+    adapter.ok(adapter.call("POST", au.groups_url("botalpha"), {"chat_id": JOINED, "join": False}))
+    assert JOINED not in (au.read_access(alpha).get("groups") or {})
