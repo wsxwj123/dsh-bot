@@ -190,3 +190,32 @@ def test_群聊关着_group_turn回409_feature_off(adapter, ready):
     resp = notify(adapter, "group_turn", chat_id=group)
     adapter.expect_error(resp, 409, "feature_off")
     assert "群聊" in au.body_of(resp)["message"]
+
+
+# ---------------------------------------------------------------- 技能跟着开关走（5.17）
+
+GIF = "---\nname: skill-gif\ndescription: 表情包\n---\n\n正文第一行\n"
+
+
+def test_PUT_技能跟着开关走_关掉在头部写上停用一行_打开去掉_正文不动_停用的照样读得到(adapter, ready):
+    au.put_file(au.skill_path(ready, "gif"), GIF)
+    adapter.ok(put(adapter, "botalpha", {"stickers": False}))
+    off = au.skill_path(ready, "gif").read_text(encoding="utf-8")
+    assert off == "---\nname: skill-gif\ndescription: 表情包\ndisable-model-invocation: true\n---\n\n正文第一行\n", off
+    assert adapter.ok(adapter.call("GET", au.skill_url("botalpha", "gif")))["text"] == off
+    adapter.ok(put(adapter, "botalpha", {"stickers": True}))
+    assert au.skill_path(ready, "gif").read_text(encoding="utf-8") == GIF
+
+
+def test_PUT_没有那个技能文件_照样改开关_不新建(adapter, ready):
+    au.set_cfg(ready, skills_manual=True)
+    adapter.ok(put(adapter, "botalpha", {"moments": False}))
+    adapter.ok(put(adapter, "botalpha", {"moments": True}))
+    assert not au.skill_path(ready, "moments").exists()
+
+
+def test_PUT_成人内容只管技能(adapter, ready):
+    au.put_file(au.skill_path(ready, "nsfw"), "---\nname: skill-nsfw\ndescription: x\n---\n正文\n")
+    body = adapter.ok(put(adapter, "botalpha", {"nsfw": False}))
+    assert body["changed"] == ["nsfw"], body
+    assert "disable-model-invocation: true" in au.skill_path(ready, "nsfw").read_text(encoding="utf-8")
