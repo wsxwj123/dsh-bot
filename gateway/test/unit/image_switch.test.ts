@@ -1,5 +1,5 @@
 // 生图引擎的共用开关（约定 v1.1 5.21）：管理台切一次，两边的 bot 都跟着换。
-// 网关每次生图前读壳的全局配置文件；ComfyUI 调共用的 comfyui-skill 脚本；ComfyUI 出不了图时这一张改用 NovelAI。
+// 网关每次生图前读壳的全局配置文件；ComfyUI 调共用的 comfyui-skill 脚本；出不了图不换引擎（用户 2026-10-16 定）。
 import { expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -65,7 +65,7 @@ test('配置：gateway.global_cfg、gateway.comfyui_skill_dir 读进来；不写
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-// ─── 生图动作：按生效的引擎走；ComfyUI 出不了图时改用 NovelAI ───
+// ─── 生图动作：按生效的引擎走 ───
 
 type Call = { argv: string[]; extra: Record<string, string | undefined> }
 
@@ -126,40 +126,40 @@ test('ComfyUI：调共用技能目录里的脚本，带 --global（开关所在�
   } finally { s.cleanup() }
 })
 
-test('ComfyUI 出不了图：告诉模型这一张改用 NovelAI 重画（engine 填 novelai），并在回复里提一句', async () => {
+test('出不了图不换引擎（用户 2026-10-16 定）：ComfyUI 没画出来也回原来那句"这次没生成出来"，不去调 NovelAI；失败原因只进日志', async () => {
   const s = setup('comfyui', true)
   try {
+    const fail = '这次没生成出来（生图服务出错）。可以和对方说一声，或者稍后再试。'
     const r = await s.actions.generateImage('42', { prompt: '1girl, selfie' })
     expect(r.isError).toBe(true)
-    expect(r.text).toContain('ComfyUI 没画出来')
-    expect(r.text).toContain('engine 填 novelai')
-    expect(r.text).not.toContain('127.0.0.1')                 // 失败原因只进日志，不给模型
-    const m = await s.actions.generateImage('42', { images: [{ prompt: 'a' }, { prompt: 'b' }] })
-    expect(m.text).toContain('engine 填 novelai')
+    expect(r.text).toBe(fail)
+    expect((await s.actions.generateImage('42', { images: [{ prompt: 'a' }, { prompt: 'b' }] })).text).toBe(fail)
+    expect(s.py.calls.length).toBe(3)
+    expect(s.py.calls.every(c => c.argv[0]!.endsWith('comfyui_gen.py'))).toBe(true)
   } finally { s.cleanup() }
 })
 
-test('engine 填 novelai：开关是 ComfyUI 时这一张也走 NovelAI；写法说明给 NovelAI 的', async () => {
-  const s = setup('comfyui', true)
+test('引擎只看开关：ComfyUI 时写法说明与脚本都是 ComfyUI 的（模型多给 engine 也不理）；NovelAI 时都是 NovelAI 的', async () => {
+  const c = setup('comfyui')
   try {
-    expect(s.actions.imageGuide({ engine: 'novelai' }).text).toContain('# NovelAI 写法')
-    expect(s.actions.imageGuide({}).text).toContain('# ComfyUI 写法')
-    const bad = await s.actions.generateImage('42', { engine: 'novelai', prompt: '1girl' })
-    expect(bad.isError).toBe(true)
-    expect(bad.text).toContain('engine 填 novelai')
-    const r = await s.actions.generateImage('42', { engine: 'novelai', intermediate: { prompt: 'x' } })
-    expect(r.isError).toBeFalsy()
-    const a = s.py.calls.at(-1)!.argv
-    expect(a[0]).toBe(join(s.novel, 'scripts', 'generate_novelai_image.py'))
-    expect(s.py.calls.at(-1)!.extra.NOVELAI_SKILL_ROOT).toBe(s.novel)
-  } finally { s.cleanup() }
+    expect(c.actions.imageGuide().text).toContain('# ComfyUI 写法')
+    expect((await c.actions.generateImage('42', { engine: 'novelai', prompt: '1girl' })).isError).toBeFalsy()
+    expect(c.py.calls.at(-1)!.argv[0]).toBe(join(c.comfy, 'scripts', 'comfyui_gen.py'))
+  } finally { c.cleanup() }
+  const n = setup('novelai')
+  try {
+    expect(n.actions.imageGuide().text).toContain('# NovelAI 写法')
+    expect((await n.actions.generateImage('42', { intermediate: { prompt: 'x' } })).isError).toBeFalsy()
+    expect(n.py.calls.at(-1)!.argv[0]).toBe(join(n.novel, 'scripts', 'generate_novelai_image.py'))
+    expect(n.py.calls.at(-1)!.extra.NOVELAI_SKILL_ROOT).toBe(n.novel)
+  } finally { n.cleanup() }
 })
 
-test('本 bot 没开生图（off）：engine 填 novelai 也不生图', async () => {
+test('本 bot 没开生图（off）：开关怎么切都不生图', async () => {
   const s = setup('off')
   try {
-    expect((await s.actions.generateImage('42', { engine: 'novelai', intermediate: { prompt: 'x' } })).isError).toBe(true)
-    expect(s.actions.imageGuide({ engine: 'novelai' }).isError).toBe(true)
+    expect((await s.actions.generateImage('42', { intermediate: { prompt: 'x' } })).isError).toBe(true)
+    expect(s.actions.imageGuide().isError).toBe(true)
     expect(s.py.calls).toHaveLength(0)
   } finally { s.cleanup() }
 })
