@@ -852,6 +852,8 @@ def stuck_running(adapter, monkeypatch, bot_id):
 
 #: 13.8：第 12 节的二十个键，加 bot.token_handoff，报 true，共二十一个键
 CAPABILITIES_V10S = dict(CAPABILITIES_V10, **{"bot.token_handoff": True})
+#: v1.1：刚发现的群（约定 5.20）
+CAPABILITIES_V11 = dict(CAPABILITIES_V10S, **{"bot.groups_discovered": True})
 #: 13.1：bots() 每一行新加的四个只读键
 ROW_KEYS_V10S = {"enabled", "polling", "username", "moved_to"}
 #: 13.6：op_id 的五种种类
