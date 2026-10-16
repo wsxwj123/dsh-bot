@@ -11,7 +11,8 @@ import time
 import secrets
 import subprocess
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
+import re
+from urllib.parse import urlsplit, urlunsplit
 from flask import Flask, render_template, send_from_directory, request, jsonify, current_app, redirect
 from werkzeug.exceptions import HTTPException
 
@@ -148,6 +149,33 @@ HUB_MAX_BODY = 1024 * 1024
 # `/api/*` 不是页面路由，回 HTML 错误页会让前端 fetch 解不出东西，故一并 JSON 化。
 # 成功响应一个字节没动，§9.1 的承诺不受影响。
 JSON_ERROR_PREFIXES = (HUB_API_PREFIX, "/api/")
+
+# ---- 已并进合并管理台（壳）的页面跳过去（2026-10-16 用户定：管理台、朋友圈、画风都只留壳里那一份）----
+# 壳和旧系统供应商入口是同一个站点：按 legacy_provider_target() 同一套判据挑本机或公网入口，只换路径，
+# 查询串原样带上（?bot= 之类）。挂在鉴权门之后，与 /provider 一样先要登录 8765。
+# 这一步只跳朋友圈：它有自己一份发帖后的通知逻辑，两份并存 bot 收到的东西就不一样。/hub 各页跑的是壳转发
+# 过去的同一份代码，等壳接管 8765 端口时一起换。/login、/styles、/image/*、/provider 不跳：画风页还在
+# 8765，壳导航上的"画风"指着这里，要靠 8765 的登录。
+MERGED_PAGES = {"/": "/moments", "/moments": "/moments"}
+# 朋友圈的写接口：页面已经不在这里，旧页面的缓存再来写也不收，免得又走 8765 这份旧的通知逻辑。读接口照旧
+_MOVED_WRITES = re.compile(r"^/api/(?:like|comment|moment|comment/\d+|profile/[^/]+)\Z")
+
+
+def merged_page_target(path: str) -> str:
+    """8765 上这条页面在壳上的地址。"""
+    base = urlsplit(legacy_provider_target())
+    return urlunsplit((base.scheme, base.netloc, MERGED_PAGES[path], request.query_string.decode("latin-1"), ""))
+
+
+@app.before_request
+def _moved_to_shell():
+    if request.method in ("GET", "HEAD") and request.path in MERGED_PAGES:
+        resp = redirect(merged_page_target(request.path), code=302)
+        resp.headers["Cache-Control"] = "no-store"         # 目的地随打开方式与配置而变，同 /provider
+        return resp
+    if request.method in ("POST", "DELETE") and _MOVED_WRITES.match(request.path):
+        return jsonify({"error": "moved", "detail": "朋友圈已经搬到合并管理台，请到那里操作"}), 410
+    return None
 
 _HUB_ERROR_CODES = {404: "not_found", 405: "method_not_allowed",
                     413: "payload_too_large", 500: "internal"}
@@ -342,6 +370,7 @@ def _bot_meta(b: dict) -> dict:
 PAGE_SIZE = 30
 
 
+# GET / 已由 _moved_to_shell 跳到壳；这份旧页面等 8765 端口交给壳时一并删
 @app.route("/")
 def feed():
     bot_filter = request.args.get("bot")
