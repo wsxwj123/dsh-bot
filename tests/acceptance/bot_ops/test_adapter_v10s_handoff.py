@@ -28,9 +28,9 @@ def handoff(adapter, bot_id, **over):
     return adapter.call("POST", au.handoff_url(bot_id), dict(GOOD, **over))
 
 
-def test_meta_能力清单恰好二十一个键_token_handoff为真(adapter):
+def test_meta_能力清单恰好二十二个键_token_handoff为真(adapter):
     caps = adapter.ok(adapter.call("GET", au.META)).get("capabilities")
-    assert caps == au.CAPABILITIES_V10S, "能力清单应恰好二十一个键（13.8）：%r" % (caps,)
+    assert caps == au.CAPABILITIES_V11, "能力清单应恰好二十二个键（13.8，v1.1 加 bot.groups_discovered）：%r" % (caps,)
 
 
 def test_归档_shell_meta原样进manifest_列表七个键_少了文件为incomplete(adapter):
