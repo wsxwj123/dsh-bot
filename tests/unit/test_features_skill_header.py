@@ -22,3 +22,15 @@ def test_头部原来写了别的值_按开关改():
 def test_没有头部的动不了():
     assert features.set_skill_disabled("正文\n", True) is None
     assert features.set_skill_disabled("---\nname: x\n没有收尾", True) is None
+
+
+def test_Windows换行和BOM也认_写回保持原来的换行_头部空行与别的行原样():
+    crlf = "﻿---\r\nname: x\r\n\r\ndescription: |\r\n  第一段\r\n\r\n  第二段\r\n---\r\n正文\r\n"
+    off = features.set_skill_disabled(crlf, True)
+    assert off == "﻿---\r\nname: x\r\n\r\ndescription: |\r\n  第一段\r\n\r\n  第二段\r\ndisable-model-invocation: true\r\n---\r\n正文\r\n"
+    assert features.set_skill_disabled(off, False) == crlf
+
+
+def test_结尾标记要整行正好是三个短横线():
+    text = "---\nname: x\n----\n还在头部\n---\n正文\n"
+    assert features.set_skill_disabled(text, True) == "---\nname: x\n----\n还在头部\ndisable-model-invocation: true\n---\n正文\n"
