@@ -217,6 +217,8 @@ export class Engine {
   private unhealthySince: number | null = null
   brain: Brain
   botUsername = ''
+  /** 启动时 getMe 问到的：隐私模式关了没有（看得到群里全部消息）、BotFather 里是否允许进群；还没问到为 null */
+  botCaps: { canReadAll: boolean | null; canJoinGroups: boolean | null } = { canReadAll: null, canJoinGroups: null }
   /** 群聊记录（main 里设置）：私聊时取"群里近况" */
   groups: GroupTranscript | null = null
   readonly memory: MemoryStore
@@ -1985,7 +1987,9 @@ export class Engine {
       problems,
       bot: this.cfg.id,
       // username：启动时向 Telegram 问到的用户名（不带 @），还没问到为 null。适配服务读它给群设置（适配约定 v0.7 5.12.1）
-      telegram: { last_ok_ms: pollAge, conflict: extra.pollConflict, last_error: extra.pollError, username: this.botUsername || null },
+      // can_read_all、can_join_groups：启动时 getMe 的两项，适配服务读它给"刚发现的群"（约定 v1.1 5.20）
+      telegram: { last_ok_ms: pollAge, conflict: extra.pollConflict, last_error: extra.pollError, username: this.botUsername || null,
+        can_read_all: this.botCaps.canReadAll, can_join_groups: this.botCaps.canJoinGroups },
       dsh: { running: this.dsh.running, pid: this.dsh.pid, generation: this.dsh.generation, version: this.dsh.agentVersion, last_probe_ok_ms: this.lastProbeOkAt ? now - this.lastProbeOkAt : null },
       brain: { provider: this.brain.provider, model: this.brain.model, effort: this.brain.reasoningEffort ?? null },
       turns_running: this.runningCount,
