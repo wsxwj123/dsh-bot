@@ -1616,7 +1616,10 @@ def _dm_providers():
 
 @hub_bp.get("/hub/dsh-model")
 def hub_dsh_model_page():
-    return render_template("hub_dsh_model.html", nav_active="dsh-model")
+    # ?embed=1：合并管理台把这页嵌在供应商页下半块，只留模型设置（没有标题、导航、外边距）。
+    # 只认 "1"，别的写法与不带时逐字节相同。
+    return render_template("hub_dsh_model.html", nav_active="dsh-model",
+                           embed=request.args.get("embed") == "1")
 
 
 @hub_bp.get("/hub/api/dsh-model")
