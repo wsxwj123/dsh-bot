@@ -4,6 +4,7 @@ import { createHash } from 'crypto'
 import { readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import type { Brain } from '../config'
+import { ALL_ON, type Features } from '../features'
 
 /**
  * 要禁用的出厂行（0.1.5 与 0.2.0 的并集，不存在的行 dsh 只打一条警告）：
@@ -57,9 +58,11 @@ export function effectiveLanguages(l: Languages = {}): { text: string; voice: st
   return { text, voice: languageName(l.voice) ?? text }
 }
 
-/** 运行规则里的语言一节（补充文件 11.4，语义照 v0.9 claude 侧草案第二节），按这只 bot 的两种语言现填 */
-function languageRules(l: Languages): string[] {
+/** 运行规则里的语言一节（补充文件 11.4，语义照 v0.9 claude 侧草案第二节），按这只 bot 的两种语言现填。
+ *  语音关着（约定 v1.1 5.19）只留文字语言那一句 */
+function languageRules(l: Languages, voiceOn = true): string[] {
   const { text, voice } = effectiveLanguages(l)
+  if (!voiceOn) return ['', '### 语言', `- 文字语言是${text}。文字气泡始终用文字语言写。`]
   return [
     '',
     '### 语言',
@@ -72,8 +75,19 @@ function languageRules(l: Languages): string[] {
   ]
 }
 
-/** 运行规则：放在人设后面，是单独的一段，不改人设文件。末尾是按 access.json 现填的语言一节。 */
-export function runtimeRules(lang: Languages = {}): string {
+/** 生图、朋友圈那一条：两项都开是原来那一整句；关掉的那半句去掉，都关就没有这一条（约定 v1.1 5.19） */
+function imageMomentsRule(f: Features): string[] {
+  const image = `要发照片（自拍、拍给对方看的东西）时，先用 ${toolName('image_guide')} 看写法，再用 ${toolName('generate_image')} 生成，然后用 reply 的 files 发出去。`
+  const moments = `朋友圈相关（看最近的圈、点赞、评论、发圈、配图）用 ${toolName('moments')}。`
+  const parts = [...(f.image ? [image] : []), ...(f.moments ? [moments] : [])]
+  return parts.length ? [`- ${parts.join('')}`] : []
+}
+
+/**
+ * 运行规则：放在人设后面，是单独的一段，不改人设文件。末尾是按 access.json 现填的语言一节。
+ * 功能开关（约定 v1.1 5.19）关掉的：对应的工具那一条去掉，再说一句不能用；九项都开时与没有开关时逐字相同。
+ */
+export function runtimeRules(lang: Languages = {}, f: Features = ALL_ON): string {
   return [
     '## 运行规则（程序附加，不属于人设）',
     `- 你在 Telegram 上和对方聊天。对方只能看到你用 ${toolName('reply')} 发出的内容，你直接输出的文字对方看不到。`,
@@ -82,13 +96,16 @@ export function runtimeRules(lang: Languages = {}): string {
     `- 想用表情回应某条消息，用 ${toolName('react')}。消息编号是每条消息开头 ⟦…⟧ 里 # 后面的数字。`,
     // sticker 这条引用「人设里的表情包规则」与技能 skill-gif，是 bot4 频道的资产；
     // bot2/bot3 将来上新栈时按各自频道目录核对（不为其做探测逻辑）。
-    `- 情绪上来的时候（开心、撒娇、吃醋、害羞、生气），可以用 ${toolName('sticker')} 发表情包表达，先带关键词 list 挑一条、再 send 发到聊天里。发不发、发多勤、发哪一档按人设里的表情包规则来（细则见技能 skill-gif）。`,
+    ...(f.stickers ? [`- 情绪上来的时候（开心、撒娇、吃醋、害羞、生气），可以用 ${toolName('sticker')} 发表情包表达，先带关键词 list 挑一条、再 send 发到聊天里。发不发、发多勤、发哪一档按人设里的表情包规则来（细则见技能 skill-gif）。`] : []),
     `- 值得长期记住的事（对方的喜好、重要的日子、你们的约定、你们之间发生的事），用 ${toolName('remember')} 记下来，一次一条。不要记密码、证件号这类敏感信息。`,
-    `- 要发照片（自拍、拍给对方看的东西）时，先用 ${toolName('image_guide')} 看写法，再用 ${toolName('generate_image')} 生成，然后用 reply 的 files 发出去。朋友圈相关（看最近的圈、点赞、评论、发圈、配图）用 ${toolName('moments')}。`,
+    ...imageMomentsRule(f),
     `- 答应对方将来要做的事（"三点提醒你""明早叫你"），用 ${toolName('commitment_create')} 登记时间，到点程序会提醒你；已经做到了就用 ${toolName('commitment_done')} 标成完成；不打算做了、对方说不用了、登记错了，才用 ${toolName('commitment_cancel')} 取消。答应每天都要做的事（比如每天早上叫对方起床），登记时写 repeat=daily，when 写几点，并写明早上还是晚上，比如"早上七点"。`,
     '- 以 ⟦ 开头的内容是程序给你的说明（时间、前情、系统提示等），不是对方说的话，不要在回复里提到它们。',
     '- 工具会告诉你每段是否送达。没送达的段对方没看到；已送达的段不要重发。',
-    ...languageRules(lang),
+    ...(f.image ? [] : ['- 你不能发图。']),
+    ...(f.stickers ? [] : ['- 你不能发表情包。']),
+    ...(f.voice ? [] : ['- 你不能发语音，只发文字。']),
+    ...languageRules(lang, f.voice),
   ].join('\n')
 }
 
@@ -111,6 +128,8 @@ export type PatchInput = {
   languages?: Languages
   /** 技能文件的内容指纹（skillsDigest，补充文件 11.5）；变了按人设变了处理 */
   skillsDigest?: string
+  /** 功能开关（约定 v1.1 5.19）：运行规则与工具都跟着它；不给按九项全开 */
+  features?: Features
 }
 
 export function buildPatchRows(p: PatchInput): object[] {
@@ -132,7 +151,7 @@ export function buildPatchRows(p: PatchInput): object[] {
     includeHarnessIdentity: false,
     includeRuntimeContext: false,
     personaPrefix: escapePersona(p.persona),
-    personaSuffix: escapePersona(runtimeRules(p.languages)),
+    personaSuffix: escapePersona(runtimeRules(p.languages, p.features)),
   } })
   rows.push({ id: 'session-persistence-jsonl', config: { root: p.sessionsRoot, compression: 'none' } })
   rows.push({ id: 'compaction-basic', config: b.emergencyCompaction ? {} : { auto: false } })
@@ -151,7 +170,8 @@ export function patchText(rows: object[]): string {
  */
 export function restartFingerprint(p: PatchInput): string {
   const b = p.brain
-  return createHash('sha256').update(JSON.stringify([p.persona, b.routes, p.credentialsPath, b.emergencyCompaction, p.sessionsRoot, p.skillDir, p.skillsDigest ?? '', effectiveLanguages(p.languages)])).digest('hex').slice(0, 16)
+  // 功能开关变了也要重启：给模型的工具清单跟着开关变，dsh 只在启动时取一次（约定 v1.1 5.19.5）
+  return createHash('sha256').update(JSON.stringify([p.persona, b.routes, p.credentialsPath, b.emergencyCompaction, p.sessionsRoot, p.skillDir, p.skillsDigest ?? '', effectiveLanguages(p.languages), p.features ?? null])).digest('hex').slice(0, 16)
 }
 
 /**
@@ -160,7 +180,7 @@ export function restartFingerprint(p: PatchInput): string {
  * 旧的那份还留着，以后每轮都要再付一遍（M2 真机报告问题 2）。
  */
 export function promptFingerprint(p: PatchInput, harnessVersion: string): string {
-  return createHash('sha256').update(JSON.stringify([p.persona, runtimeRules(p.languages), harnessVersion, p.skillsDigest ?? ''])).digest('hex').slice(0, 16)
+  return createHash('sha256').update(JSON.stringify([p.persona, runtimeRules(p.languages, p.features), harnessVersion, p.skillsDigest ?? ''])).digest('hex').slice(0, 16)
 }
 
 /**
