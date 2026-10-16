@@ -25,6 +25,7 @@ import { Commitments } from '../commit/service'
 import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
 import { LifeActions } from '../life/actions'
+import { effectiveEngine, ImageSwitch } from '../life/image_switch'
 import { StickerService } from '../stickers/sticker'
 import {
   escapeUserText,
@@ -250,8 +251,9 @@ export class Engine {
     })
     this.actions = new LifeActions({
       botId: cfg.lifeId, imageAgent: cfg.id, configPath: cfg.configPath, log, mediaDir: cfg.mediaDir,
-      imageProvider: () => this.cfg.gw.imageProvider,
-      imageSkillDir: () => this.cfg.gw.imageSkillDir ?? join(import.meta.dir, '..', '..', '..', 'skills', `${this.cfg.gw.imageProvider}-skill`),
+      imageProvider: () => this.imageEngine(),
+      imageSkillDir: e => (e === 'comfyui' ? this.cfg.gw.comfyuiSkillDir : this.cfg.gw.imageSkillDir) ?? join(import.meta.dir, '..', '..', '..', 'skills', `${e}-skill`),
+      globalCfg: () => this.cfg.gw.globalCfg,
       stateDb: () => this.cfg.gw.botlifeDb,
       credRef: name => this.credRef(name),
       notify: (chatId, text, key) => { this.injectSynthetic(chatId, text, key, { source: 'image' }) },
@@ -334,7 +336,7 @@ export class Engine {
       {
         name: 'image_guide',
         description: '生图的写法说明（第一次生图前看一遍；同一段对话里看过就不用再看）。',
-        inputSchema: { type: 'object', properties: {} },
+        inputSchema: { type: 'object', properties: { engine: { type: 'string', enum: ['novelai'], description: '只在 ComfyUI 没画出来、改用 NovelAI 重画时填 novelai，看 NovelAI 的写法；平时不填' } } },
         call: (args, ctx) => engine().toolLife('guide', args, ctx),
       },
       {
@@ -347,6 +349,7 @@ export class Engine {
             prompt: { type: 'string', description: 'ComfyUI：单张时用，英文描述' },
             ratio: { type: 'string', enum: ['portrait', 'landscape', 'square', 'wide'], description: '画幅' },
             reuse_seed: { type: 'boolean', description: '同一动作换视角的第二张才用：为 true 沿用上一张的 seed。只能和单张配合，不能和 images 一起用' },
+            engine: { type: 'string', enum: ['novelai'], description: '只在 ComfyUI 没画出来、改用 NovelAI 重画时填 novelai，同时用 intermediate 写描述；平时不填' },
             images: {
               type: 'array',
               description: '要一次出的多张（互不依赖：不同构图/不同场景，例如朋友圈配图 2–4 张）。每项给 intermediate（NovelAI）或 prompt（ComfyUI），可带 ratio。网关会并发跑（最多 4 张同时），全部跑完一次性返回路径；某张失败不影响其余。不要和 reuse_seed 一起用',
@@ -531,7 +534,7 @@ export class Engine {
     if (!at) return { text: '这一轮已经结束。', isError: true }
     if (at.mode === 'summary') return LOCKED
     at.lastProgressAt = Date.now()
-    if (op === 'guide') return this.actions.imageGuide()
+    if (op === 'guide') return this.actions.imageGuide(args)
     at.toolsInFlight++
     try {
       return op === 'image' ? await this.actions.generateImage(at.chatId, args) : await this.actions.moments(args)
@@ -620,6 +623,14 @@ export class Engine {
     this.log.info('group.recap', { chat: chatId, lines: lines.length })
     return `⟦群里近况：你在的群里，上次之后说了这些。只是让你知道，不用逐条回应⟧\n${lines.join('\n')}`
   }
+
+  /** 此刻生效的生图引擎（约定 v1.1 5.21）：配置写 off 就不生图；设了 gateway.global_cfg 就每次现读共用开关，读不到退回 image_provider */
+  private imageEngine(): string {
+    const p = this.cfg.gw.globalCfg ? expandHome(this.cfg.gw.globalCfg) : null
+    if (p && this.imgSwitch?.path !== p) this.imgSwitch = new ImageSwitch(p, this.log)
+    return effectiveEngine(this.cfg.gw.imageProvider, p ? this.imgSwitch : null)
+  }
+  private imgSwitch: ImageSwitch | null = null
 
   private lifeLines(chatId: string, segmentId: number, fresh: boolean): string[] {
     const out: string[] = []
