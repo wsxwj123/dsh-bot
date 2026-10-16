@@ -69,10 +69,16 @@ export function tmuxLogsAgent(o: { repo: string; root: string; env: Record<strin
 }
 
 /** 新系统接手的 Python 周边：每个 bot 的主动消息，以及所有 bot 共用的定时任务和服务（全部切完以后装） */
-/** install-jobs 给这只 bot 的定时任务（主动找你）带的环境变量：朋友圈库和网关用同一个（gateway.botlife_db）。
- *  不带的话任务退回仓库目录里的 state.db，和共用库分叉 */
-export function jobsEnv(gw: { botlifeDb?: string }, home: string): Record<string, string> {
-  return gw.botlifeDb ? { BOTLIFE_STATE_DB: posix.resolve(gw.botlifeDb.replace(/^~/, home)) } : {}
+/** install-jobs 给这只 bot 的定时任务（主动找你）带的环境变量，都取自这只 bot 的网关配置：
+ *  朋友圈库（gateway.botlife_db，不带的话任务退回仓库目录里的 state.db，和共用库分叉）；
+ *  发圈配图用的共用生图开关所在的全局配置（gateway.global_cfg）与共用 ComfyUI 技能目录（gateway.comfyui_skill_dir） */
+export function jobsEnv(gw: { botlifeDb?: string; globalCfg?: string; comfyuiSkillDir?: string }, home: string): Record<string, string> {
+  const abs = (p: string) => posix.resolve(p.replace(/^~/, home))
+  return {
+    ...(gw.botlifeDb ? { BOTLIFE_STATE_DB: abs(gw.botlifeDb) } : {}),
+    ...(gw.globalCfg ? { CLAUDEBOT_GLOBAL_CFG: abs(gw.globalCfg) } : {}),
+    ...(gw.comfyuiSkillDir ? { COMFYUI_SKILL_DIR: abs(gw.comfyuiSkillDir) } : {}),
+  }
 }
 
 export function pythonAgent(o: { name: string; python: string; repo: string; script: string[]; root: string; env: Record<string, string>; extraEnv?: Record<string, string>; interval?: number; calendar?: Record<string, number> }): Agent {
