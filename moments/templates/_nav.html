@@ -63,8 +63,9 @@ th{color:var(--ink-faint);font-weight:500;font-size:12.5px;}
      打开，并且不把管理台的窗口与地址带给它。它不是本站的页面，这颗 chip 永远不会亮。
    console_nav（页面服务，INTERFACE-页面服务 §3）：适配服务那个进程渲染时设它，整个 <nav> 换成
    一行占位注释，由壳换成它的导航；上面的样式与下面的脚本两边都留着。8765 不设它，输出逐字不变，
-   所以 if/else/endif 都贴着 <nav> 的头尾写，不另起行。 #}
-{% if console_nav %}<!-- console-nav -->{% else %}<nav class="hubnav">
+   所以 if/else/endif 都贴着 <nav> 的头尾写，不另起行。
+   embed（只有模型页传，?embed=1）：8765 上导航整段不出；页面服务上 console_nav 先判，照旧是占位注释。 #}
+{% if console_nav %}<!-- console-nav -->{% elif embed %}{% else %}<nav class="hubnav">
   <div class="hubnav-inner">
     <span class="navgroup">新系统</span>
     <a class="chip{% if nav_active == 'hub' %} on{% endif %}" href="/hub">管理台</a>
