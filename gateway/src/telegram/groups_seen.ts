@@ -93,11 +93,30 @@ export class GroupsSeen {
     try { raw = readFileSync(this.path, 'utf8') } catch { return {} }
     try {
       const v = JSON.parse(raw)
-      if (v && typeof v === 'object' && !Array.isArray(v)) return v as Record<string, SeenGroup>
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        // 形状不对的条目扔掉（同适配服务读这份文件）：留着会让挤旧群那一步每次出错，新群再也记不进来
+        const out: Record<string, SeenGroup> = {}
+        let dropped = 0
+        for (const [id, g] of Object.entries(v)) {
+          if (/^-\d+$/.test(id) && wellFormed(g)) out[id] = g
+          else dropped++
+        }
+        if (dropped) this.log.warn('groups.seen_dropped', { count: dropped })
+        return out
+      }
     } catch {}
     this.log.warn('groups.seen_unreadable', { action: 'start over' })
     return {}
   }
+}
+
+const STATUSES = new Set<unknown>(['member', 'administrator', 'restricted', 'left', 'kicked'])
+
+function wellFormed(g: unknown): g is SeenGroup {
+  if (!g || typeof g !== 'object' || Array.isArray(g)) return false
+  const r = g as Record<string, unknown>
+  return typeof r.title === 'string' && (r.type === 'group' || r.type === 'supergroup') && STATUSES.has(r.status)
+    && typeof r.first_seen === 'string' && typeof r.last_seen === 'string'
 }
 
 /** 超过 MAX_GROUPS：先挤不是主人拉的里面 last_seen 最旧的；都是主人拉的就挤最旧的 */
