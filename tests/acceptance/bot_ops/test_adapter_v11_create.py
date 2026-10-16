@@ -45,7 +45,7 @@ def test_新建_全勾_外貌进生图技能_成人技能取人设例句_缺生�
     assert "照片里的你：\n长发\n圆脸\n" in image and "disable-model-invocation" not in image, image
     nsfw = skill(adapter, "nsfw").read_text(encoding="utf-8")
     assert "- 示例甲\n- 示例乙" in nsfw and "只适用于成年角色" in nsfw, nsfw
-    assert oct(skill(adapter, "gif").stat().st_mode & 0o777) == "0o644"
+    assert oct(skill(adapter, "gif").stat().st_mode & 0o777) == "0o600"
 
 
 def test_新建_缺NovelAI令牌_生图不打开_技能照放但停用(adapter, telegram, bun):
