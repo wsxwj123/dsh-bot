@@ -40,6 +40,8 @@ export class Poller {
       onMyChatMember?: (u: TgChatMemberUpdated) => void
       /** 没加入的群里有人说话、被挡下：交给它记"刚发现的群"（不记消息内容） */
       onGroupDropped?: (msg: TgMessage) => void
+      /** 群聊功能开着没有（约定 v1.1 5.19）：关着时群消息一律不处理，access.json 里的群条目照留 */
+      groupsOn?: () => boolean
     },
   ) {}
 
@@ -111,6 +113,14 @@ export class Poller {
     if (!msg) { this.ledger.recordUpdate(u.update_id, null); return }
     if (this.intercepted(this.o.interceptBeforeGate, msg, u.update_id)) return
     const access = loadAccess(this.o.channelDir)
+    if ((msg.chat.type === 'group' || msg.chat.type === 'supergroup') && this.o.groupsOn?.() === false) {
+      this.ledger.recordUpdate(u.update_id, null)
+      this.log.info('inbound.dropped', { chat: msg.chat.id, reason: 'groups feature off' })
+      if (!access.groups[String(msg.chat.id)]) {
+        try { this.o.onGroupDropped?.(msg) } catch (e) { this.log.error('groups.seen_failed', { err: safeError(e) }) }
+      }
+      return
+    }
     const g = gate(msg, access)
     if (g.deliver === false) {
       this.ledger.recordUpdate(u.update_id, null)
