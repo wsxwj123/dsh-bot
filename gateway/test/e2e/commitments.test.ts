@@ -110,7 +110,7 @@ appendFileSync(marker, Date.now() + ' ' + (out ? 'ok' : 'fail') + '\\n')
 if (!out) process.exit(1)
 `
 
-test('生活状态：关系提示、"此刻在干什么"只在新会话开头和变化时附带；被晾的迟到反应带一次', async () => {
+test('生活状态：私聊每条都带关系提示和"此刻在干什么"（与 claude 大脑一致）；被晾的迟到反应带一次', async () => {
   const root = mkdtempSync(join(tmpdir(), 'dshbot-'))
   const probe = join(root, 'situation-probe.ts')
   const sitFile = join(root, 'situation.json')
@@ -128,8 +128,8 @@ test('生活状态：关系提示、"此刻在干什么"只在新会话开头和
   expect(at('第一句')).toContain('⟦关系状态⟧ 【当前关系状态】测试好感五十')
   expect(at('第一句')).toContain('⟦你此刻：在图书馆⟧')
   await say(tg, '第二句')
-  expect(at('第二句')).not.toContain('⟦关系状态⟧')
-  expect(at('第二句')).not.toContain('⟦你此刻')
+  expect(at('第二句')).toContain('⟦关系状态⟧ 【当前关系状态】测试好感五十')
+  expect(at('第二句')).toContain('⟦你此刻：在图书馆⟧')
   writeFileSync(join(b.channelDir, 'relationship.json'), JSON.stringify({ prompt_snippet: '【当前关系状态】测试好感六十' }))
   await say(tg, '第三句')
   expect(at('第三句')).toContain('测试好感六十')
