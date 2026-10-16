@@ -64,13 +64,15 @@ def test_朋友圈资料接口_signature在display_name之前(hub):
     assert_before(raw(hub, "/api/profile/%s" % u.FAKE_BOT), "signature", "display_name")
 
 
-def test_发朋友圈的响应_visibility在text之前(hub):
+def test_朋友圈写接口回410的体_error在detail之前(hub):
+    """2026-10-16 起 8765 不再收发帖（朋友圈只留壳里那一份），原来量发帖响应的这一条改量 410 的体。"""
     r = hub.post("/api/moment", json={"text": "量字段顺序"})
-    assert r.status_code == 200, "发朋友圈期望 200，实得 %s" % r.status_code
-    assert_before(r.get_data(as_text=True), "visibility", "text")
+    assert r.status_code == 410, "8765 发朋友圈期望 410，实得 %s" % r.status_code
+    assert_before(r.get_data(as_text=True), "error", "detail")
 
 
 def test_朋友圈列表接口_id在bot_id之前(hub):
-    posted = hub.post("/api/moment", json={"text": "量字段顺序"})
-    assert posted.status_code == 200, "前提：先发出一条朋友圈，实得 %s" % posted.status_code
+    import db                               # conftest 已把朋友圈库钉到临时目录；8765 不再收发帖，直接写一条
+    db.insert_moment(bot_id="__user__", ts=1760000000, text="量字段顺序", image_path=None,
+                     metadata={"author_display": "我"}, kind="user_post", visibility="public")
     assert_before(raw(hub, "/api/moments"), "id", "bot_id")
