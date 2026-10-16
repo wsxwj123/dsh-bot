@@ -87,7 +87,7 @@ async function main(): Promise<void> {
   const mcp = new McpServer(Engine.tools(() => engine!), segId => {
     const s = ledger.segment(segId)
     return s ? { chatId: s.chat_id, token: s.mcp_token } : null
-  }, log)
+  }, log, name => engine?.toolVisible(name) ?? true)
   mcp.start()
   engine = new Engine(cfg, ledger, log, api, sender, dsh, mcp)
 
@@ -150,6 +150,7 @@ async function main(): Promise<void> {
     intercept: (msg, updateId) => wizard.intercept(msg, updateId),
     onCallback: cq => wizard.onCallback(cq),
     onMyChatMember: u => groupsSeen.onMember(u),
+    groupsOn: () => engine?.features.groups ?? true,
     onGroupDropped: m => groupsSeen.onDropped(m),
     onHumanMessage: (msg, observed) => {
       if (observed) { transcript.observe(msg); return }
