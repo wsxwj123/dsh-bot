@@ -86,6 +86,7 @@ CAPABILITIES = {
     "bot.delete": True,
     "bot.profile": True,
     "bot.token_handoff": True,
+    "bot.groups_discovered": True,
 }
 DEFAULT_LABEL = "各 bot 配置文件里写的那一组"
 
@@ -327,6 +328,9 @@ def _dispatch():
         parts = path[len(head):].split("/")
         if len(parts) == 2:
             methods = _BOT_ROUTES.get(parts[1])
+        elif len(parts) == 3 and parts[1:] == ["groups", "discovered"]:     # 刚发现的群（约定 v1.1 5.20.2）
+            methods = _DISCOVERED_ROUTES
+            parts = parts[:2]
         else:                               # 只有技能多一段：/bots/<bot_id>/skills/<通用名>（11.2）
             methods = _SKILL_ROUTES if len(parts) == 3 and parts[1] == "skills" else None
         if methods is not None:
@@ -1305,6 +1309,89 @@ def _groups_get(bot_id):
             "groups": {chat_id: _group_view(entry) for chat_id, entry in groups.items()}}
 
 
+# ---------------------------------------------------------------- v1.1 刚发现的群（约定 5.20）
+
+#: 网关记"刚发现的群"的文件、管理台退群时间的文件，都在这只 bot 的 state/ 下（两个文件各只有一个写者）
+SEEN_FILE = "groups-seen.json"
+LEFT_FILE = "groups-console-left.json"
+SEEN_STATUSES = ("member", "administrator", "restricted")       # left、kicked：已经不在群里，不列
+DISCOVERED_MAX = 50
+UTC_SECOND_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+
+
+def _state_file(bot, name):
+    """这只 bot 的 ``state/<name>``；频道目录不在它自己的家里、或者文件是软链，回 None（同 ``_channel_file``）。"""
+    channel = _channel_file(bot, ".")
+    if channel is None:
+        return None
+    path = os.path.join(os.path.dirname(os.path.normpath(channel)), "state", name)
+    return None if os.path.islink(path) else path
+
+
+def _read_state_json(bot, name):
+    """读 ``state/<name>`` 里的 JSON 对象；没有、读不出、不是对象，都当空的（这两份只是记录，坏了不拦）。"""
+    path = _state_file(bot, name)
+    try:
+        with open(path, "rb") as f:
+            obj = json.loads(f.read().decode("utf-8"))
+    except (TypeError, OSError, ValueError, RecursionError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _utc_second(value):
+    return value if isinstance(value, str) and UTC_SECOND_RE.match(value) else None
+
+
+def _note_left(bot, chat_id, left):
+    """管理台退群（5.12.2 的 join: false）记下时间；再加入就抹掉。写在网关不碰的另一份文件里，原子写、0600。"""
+    path = _state_file(bot, LEFT_FILE)
+    if path is None:
+        return
+    marks = _read_state_json(bot, LEFT_FILE)
+    if left:
+        marks[chat_id] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif marks.pop(chat_id, None) is None:
+        return
+    from moments import hub_config         # 延迟 import：同 _groups_post
+    hub_config.atomic_write(json.dumps(marks, ensure_ascii=False, indent=1) + "\n", path)
+
+
+def _groups_discovered(bot_id):
+    """刚发现的群（约定 5.20.2）：网关记下的群里，去掉已经在 access.json 里的、bot 已经不在群里的。
+
+    停用的 bot 也能列，只读记录文件；网关在跑时 can_read_all、can_join_groups 从它的 health 取，不在跑为 null。
+    在管理台退过的群带上退群时间。按最后看到从新到旧，最多 50 条。
+    """
+    bot = _require_bot(bot_id)
+    joined = _read_access(bot)[2]
+    seen = _read_state_json(bot, SEEN_FILE)
+    left = _read_state_json(bot, LEFT_FILE)
+    tg = _gateway_health(bot["channel"])
+    can_read = tg.get("can_read_all") if type(tg.get("can_read_all")) is bool else None
+    can_join = tg.get("can_join_groups") if type(tg.get("can_join_groups")) is bool else None
+    rows = []
+    for chat_id, g in seen.items():
+        if not _group_id(chat_id) or chat_id in joined or not isinstance(g, dict) or g.get("status") not in SEEN_STATUSES:
+            continue
+        status = g["status"]
+        added = g.get("added_by_owner")
+        rows.append({
+            "chat_id": chat_id,
+            "title": g.get("title") if isinstance(g.get("title"), str) else "",
+            "type": "supergroup" if g.get("type") == "supergroup" else "group",
+            "status": status,
+            "added_by_owner": added if type(added) is bool else None,
+            "sees_all": can_read is True or status == "administrator",
+            "first_seen": _utc_second(g.get("first_seen")),
+            "last_seen": _utc_second(g.get("last_seen")),
+            "migrated_from": g.get("migrated_from") if _group_id(g.get("migrated_from")) else None,
+            "left_in_console_at": _utc_second(left.get(chat_id)),
+        })
+    rows.sort(key=lambda r: r["last_seen"] or "", reverse=True)
+    return {"ok": True, "can_read_all": can_read, "can_join_groups": can_join, "groups": rows[:DISCOVERED_MAX]}
+
+
 def _check_policy(policy):
     """约定 5.12.2 的校验：只许六个键，值为 null 表示删掉这个键。"""
     if not isinstance(policy, dict) or set(policy) - set(GROUP_KEYS):
@@ -1360,6 +1447,8 @@ def _groups_post(bot_id):
                 obj["groups"] = groups
                 # 只改这一个群号的条目，别的键原样；原子写（临时文件改名），保持原文件权限
                 hub_config.atomic_write(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", path)
+                # 刚发现的群（约定 5.20.2）：退群记下时间，这个群会带着它重新出现在列表里；再加入就抹掉
+                _note_left(bot, chat_id, left=not join)
     except HubError as e:
         raise _config_failure(e, "这只 bot 的 access.json") from None
     return {"ok": True, "in_group": join, "policy": _group_view(groups[chat_id]) if join else None}
@@ -2062,11 +2151,12 @@ def _delete(bot_id):
     seams = bot_launchd.resolve_seams()
     _stop_bot(bot, seams, deadline)
     def drop_env_then_discard(items):
-        # 13.5：Telegram 令牌所在的 .env 先直接删掉，不进废纸篓；删不掉整次 500，别的一样都没移
-        env = _channel_file(bot, ".env")
-        if env is not None:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(env)
+        # 13.5：Telegram 令牌所在的 .env 先直接删掉，不进废纸篓；删不掉整次 500，别的一样都没移。
+        # 约定 v1.1 5.18.4：网关本机接口口令 state/api.key 同样直接抹掉（归档时照旧带走，恢复要用）
+        for secret in (_channel_file(bot, ".env"), _state_file(bot, "api.key")):
+            if secret is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(secret)
         _discard(bot_id, items)
 
     _move_out(bot, bots, seams, drop_env_then_discard, "delete")
@@ -2447,6 +2537,8 @@ _BOT_ROUTES = {
 }
 #: ``/bots/<bot_id>/skills/<通用名>`` 上的接口（11.2）：处理函数多收一个通用名
 _SKILL_ROUTES = {"GET": _skill_get, "PUT": _skill_put}
+#: ``/bots/<bot_id>/groups/discovered``（约定 v1.1 5.20.2）
+_DISCOVERED_ROUTES = {"GET": _groups_discovered}
 
 
 # ---------------------------------------------------------------- 管理台三页（页面服务）
