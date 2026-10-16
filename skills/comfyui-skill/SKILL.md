@@ -16,8 +16,8 @@ compatibility:
 ## 何时触发
 - 用户在 telegram 私聊里要求生图（自拍/发照片/看看你/按场景来一张/再来一张）
 - 用户明确说"画一张""生成一张图"
-- 朋友圈框架内部生图（由 `_global.yml.image_generation.provider = comfyui` 控制）
-> 装了本 skill 就代表聊天默认用 ComfyUI 出图，无需再判断 provider。和 novelai-skill **二选一**，别同装。
+- 朋友圈框架内部生图（管理台的生图开关切到 ComfyUI 时）
+> 用不用 ComfyUI 由管理台的生图开关决定，程序或上一级技能会先查开关，再带你来这里。本技能只管 ComfyUI 的写法和调用，可以和 novelai-skill 同时装。
 
 ## 何时不触发
 - 用户只是讨论功能、规则、按钮、触发词
@@ -29,15 +29,15 @@ compatibility:
 - 跑脚本的 Python 装了 `PyYAML`（就是你跑朋友圈网页那个 Python）
 
 ## 调用入口
-仓库根路径在环境变量 `$CLAUDEBOTLIFE_REPO`，bot 名在 `$TELEGRAM_WORKER_BOT`。不要写死绝对路径。
+脚本在本技能目录下的 `scripts/comfyui_gen.py`，装好后是 `~/.claude/skills/comfyui-skill/scripts/comfyui_gen.py`。bot 名在 `$TELEGRAM_WORKER_BOT`。全局配置和这只 bot 的配置，脚本按环境变量自己去找，不用你传。
 
 ```bash
 # Mac / Linux
-python3 "$CLAUDEBOTLIFE_REPO/scripts/comfyui_gen.py" "$TELEGRAM_WORKER_BOT" "<英文 prompt>" [--size <预设>] [--neg "<额外负向 tag>"]
+python3 ~/.claude/skills/comfyui-skill/scripts/comfyui_gen.py "$TELEGRAM_WORKER_BOT" "<英文 prompt>" [--size <预设>] [--neg "<额外负向 tag>"]
 ```
 ```bat
 :: Windows（PowerShell / cmd）
-python "%CLAUDEBOTLIFE_REPO%\scripts\comfyui_gen.py" "%TELEGRAM_WORKER_BOT%" "<英文 prompt>" [--size <预设>]
+python "%USERPROFILE%\.claude\skills\comfyui-skill\scripts\comfyui_gen.py" "%TELEGRAM_WORKER_BOT%" "<英文 prompt>" [--size <预设>]
 ```
 
 参数：
@@ -57,7 +57,7 @@ reply(text="给你拍了一张～", files=["<从 MEDIA: 抓到的绝对路径>"]
 
 - 唯一能把图发到 Telegram 的通道是 `reply` 的 `files` 参数。
 - **绝不要**把 `MEDIA: xxx` 这行文本直接发给用户——新架构里它不会被解析成图片，用户只会看到一串路径。
-- 脚本 `FAIL` 或没拿到路径时，不要瞎编路径塞给 `reply`；按人设自然说这次没拍成（如"相机抽风了，等下再拍"）。
+- 脚本 `FAIL` 或没拿到路径时，不要瞎编路径塞给 `reply`。这一张改用 NovelAI 画（按 novelai-skill 的写法重写描述再出图），并在回复里单独一句自然提到这张不是 ComfyUI 画的，不用括号。NovelAI 也出不了，就按人设自然说这次没拍成（如"相机抽风了，等下再拍"）。
 
 ### Size 决策表（必读）
 
@@ -431,32 +431,23 @@ chalkboard, books and notebooks on desks
 
 | 项 | NovelAI | ComfyUI |
 |---|---|---|
-| 入口脚本 | `~/.claude/skills/novelai-skill/scripts/generate_novelai_image.py` | `$CLAUDEBOTLIFE_REPO/scripts/comfyui_gen.py` |
+| 入口脚本 | `~/.claude/skills/novelai-skill/scripts/generate_novelai_image.py` | `~/.claude/skills/comfyui-skill/scripts/comfyui_gen.py` |
 | 权重 | `1.5::xxx::` | `(xxx:1.5)` |
 | 多角色 | `\|` | `BREAK` |
 | 配置 | skill 自带 default_config.json | `_global.yml.image_generation` |
 | 固定前缀 | NovelAI 配置里的 positive/negative_prefix | `_global.yml.positive_prefix` / `negative_prefix` |
 | 模型 | NovelAI 4.5 full（云端） | z_image_turbo / 用户配的 workflow |
 
-## 切换 provider
-```bash
-# 切到 comfyui
-curl -s -X POST http://127.0.0.1:8765/api/image_provider \
-  -H "Content-Type: application/json" -d '{"provider":"comfyui"}'
-
-# 切回 novelai
-curl -s -X POST http://127.0.0.1:8765/api/image_provider \
-  -H "Content-Type: application/json" -d '{"provider":"novelai"}'
-
-# 查当前
-curl -s http://127.0.0.1:8765/api/image_provider
-```
+## 切换引擎
+NovelAI 和 ComfyUI 只在管理台切换，聊天里不切。对方让你切引擎时，如实告诉对方要在管理台切，不要假装已经切了。
 
 ## 失败兜底
-- ComfyUI 没启动 → `comfyui_gen.py` 会报 connection refused
-- workflow JSON 路径错 → 报 `workflow 不存在`
-- 240 秒超时（NSFW 多 LoRA 工作流可能 60-90s 出图）
-- 任何失败：朋友圈仍会发文字版（image_path 留空）
+- ComfyUI 没启动 → 脚本输出 `FAIL: 连不上 ComfyUI…`
+- workflow JSON 路径错 → `FAIL: workflow 不存在…`
+- ComfyUI 执行报错 → `FAIL: ComfyUI 执行报错…`，立即返回
+- 最多等 600 秒（NSFW 多 LoRA 工作流可能 60-90s 出图）
+- 聊天里任何失败：这一张改用 NovelAI 画，见上面"出图后怎么发"
+- 朋友圈配图失败：朋友圈照样发文字版（image_path 留空）
 
 ## 禁止事项
 - 不要假装出图（必须真调脚本，再真的 `reply(files=...)` 把图发出去，才对用户说话）
