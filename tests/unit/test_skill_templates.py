@@ -44,6 +44,23 @@ def test_成人模板_圈外固定写成年限制_圈内是人设里NSFW段的�
     ("2、NSFW：\n* 一\n\n# 下一节\n- 不算\n", ["一"]),
     ("NSFW\n\n- 一\n", ["一"]),
     ("1.日常\n- 不算\n", []),
+    ("### 2.NSFW\n- 一\n", ["一"]),
+    ("**2.NSFW**\n- 一\n", ["一"]),
+    ("**2.NSFW：**\n- 一\n", ["一"]),
+    ("2.NSFW 例句\n- 一\n", ["一"]),
+    ("2.NSFW（成人）\n- 一\n", ["一"]),
+    ("NSFW： \n- 一\n", ["一"]),
+    ("### NSFW 节奏铁律\n- 规则不是例句\n", []),
+    ("2.NSFW\n1.一\n2、二\n", ["一", "二"]),
+    ("2.NSFW\n- 一\n3.其他语料\n- 不算\n", ["一"]),
+    ("2.NSFW\n• 一\n", ["一"]),
+    ("2.NSFW\n- 一 <!-- x\n- 二\n- 三 -->\n", ["二"]),
 ])
 def test_认NSFW例句段(persona, want):
     assert st.nsfw_lines(persona) == want
+
+
+def test_人设里提到NSFW却没认出例句段_能看出来():
+    assert st.nsfw_unmatched("### NSFW 节奏铁律\n- 规则\n") is True
+    assert st.nsfw_unmatched("# 人设\n说话温柔\n") is False
+    assert st.nsfw_unmatched("2.NSFW\n- 一\n") is False
