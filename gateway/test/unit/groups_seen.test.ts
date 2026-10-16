@@ -119,6 +119,21 @@ test('文件坏了不拦收消息：当成空的重新记', () => {
   expect(Object.keys(s.read())).toEqual(['-1007'])
 })
 
+test('文件里有形状不对的条目：读的时候扔掉，满了也照样记得进新群', () => {
+  const s = setup()
+  s.seen.onDropped(msg(-1008))
+  const good = s.read()['-1008']!
+  const all: Record<string, unknown> = { '-1': null, '-2': '坏', '-3': { title: '缺 last_seen' }, 'abc': good }
+  for (let i = 0; i < MAX_GROUPS; i++) all[String(-5000 - i)] = good
+  writeFileSync(s.path, JSON.stringify(all))
+  s.tick(1_000)
+  s.seen.onMember(member(-3000, OWNER, 'left', 'member'))
+  const a = s.read()
+  expect(a['-3000']).toBeDefined()
+  expect(['-1', '-2', '-3', 'abc'].filter(k => k in a)).toEqual([])
+  expect(Object.keys(a).length).toBe(MAX_GROUPS)
+})
+
 // ─── 收消息层的接线：真轮询 + 假 Telegram ───
 
 async function until(f: () => boolean, what: string, ms = 5_000) {
