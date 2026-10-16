@@ -223,3 +223,13 @@ def test_anchor_goes_img2img_and_staged_copy_is_removed(tmp_path, fake):
     assert staged.startswith("_init_")
     assert wf["3"]["inputs"]["denoise"] == 0.8
     assert not (tmp_path / "ComfyUI" / "input" / staged).exists()   # 放进 input 的起点图用完即删
+
+
+def test_old_location_forwards_to_the_shared_script(tmp_path):
+    """仓库里旧位置 scripts/comfyui_gen.py 只做转发：老的技能说明还在调这里时，跑的也是共用的那一份。"""
+    r = subprocess.run([sys.executable, str(ROOT / "scripts" / "comfyui_gen.py"), "../x", "1girl"],
+                       capture_output=True, text=True, timeout=60,
+                       env={k: v for k, v in os.environ.items() if k not in ("CLAUDEBOT_GLOBAL_CFG", "CLAUDEBOTLIFE_REPO")})
+    assert r.returncode == 1
+    assert _last(r).startswith("FAIL: bot 编号不合规")
+    assert len((ROOT / "scripts" / "comfyui_gen.py").read_text(encoding="utf-8").splitlines()) < 20
