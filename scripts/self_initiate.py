@@ -82,6 +82,11 @@ def _inject(cfg: dict, chat: str, text: str, key: str) -> bool:
 
 
 def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_judge: bool = False) -> int:
+    # 功能开关（约定 v1.1 5.19）："主动找你聊"关着就什么都不做，不问 life-context、不投递、不改下次机会的时间
+    from moments import features as feature_switch
+    if not feature_switch.enabled(cfg, os.path.expanduser(cfg.get("bot_channel_path") or ""), "proactive"):
+        print("skip: 主动找你聊这项功能关着", file=sys.stderr)
+        return 0
     state_dir = os.path.join(os.path.dirname(os.path.abspath(os.path.expanduser(cfg["bot_channel_path"]))), "state", "self-initiate")
     os.makedirs(state_dir, exist_ok=True)
     next_f = os.path.join(state_dir, f"{chat}.next")
