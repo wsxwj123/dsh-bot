@@ -370,10 +370,13 @@ def _build_judge_ctx(now, situation, world, wildcard, mood, mood_factors,
 def _try_post_moment(bot_id, bot_cfg, now, situation, world, wildcard,
                       mood, mood_factors, since_user_min, global_cfg,
                       jiwen_info=None):
-    """朋友圈触发是独立判断。失败不影响主流程。返回 moment_id 或 None。"""
+    """朋友圈触发是独立判断。失败不影响主流程。返回 moment_id 或 None。
+
+    朋友圈里用 life_id 当身份（新系统的 bot：和网关 moments 工具发圈同一个名字，陈露露是 chenlulu），
+    没有就用配置编号。作息、积温那些记录照旧用配置编号。"""
     try:
         return maybe_post_moment(
-            bot_id, bot_cfg, now, situation, world, wildcard,
+            (bot_cfg or {}).get("_life_id") or bot_id, bot_cfg, now, situation, world, wildcard,
             mood, mood_factors, since_user_min, global_cfg,
             jiwen_info=jiwen_info,
         )
