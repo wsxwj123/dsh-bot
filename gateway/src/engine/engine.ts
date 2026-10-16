@@ -27,7 +27,7 @@ import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/ha
 import { LifeActions } from '../life/actions'
 import { effectiveEngine, ImageSwitch } from '../life/image_switch'
 import { effectiveVoiceModel } from '../life/voice_model'
-import { loadFeatures, type Features } from '../features'
+import { loadFeatures, readFeatures, type Features } from '../features'
 import { StickerService } from '../stickers/sticker'
 import {
   escapeUserText,
@@ -718,9 +718,14 @@ export class Engine {
       voiceModel: this.voiceModel(access) }
   }
 
-  /** 读这只 bot 的功能开关；存储里有不是真假的值记一条警告 */
+  /** 读这只 bot 的功能开关；存储里有不是真假的值记一条警告。配置读不出时保留原来的开关（刚启动还没有才按缺省） */
   private readFeatures(): Features {
-    const r = loadFeatures(this.cfg.configPath, join(this.cfg.channelDir, 'skills'))
+    const skillDir = join(this.cfg.channelDir, 'skills')
+    const r = loadFeatures(this.cfg.configPath, skillDir)
+    if (!r) {
+      this.log.warn('features.unreadable', { path: 'configs/<bot>.yml', kept: this.features !== undefined })
+      return this.features ?? readFeatures(undefined, skillDir).features
+    }
     for (const w of r.warnings) this.log.warn('features.invalid', { detail: w })
     return r.features
   }
