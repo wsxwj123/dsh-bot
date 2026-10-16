@@ -78,10 +78,18 @@ def test_GET_必需项缺什么就报什么_停用的bot也能读(adapter, tmp_p
 
 
 def test_GET_存储里的值不是真假_按关报_带一句说明(adapter, ready):
-    au.set_cfg(ready, features={"voice": "yes", "image": True})
+    au.set_cfg(ready, features={"voice": "maybe", "image": True})
     body = adapter.ok(adapter.call("GET", features_url("botalpha")))
     assert body["features"]["voice"] is False and body["features"]["image"] is True, body["features"]
     assert any("voice" in w for w in body["warnings"]), body["warnings"]
+
+
+def test_GET_写成yes_no_on_off的按真假认_带不带引号都一样_和网关一致(adapter, ready):
+    au.set_cfg(ready, features={"voice": "on", "image": "No", "stickers": "YES", "moments": "false"})
+    body = adapter.ok(adapter.call("GET", features_url("botalpha")))
+    f = body["features"]
+    assert [f["voice"], f["image"], f["stickers"], f["moments"]] == [True, False, True, False], f
+    assert body["warnings"] == [], body
 
 
 def test_PUT_只改给了的键_写进yml的features块_回生效说明与写后的开关(adapter, ready):
@@ -235,3 +243,64 @@ def test_PUT_技能手管的bot_打开时不放模板(adapter, ready):
     au.set_cfg(ready, skills_manual=True)
     adapter.ok(put(adapter, "botalpha", {"nsfw": True}))
     assert not au.skill_path(ready, "nsfw").exists()
+
+
+
+# ---------------------------------------------------------------- 改开关时技能与 yml 一致（盲审第 1、3 条）
+
+@pytest.mark.parametrize("empty", ["features: {}\n", "features:\n", "features: null\n"], ids=["空映射", "空值", "null"])
+def test_PUT_features写成空的_当没有这一块_照常写进去(adapter, ready, empty):
+    ready.yml.write_text(yaml.safe_dump(cfg_of(ready), allow_unicode=True) + empty, encoding="utf-8")
+    adapter.ok(put(adapter, "botalpha", {"moments": False}))
+    assert cfg_of(ready)["features"] == {"moments": False}, ready.yml.read_text(encoding="utf-8")
+    adapter.ok(put(adapter, "botalpha", {"groups": False}))
+    assert cfg_of(ready)["features"] == {"moments": False, "groups": False}
+
+
+def test_PUT_features写成别的类型_回500说清楚_一个字都不写(adapter, ready):
+    au.set_cfg(ready, features=["voice"])
+    before = ready.yml.read_bytes()
+    resp = put(adapter, "botalpha", {"moments": False})
+    adapter.expect_error(resp, 500, "internal")
+    assert "features" in au.response_text(resp)
+    assert ready.yml.read_bytes() == before
+
+
+def test_PUT_技能动不了_开关照存_成功体里说一句_不悄悄跳过(adapter, ready, tmp_path):
+    outside = tmp_path / "elsewhere.md"
+    outside.write_text(GIF, encoding="utf-8")
+    link = au.skill_path(ready, "gif")
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside)
+    au.put_file(au.skill_path(ready, "voice"), "没有头部的技能\n")
+    body = adapter.ok(put(adapter, "botalpha", {"stickers": False, "voice": False}))
+    assert body["changed"] == ["voice", "stickers"], body
+    assert any("skill-gif" in w for w in body["warnings"]) and any("skill-voice" in w for w in body["warnings"]), body
+    assert outside.read_text(encoding="utf-8") == GIF
+    assert cfg_of(ready)["features"] == {"voice": False, "stickers": False}
+
+
+def test_PUT_开关已经是这个值但技能没跟上_再PUT一次把技能补齐(adapter, ready):
+    au.set_cfg(ready, features={"stickers": False})
+    au.put_file(au.skill_path(ready, "gif"), GIF)
+    before = ready.yml.read_bytes()
+    body = adapter.ok(put(adapter, "botalpha", {"stickers": False}))
+    assert body["changed"] == [] and body["applied"] is False, body
+    assert "disable-model-invocation: true" in au.skill_path(ready, "gif").read_text(encoding="utf-8")
+    assert ready.yml.read_bytes() == before
+
+
+def test_PUT_放模板失败_整次500_已经改了的技能还原_yml不动(adapter, ready):
+    au.set_cfg(ready, features={"moments": False})
+    au.put_file(au.skill_path(ready, "gif"), GIF)
+    skills = au.skill_path(ready, "gif").parent.parent
+    before = ready.yml.read_bytes()
+    skills.chmod(0o555)                          # 建不了 skill-moments 目录
+    try:
+        resp = put(adapter, "botalpha", {"stickers": False, "moments": True})
+    finally:
+        skills.chmod(0o755)
+    adapter.expect_error(resp, 500, "internal")
+    assert au.skill_path(ready, "gif").read_text(encoding="utf-8") == GIF
+    assert not au.skill_path(ready, "moments").exists()
+    assert ready.yml.read_bytes() == before
