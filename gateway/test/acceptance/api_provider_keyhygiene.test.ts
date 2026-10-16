@@ -66,7 +66,7 @@ describe('POST /v1/provider/save 的密钥卫生', () => {
 
   test('拿不到锁（409 busy）：密钥不写凭据文件', async () => {
     const key = fakeKey('busy')
-    await withBot({ before: b => { seedProviders(b.root, []); writeFileSync(lockPath(b.root), JSON.stringify({ pid: process.pid, at: Date.now() })) } }, async ({ gw }) => {
+    await withBot({ gw: { provider_lock_wait_ms: 300 }, before: b => { seedProviders(b.root, []); writeFileSync(lockPath(b.root), JSON.stringify({ pid: process.pid, at: Date.now() })) } }, async ({ gw }) => {
       const r = await gw.call(SAVE, { name: 'myproxy', api: 'openai-completions', baseURL: 'https://api.example.com/v1', key, mode: 'create' })
       expect(r.status, `锁被占应 409，实得 ${r.status}`).toBe(409)
       expect(readCreds(gw.b.root).includes(key), '没拿到锁时密钥不该写进去').toBe(false)
