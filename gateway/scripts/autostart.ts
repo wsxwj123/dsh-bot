@@ -13,7 +13,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
-import { baseEnv, defaultProtectedDirs, directorAgent, gatewayAgent, logHint, movedRefusal, parseLaunchctlPrint, parseLaunchctlRuns, pickShared, plist, plistPath, protectedRepoDir, PROXY_VARS, pythonAgent, SHARED, sharedPortEnv, statusLine, tmuxLogsAgent, type Agent } from '../src/autostart'
+import { baseEnv, defaultProtectedDirs, directorAgent, gatewayAgent, jobsEnv, logHint, movedRefusal, parseLaunchctlPrint, parseLaunchctlRuns, pickShared, plist, plistPath, protectedRepoDir, PROXY_VARS, pythonAgent, SHARED, sharedPortEnv, statusLine, tmuxLogsAgent, type Agent } from '../src/autostart'
 import { loadAccess, loadBotConfig, rootDir, expandHome } from '../src/config'
 
 const [cmd, ...rest] = process.argv.slice(2)
@@ -104,7 +104,7 @@ function main(): number {
     const owner = cfg.gw.owners[0] ?? loadAccess(cfg.channelDir).allowFrom[0]
     const py = Bun.which('python3')
     if (!py || !owner) { console.log(py ? '找不到主人（access.json 的 allowFrom 是空的）' : '没找到 python3'); return 1 }
-    return install(pythonAgent({ name: `self-initiate.${cfg.id}`, python: py, repo: REPO, script: ['scripts/self_initiate.py', cfg.id, owner], root: rootDir(), env: env(), interval: 600 }), STASHED)
+    return install(pythonAgent({ name: `self-initiate.${cfg.id}`, python: py, repo: REPO, script: ['scripts/self_initiate.py', cfg.id, owner], root: rootDir(), env: env(), extraEnv: jobsEnv(cfg.gw, HOME), interval: 600 }), STASHED)
   }
   if (cmd === 'install-shared') {
     const py = Bun.which('python3')
