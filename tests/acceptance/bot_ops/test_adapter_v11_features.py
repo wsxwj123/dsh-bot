@@ -239,6 +239,13 @@ def test_PUT_打开时技能不在就按模板放上_成人内容取人设里的
     assert "- 示例一句\n- 示例两句" in nsfw and "只适用于成年角色" in nsfw, nsfw
 
 
+def test_PUT_打开成人内容时人设里没认出例句段_成功体里说一句(adapter, ready):
+    au.put_file(au.persona_path(ready), "# 人设\n### NSFW 节奏铁律\n- 规则不是例句\n")
+    body = adapter.ok(put(adapter, "botalpha", {"nsfw": True}))
+    assert any("例句" in w for w in body["warnings"]), body
+    assert "规则不是例句" not in au.skill_path(ready, "nsfw").read_text(encoding="utf-8")
+
+
 def test_PUT_技能手管的bot_打开时不放模板(adapter, ready):
     au.set_cfg(ready, skills_manual=True)
     adapter.ok(put(adapter, "botalpha", {"nsfw": True}))
