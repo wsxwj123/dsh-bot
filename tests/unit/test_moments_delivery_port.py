@@ -94,7 +94,10 @@ def delivery(tmp_path, monkeypatch):
         monkeypatch.setattr(web, "_urlopen", rec)
         app = web.app
         app.config["TESTING"] = True
-        r = app.test_client().post("/api/moment", json={"text": text})
+        # 8765 的 POST /api/moment 自 2026-10-16 回 410（朋友圈搬进壳），投递代码还在：
+        # 在请求上下文里直接调发帖处理函数（不经 before_request），照旧量它拉起 worker 的端口
+        with app.test_request_context("/api/moment", method="POST", json={"text": text}):
+            r = app.make_response(web.api_post_user_moment())
         assert r.status_code == 200, r.get_data(as_text=True)
         return rec.urls
 
