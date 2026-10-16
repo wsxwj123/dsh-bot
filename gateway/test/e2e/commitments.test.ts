@@ -57,7 +57,8 @@ test('兜底：说了"半小时后提醒你"却没登记 → 自动登记并告�
   expect(Math.abs(c[0].due_at - Date.now() - 30 * 60_000)).toBeLessThan(60_000)
   await say(tg, '嗯嗯')
   expect(prompts(b).find(p => p.text.includes('嗯嗯'))!.text).toContain(`程序已替你登记成承诺 #${c[0].id}`)
-  await say(tg, '!say:晚点告诉你', '晚点告诉你')
+  // 晚点、等会儿、明天、后天、周末自 2026-10-16 起按缺省时间先登记（见 commit_done_vague.test.ts），这里用仍然太含糊的「改天」
+  await say(tg, '!say:改天告诉你', '改天告诉你')
   await say(tg, '好')
   expect(prompts(b).find(p => p.text.endsWith('好'))!.text).toContain('像是答应了对方什么')
   await say(tg, '还有呢')
