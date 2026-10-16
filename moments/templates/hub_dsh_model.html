@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>供应商与模型 · 管理台</title>
 </head>
-<body>
+<body{% if embed %} class="embed"{% endif %}>
 {% include "_nav.html" %}
-<div class="wrap">
+<div class="wrap">{% if not embed %}
   <h1>供应商与模型</h1>
-  <div class="sub">新系统（dsh）bot 用的模型与供应商，在这里做完整闭环。改完几秒内生效，正在用它的聊天下一条消息会先写交接摘要再开新会话。</div>
+  <div class="sub">新系统（dsh）bot 用的模型与供应商，在这里做完整闭环。改完几秒内生效，正在用它的聊天下一条消息会先写交接摘要再开新会话。</div>{% endif %}
   <div class="muted" style="margin-bottom:12px">三个来源：内置（网关自带）、配置文件（bot 的 yml 里写的）、自建（在这里加，对全部新系统 bot 生效）。</div>
 
   <div class="card" id="banner" hidden><div id="banner-text" class="muted"></div></div>
@@ -125,7 +125,9 @@
   </div>
 </template>
 
-<style>
+<style>{% if embed %}
+body.embed{min-height:0;}
+body.embed .wrap{max-width:none;margin:0;padding:0;}{% endif %}
 .ppanel td{background:var(--soft-bg);border-radius:8px;}
 /* 页签与弹窗筛选都只切这一个类（§13：页签只切 hidden） */
 .hidden{display:none !important;}
