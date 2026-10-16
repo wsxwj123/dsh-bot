@@ -26,6 +26,7 @@ import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
 import { LifeActions } from '../life/actions'
 import { effectiveEngine, ImageSwitch } from '../life/image_switch'
+import { effectiveVoiceModel } from '../life/voice_model'
 import { loadFeatures, type Features } from '../features'
 import { StickerService } from '../stickers/sticker'
 import {
@@ -462,7 +463,9 @@ export class Engine {
     const voiceAccess = asVoice ? this.access() : undefined
     const voiceId = voiceAccess?.voiceId
     if (asVoice && !voiceId) this.log.warn('tool.reply_voice_unconfigured', { turn: at.turnId })
-    const voice = voiceId ? (t: string) => this.media.synthesize(t, voiceId, str(args.voice_emotion), str(args.voice_instruct), voiceAccess?.voiceModel) : undefined
+    // s1 不认方括号：语音桥会把情绪、语气提示变成方括号前缀，s1 照念出来，所以这两样不带（约定 v1.1 5.14.5 第 6 条）
+    const s1 = voiceAccess !== undefined && this.voiceModel(voiceAccess) === 's1'
+    const voice = voiceId ? (t: string) => this.media.synthesize(t, voiceId, s1 ? undefined : str(args.voice_emotion), s1 ? undefined : str(args.voice_instruct), voiceAccess?.voiceModel) : undefined
     const voiceTexts = voice && typeof args.voice_text === 'string' && args.voice_text.trim() ? args.voice_text.split(/\n\s*\n/).map(x => x.trim()) : undefined
     const skipFiles = new Set(this.ledger.sentFilesInChain(at.rootId))
     const sending = this.sender.send({ chatId: at.chatId, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo: Number.isInteger(replyTo) && replyTo > 0 ? replyTo : undefined, skipTexts: already, skipFiles, voice, voiceTexts })
@@ -634,11 +637,19 @@ export class Engine {
 
   /** 此刻生效的生图引擎（约定 v1.1 5.21）：配置写 off 就不生图；设了 gateway.global_cfg 就每次现读共用开关，读不到退回 image_provider */
   private imageEngine(): string {
+    return effectiveEngine(this.cfg.gw.imageProvider, this.globalCfg())
+  }
+  /** 壳的全局配置（gateway.global_cfg）的读取器：生图开关、全局语音模型都在里面；没设为 null */
+  private globalCfg(): ImageSwitch | null {
     const p = this.cfg.gw.globalCfg ? expandHome(this.cfg.gw.globalCfg) : null
     if (p && this.imgSwitch?.path !== p) this.imgSwitch = new ImageSwitch(p, this.log)
-    return effectiveEngine(this.cfg.gw.imageProvider, p ? this.imgSwitch : null)
+    return p ? this.imgSwitch : null
   }
   private imgSwitch: ImageSwitch | null = null
+  /** 这只 bot 生效的语音模型（约定 v1.1 5.14.5 第 7 条） */
+  private voiceModel(access = this.access()): string {
+    return effectiveVoiceModel(access.voiceModel, this.globalCfg()?.doc() ?? null)
+  }
 
   private lifeLines(chatId: string, segmentId: number, fresh: boolean): string[] {
     const out: string[] = []
@@ -692,7 +703,9 @@ export class Engine {
     const skillDir = join(this.cfg.channelDir, 'skills')
     let names: string[] = []
     try { names = readdirSync(skillDir).sort() } catch {}
-    return JSON.stringify([stamp(join(this.cfg.channelDir, 'access.json')), names.map(n => [n, stamp(join(skillDir, n, 'SKILL.md'))])])
+    // 壳的全局配置也盯着：全局语音模型换成或换掉 s1 时运行规则要跟着变（约定 v1.1 5.14.5）
+    const g = this.cfg.gw.globalCfg ? stamp(expandHome(this.cfg.gw.globalCfg)) : null
+    return JSON.stringify([stamp(join(this.cfg.channelDir, 'access.json')), names.map(n => [n, stamp(join(skillDir, n, 'SKILL.md'))]), g])
   }
 
   private patchInput(): PatchInput {
@@ -701,7 +714,8 @@ export class Engine {
     const skillDir = join(this.cfg.channelDir, 'skills')
     const access = this.access()
     return { persona, brain: this.brain, credentialsPath: this.cfg.credentialsPath, sessionsRoot: join(this.cfg.dshHome, 'sessions'), skillDir,
-      languages: { text: access.textLanguage, voice: access.voiceLanguage }, skillsDigest: skillsDigest(skillDir), features: this.features }
+      languages: { text: access.textLanguage, voice: access.voiceLanguage }, skillsDigest: skillsDigest(skillDir), features: this.features,
+      voiceModel: this.voiceModel(access) }
   }
 
   /** 读这只 bot 的功能开关；存储里有不是真假的值记一条警告 */
