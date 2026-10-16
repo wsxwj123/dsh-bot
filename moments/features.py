@@ -6,6 +6,7 @@
 网关（gateway/src/features.ts）、适配服务、定时任务都按这里的规则读，缺省两边要一致。
 """
 import os
+import re
 
 #: 九个键与中文名，顺序就是管理台页面上块的顺序
 KEYS = (("voice", "发语音"), ("image", "生图"), ("stickers", "表情包"), ("moments", "朋友圈"),
@@ -51,3 +52,21 @@ def read(cfg, channel_dir):
 def enabled(cfg, channel_dir, key):
     """这只 bot 的某项功能开着没有（定时任务跳过关掉的 bot 时用）。"""
     return read(cfg, channel_dir)[0][key]
+
+
+_DISABLE_RE = re.compile(r"^\s*disable-model-invocation\s*:")
+
+
+def set_skill_disabled(text, disabled):
+    """技能跟着开关走（5.17）：在技能头部（开头 ``---`` 与下一行 ``---`` 之间）写上或去掉
+    ``disable-model-invocation: true``，正文一个字不动。dsh 不把写了这一行的技能列给模型。
+    返回新文本；没有头部的返回 None（动不了，这样的文件 dsh 本来也不列）。"""
+    if not text.startswith("---\n"):
+        return None
+    end = text.find("\n---", 3)
+    if end < 0:
+        return None
+    head = [line for line in text[4:end].split("\n") if line and not _DISABLE_RE.match(line)]
+    if disabled:
+        head.append("disable-model-invocation: true")
+    return "---\n" + "\n".join(head) + text[end:]
