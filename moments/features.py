@@ -54,19 +54,22 @@ def enabled(cfg, channel_dir, key):
     return read(cfg, channel_dir)[0][key]
 
 
-_DISABLE_RE = re.compile(r"^\s*disable-model-invocation\s*:")
+_DISABLE_RE = re.compile(r"^disable-model-invocation[ \t]*:")
+_FENCE_RE = re.compile(r"^---[ \t]*\r?$")
 
 
 def set_skill_disabled(text, disabled):
-    """技能跟着开关走（5.17）：在技能头部（开头 ``---`` 与下一行 ``---`` 之间）写上或去掉
-    ``disable-model-invocation: true``，正文一个字不动。dsh 不把写了这一行的技能列给模型。
-    返回新文本；没有头部的返回 None（动不了，这样的文件 dsh 本来也不列）。"""
-    if not text.startswith("---\n"):
+    """技能跟着开关走（5.17）：在技能头部（第一行 ``---`` 与下一个整行 ``---`` 之间）写上或去掉
+    ``disable-model-invocation: true``，头部别的行（含空行）和正文一个字不动，开头的 BOM、Windows 换行照原样。
+    dsh 不把写了这一行的技能列给模型。返回新文本；没有头部的返回 None（动不了，这样的文件 dsh 本来也不列）。"""
+    bom = "﻿" if text.startswith("﻿") else ""
+    lines = text[len(bom):].split("\n")
+    if not _FENCE_RE.match(lines[0]):
         return None
-    end = text.find("\n---", 3)
-    if end < 0:
+    end = next((i for i in range(1, len(lines)) if _FENCE_RE.match(lines[i])), None)
+    if end is None:
         return None
-    head = [line for line in text[4:end].split("\n") if line and not _DISABLE_RE.match(line)]
+    head = [line for line in lines[1:end] if not _DISABLE_RE.match(line)]
     if disabled:
-        head.append("disable-model-invocation: true")
-    return "---\n" + "\n".join(head) + text[end:]
+        head.append("disable-model-invocation: true" + ("\r" if lines[0].endswith("\r") else ""))
+    return bom + "\n".join(lines[:1] + head + lines[end:])
