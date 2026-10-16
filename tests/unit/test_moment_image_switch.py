@@ -59,7 +59,7 @@ def _wire(monkeypatch):
     return calls, fell_back
 
 
-def test_comfyui_moment_calls_shared_script_and_falls_back(monkeypatch, tmp_path):
+def test_comfyui_moment_calls_shared_script_and_does_not_switch_engine(monkeypatch, tmp_path):
     shared = _cfg(tmp_path, provider="comfyui")
     skill = tmp_path / "comfyui-skill"
     monkeypatch.setenv("CLAUDEBOT_GLOBAL_CFG", str(shared))
@@ -73,7 +73,7 @@ def test_comfyui_moment_calls_shared_script_and_falls_back(monkeypatch, tmp_path
     assert cmd[cmd.index("--global") + 1] == str(shared)
     assert cmd[cmd.index("--size") + 1] == "wide"
     assert env.get("CLAUDEBOTLIFE_REPO") == str(ROOT)        # 仓库 configs/ 下的 bot yml 里的锚点照旧找得到
-    assert fell_back == ["chenlulu"]                         # ComfyUI 出不了图：这一张改用 NovelAI
+    assert fell_back == []                                   # 出不了图不换引擎（用户 2026-10-16 定）：这条圈只发文字
 
 
 def test_without_shared_settings_uses_repo_script_and_config(monkeypatch):
