@@ -14,7 +14,7 @@ from . import botops_util as u
 from .adapter_util import adapter, console_guard  # noqa: F401  夹具
 
 #: 补充文件第 7 节与 9.1：4.1 表里的八个，加 bot.notify、bot.life_settings，再加 bot.enable、
-#: bot.switch_in、bot.group_chat（v0.6/v0.7），再加 bot.persona、bot.voice（v0.8，补充文件 10.1），再加 bot.skills（v0.9，补充文件 11.1），再加 bot.create、bot.archive、bot.delete、bot.profile（v1.0，补充文件 12.1），再加 bot.token_handoff（补充文件 13.8），再加 bot.groups_discovered（约定 v1.1 5.20），恰好二十二个键
+#: bot.switch_in、bot.group_chat（v0.6/v0.7），再加 bot.persona、bot.voice（v0.8，补充文件 10.1），再加 bot.skills（v0.9，补充文件 11.1），再加 bot.create、bot.archive、bot.delete、bot.profile（v1.0，补充文件 12.1），再加 bot.token_handoff（补充文件 13.8），再加 bot.groups_discovered（约定 v1.1 5.20）、bot.features（5.19），恰好二十三个键
 CAPABILITIES_TEN = {
     "bot.restart.graceful": False,
     "bot.restart.force": True,
@@ -38,6 +38,7 @@ CAPABILITIES_TEN = {
     "bot.profile": True,
     "bot.token_handoff": True,
     "bot.groups_discovered": True,
+    "bot.features": True,
 }
 
 
