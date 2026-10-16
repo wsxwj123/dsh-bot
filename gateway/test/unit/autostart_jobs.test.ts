@@ -9,6 +9,14 @@ test('jobsEnv：配置了 gateway.botlife_db 就带 BOTLIFE_STATE_DB（~ 展开�
   expect(jobsEnv({}, '/Users/u')).toEqual({})
 })
 
+test('jobsEnv：配了共用生图开关的全局配置和 ComfyUI 技能目录，也一并带上（发圈配图用）', () => {
+  expect(jobsEnv({ botlifeDb: '~/a/state.db', globalCfg: '~/claudebotlife/configs/_global.yml', comfyuiSkillDir: '~/.claude/skills/comfyui-skill' }, '/Users/u')).toEqual({
+    BOTLIFE_STATE_DB: '/Users/u/a/state.db',
+    CLAUDEBOT_GLOBAL_CFG: '/Users/u/claudebotlife/configs/_global.yml',
+    COMFYUI_SKILL_DIR: '/Users/u/.claude/skills/comfyui-skill',
+  })
+})
+
 test('带上的变量真的进了 plist', () => {
   const env = { PATH: '/usr/bin', HOME: '/Users/u' }
   const p = plist(pythonAgent({ name: 'self-initiate.bot4', python: 'p', repo: '/r', script: ['scripts/self_initiate.py', 'bot4', '42'], root: '/h', env, extraEnv: jobsEnv({ botlifeDb: '~/claudebotlife/state.db' }, '/Users/u'), interval: 600 }))
