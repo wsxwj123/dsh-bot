@@ -123,6 +123,22 @@ test('moments：查最近的圈用指定的朋友圈库（BOTLIFE_STATE_DB）；
   expect(bad.text).toContain('moment_id')
 })
 
+test('moments：动态已经被删（脚本报 not found），点赞、回复都不算出错，只告诉模型不用回', async () => {
+  const b = await setup()
+  const db = join(b.root, 'botlife.db')
+  b.gw.botlife_db = db
+  expect(Bun.spawnSync([PY, '-c', 'import db; db.init()'], { cwd: REPO, env: { ...process.env, BOTLIFE_STATE_DB: db } }).exitCode).toBe(0)
+  await start()
+  tg!.pushText(OWNER, '!tool:moments|{"action":"like","moment_id":"999"}')
+  await until(() => toolResults(b).filter(r => r.name === 'moments').length === 1, 'like on a deleted moment')
+  tg!.pushText(OWNER, '!tool:moments|{"action":"reply","moment_id":"999","text":"好看"}')
+  await until(() => toolResults(b).filter(r => r.name === 'moments').length === 2, 'reply on a deleted moment')
+  for (const r of toolResults(b).filter(r => r.name === 'moments')) {
+    expect(r.isError).toBeFalsy()
+    expect(r.text).toBe('这条动态已经不在了，不用回，也不用点赞。')
+  }
+})
+
 test('发图慢：reply 先告诉模型"在发了"（不让 dsh 等到超时）；模型再调一次 reply，同一张图不会发第二遍；这一轮等发完才收尾', async () => {
   const b = await setup({ reply_return_ms: 300 })
   await start()
