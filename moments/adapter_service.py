@@ -55,6 +55,7 @@ from werkzeug.exceptions import HTTPException, InternalServerError, RequestEntit
 
 import gateway_client
 from moments import bot_launchd, bots_client, config_sources, hub_addbot, hub_routes, life_settings, redact
+from moments import features as feature_switch
 from moments.provider_model import HubError
 
 PREFIX = "/adapter/v1"
@@ -87,6 +88,7 @@ CAPABILITIES = {
     "bot.profile": True,
     "bot.token_handoff": True,
     "bot.groups_discovered": True,
+    "bot.features": True,
 }
 DEFAULT_LABEL = "各 bot 配置文件里写的那一组"
 
@@ -972,6 +974,12 @@ def _notify(bot_id):
         raise _invalid("只有 group_turn 才能带 chat_id 和 human_ts")
     bot = _require_bot(bot_id)
     _require_enabled(bot)
+    # 约定 v1.1 5.19.6：朋友圈、群聊功能关着的，这两类通知都回 409 feature_off，不投
+    switch = feature_switch.read(bot["cfg"], bot["channel"])[0]
+    if source == "group_turn" and not switch["groups"]:
+        raise Refuse(409, "feature_off", "这只 bot 的群聊功能关着，没有投递")
+    if source != "group_turn" and not switch["moments"]:
+        raise Refuse(409, "feature_off", "这只 bot 的朋友圈功能关着，没有投递")
     if source == "group_turn":
         if group not in _read_access(bot)[2]:
             raise Refuse(409, "not_in_group", "这只 bot 不在这个群里，没有投递")
@@ -1307,6 +1315,141 @@ def _groups_get(bot_id):
     username = _gateway_health(bot["channel"]).get("username")
     return {"ok": True, "username": username if _text(username) else None,
             "groups": {chat_id: _group_view(entry) for chat_id, entry in groups.items()}}
+
+
+# ---------------------------------------------------------------- v1.1 功能开关（约定 5.19）
+
+#: 必需项缺了时的说法（5.19.2：只判"配没配"，不回任何密钥）
+REQUIREMENT_TEXT = {
+    "voice": ("voice_id_missing", "缺音色编号。去管理台这只 bot 的语音设置里填 Fish 音色编号"),
+    "image": ("image_token_missing", "缺 NovelAI 令牌。去管理台的画风页填 NovelAI 令牌"),
+    "life": ("life_config_missing", "缺生活设定。去管理台这只 bot 的生活设定里配好作息"),
+}
+NOVELAI_TOKEN_KEYS = ("NOVELAI_JWT", "NOVELAI_BEARER_TOKEN", "NOVELAI_TOKEN")
+
+
+def _novelai_skill_dir(cfg):
+    """NovelAI 技能目录：yml 里 gateway.image_skill_dir（同网关），没写就是仓库里的 skills/novelai-skill。"""
+    gw = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
+    raw = gw.get("image_skill_dir")
+    return os.path.expanduser(raw.strip()) if _text(raw) else os.path.join(_REPO_ROOT, "skills", "novelai-skill")
+
+
+def _has_novelai_token(cfg):
+    """配没配 NovelAI 令牌，只判有没有、不往外带：新系统凭据文件 refs 里的 NOVELAI_BEARER_TOKEN（网关的读法），
+    或 novelai 技能目录 .env.local 里三种写法之一（生图脚本与画风页的读法）。"""
+    try:
+        with open(os.path.join(str(config_sources.dsh_home()), "credentials.yaml"), encoding="utf-8") as f:
+            refs = (yaml.safe_load(f) or {}).get("refs")
+        value = refs.get("NOVELAI_BEARER_TOKEN") if isinstance(refs, dict) else None
+        if isinstance(value, str) and len(value.strip()) >= 8:
+            return True
+    except Exception:                       # noqa: BLE001  读不出就看下一处
+        pass
+    try:
+        with open(os.path.join(_novelai_skill_dir(cfg), ".env.local"), encoding="utf-8") as f:
+            for line in f:
+                head, sep, value = line.strip().partition("=")
+                if sep and not head.startswith("#") and head.strip() in NOVELAI_TOKEN_KEYS and value.strip().strip("'\""):
+                    return True
+    except Exception:                       # noqa: BLE001  没有这个文件就是没配
+        pass
+    return False
+
+
+def _feature_requirements(bot):
+    """5.19.2 的 requirements：每个键都有；dsh 侧 voice 要音色编号、image 要 NovelAI 令牌、life 要生活设定。"""
+    cfg = bot["cfg"]
+    try:
+        access = _load_access(bot)[1]
+    except Refuse:
+        access = {}
+    life = cfg.get("life_config")
+    ok = {"voice": _text(access.get("voiceId")),
+          "image": _has_novelai_token(cfg),
+          "life": _text(life) and os.path.isfile(os.path.expanduser(life.strip()))}
+    out = {}
+    for key, _label in feature_switch.KEYS:
+        missing = [] if ok.get(key, True) else [{"code": REQUIREMENT_TEXT[key][0], "message": REQUIREMENT_TEXT[key][1]}]
+        out[key] = {"ready": not missing, "missing": missing, "notes": []}
+    return out
+
+
+def _features_get(bot_id):
+    """读功能开关（约定 5.19.2）。停用的 bot 也能读。"""
+    bot = _require_bot(bot_id)
+    values, warnings = feature_switch.read(bot["cfg"], bot["channel"])
+    return {"ok": True, "keys": [{"key": k, "label": label} for k, label in feature_switch.KEYS],
+            "features": values, "requirements": _feature_requirements(bot), "warnings": warnings}
+
+
+def _features_text(text, changes):
+    """把 ``changes`` 写进 yml 的 features 块：块在就逐键改（行级编辑器，别的字节不动）；块不在就新加一个。"""
+    from moments import hub_config         # 延迟 import：同 _write_enabled
+    lit = {k: "true" if v else "false" for k, v in changes.items()}
+    root = hub_config.compose(text)
+    block = hub_config.find(root, ["features"])
+    if isinstance(block, yaml.MappingNode) and block.value:
+        for key, value in changes.items():
+            text = hub_config.set_scalar(text, hub_config.compose(text), "features." + key, value, "bool")
+        return text
+    if block is not None:
+        raise HubError(500, "bad_features", "配置里的 features 写法认不出来")
+    if isinstance(root, yaml.MappingNode) and root.flow_style and root.value:
+        at = root.value[0][0].start_mark.index      # 整份是 JSON 的配置：插在第一个键前面
+        return text[:at] + '"features": {%s}, ' % ", ".join('"%s": %s' % kv for kv in lit.items()) + text[at:]
+    lines = "".join("  %s: %s\n" % kv for kv in lit.items())
+    return text + ("\n" if text and not text.endswith("\n") else "") + "features:\n" + lines
+
+
+def _features_put(bot_id):
+    """改功能开关（约定 5.19.3）：只改给了的键；打开缺必需项回 422 requirement_missing；锁被占 409 busy。
+    改了的开关等这只 bot 空闲时换新会话生效（5.19.5）：网关盯着自己的 yml，见 features 变了就排一次空闲重载。"""
+    from moments import hub_config         # 延迟 import：同 _write_enabled
+    body = _json_object()
+    want = body.get("features")
+    if set(body) != {"features"} or not isinstance(want, dict) or not want:
+        raise _invalid('请求体只能是 {"features": {功能键: true 或 false, …}}，至少给一个键')
+    fields = {k: "不认识的功能键" if k not in feature_switch.KEY_SET else "值只能是 true 或 false"
+              for k, v in want.items() if k not in feature_switch.KEY_SET or type(v) is not bool}
+    if fields:
+        refuse = _invalid("功能开关不合规")
+        refuse.fields = fields
+        raise refuse
+    _require_bot(bot_id)
+    path = os.path.join(str(config_sources.dsh_dir()), bot_id + ".yml")
+    try:
+        with hub_addbot.hold_addbot_lock():
+            bot = _require_bot(bot_id)       # 锁里现读，别拿锁外读到的旧开关判
+            current = feature_switch.read(bot["cfg"], bot["channel"])[0]
+            reqs = _feature_requirements(bot)
+            missing = {k: "；".join(m["message"] for m in reqs[k]["missing"])
+                       for k, v in want.items() if v and not current[k] and reqs[k]["missing"]}
+            if missing:
+                raise Refuse(422, "requirement_missing", "打不开：缺少必需的设置", fields=missing)
+            changed = [k for k, _label in feature_switch.KEYS if k in want and want[k] != current[k]]
+            if changed:
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+                new_text = _features_text(text, {k: want[k] for k in changed})
+                got = (yaml.safe_load(new_text) or {}).get("features") or {}
+                if any(got.get(k) is not want[k] for k in changed):
+                    raise Refuse(500, "internal", "开关写进配置之后读不回来，配置没有改")
+                hub_config.atomic_write(new_text, path)
+    except HubError as e:
+        raise _config_failure(e, "这只 bot 的配置") from None
+    except yaml.YAMLError:
+        raise Refuse(500, "internal", "这只 bot 的配置读不出来，没有改") from None
+    after = dict(current, **{k: want[k] for k in changed})
+    running = bot["enabled"] and bot_launchd.row_state(bot_id, bot_launchd.resolve_seams())[0] in ("online", "starting")
+    if not changed:
+        message = "开关本来就是这样，没有改动。"
+    elif running:
+        message = "已保存。这只 bot 空闲时换新会话后生效，不打断正在回的话。"
+    else:
+        message = "已保存。这只 bot 现在没在跑，下次启动时生效。"
+    return {"ok": True, "message": message, "features": after, "changed": changed,
+            "applied": not changed, "queued": bool(changed) and running}
 
 
 # ---------------------------------------------------------------- v1.1 刚发现的群（约定 5.20）
@@ -2528,6 +2671,7 @@ _BOT_ROUTES = {
     "life": {"GET": _life_get, "PUT": _life_put},
     "enabled": {"POST": _set_enabled},
     "groups": {"GET": _groups_get, "POST": _groups_post},
+    "features": {"GET": _features_get, "PUT": _features_put},
     "persona": {"GET": _persona_get, "PUT": _persona_put},
     "voice": {"GET": _voice_get, "PUT": _voice_put},
     "archive": {"POST": _archive},
