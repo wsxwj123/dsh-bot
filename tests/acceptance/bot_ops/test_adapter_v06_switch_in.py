@@ -101,7 +101,7 @@ def test_切进_成功_回约定形状_synced为空_启动了这一只_日志与
     assert isinstance(imported, dict) and set(imported) == {"messages", "promises"}, imported
     for k, v in imported.items():
         assert type(v) is int and v >= 0, "imported.%s 应是非负整数：%r" % (k, v)
-    assert body.get("synced") == [], "本批不同步人设和技能，synced 应恒为 []：%r" % (body.get("synced"),)
+    assert body.get("synced") == [], "中立目录里没有对方导出的人设和技能，synced 应为 []：%r" % (body.get("synced"),)
     assert au.read_cfg(sw.alpha).get("enabled") is not False, "导入成功后应记成启用"
     assert au.plist_state(adapter.sandbox, au.unit_labels("botalpha")[0]) == "装着"
     subs = adapter.launchctl.subcommands()
