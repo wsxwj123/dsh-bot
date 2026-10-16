@@ -18,23 +18,40 @@ NSFW_FALLBACK = "按人设自然反应"
 NSFW_HEAD = "# 情欲场景语气参考\n\n以下只作语气参考，不是必用清单。按当下情境自然反应，不照搬原句。\n\n"
 NSFW_TAIL = "\n\n说话特点和回复规则照常驻人设，这份语料不压过人设。"
 
-_NSFW_TITLE = re.compile(r"^\s*(?:\d+\s*[.、．]\s*)?NSFW\s*[:：]?\s*$", re.IGNORECASE)
-_BULLET = re.compile(r"^\s*[-*]\s+(.*\S)\s*$")
+#: 例句段标题：整行就是"NSFW"，前面可带 #、加粗、编号（2.、2、），后面可带括号注释、"例句/语料/示例/参考"和冒号。
+#: 后面跟别的说明文字的不算（"### NSFW 节奏铁律"这类是规则段，不是例句）
+_NSFW_TITLE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*(?:\d+\s*[.、．)）]\s*)?NSFW\s*(?:[（(][^（()）]*[）)])?\s*"
+    r"(?:例句|语料|示例|参考)?\s*(?:\*\*)?\s*[:：]?\s*(?:\*\*)?\s*$", re.IGNORECASE)
+_ITEMS = (("dash", re.compile(r"^\s*[-*•]\s+(.*\S)\s*$")), ("num", re.compile(r"^\s*\d+\s*[.、．)）]\s*(.*\S)\s*$")))
+_COMMENT_MARKS = ("<!--", "-->")
 
 
 def nsfw_lines(persona):
-    """人设里 NSFW 例句段的原句：认"NSFW"那一行标题（比如"2.NSFW"），收它下面连着的列表项，遇到别的内容就停。"""
-    out, taking = [], False
+    """人设里 NSFW 例句段的原句：认"NSFW"那一行标题（比如"2.NSFW"），收它下面连着的列表项（"-"、"*"、"•" 或
+    数字编号，和第一项同一种写法），遇到别的内容就停。带注释标记的句子不收：抄进技能会把两边共用那一段的边界切错。"""
+    out, taking, style = [], False, None
     for line in (persona or "").splitlines():
         if not taking:
             taking = bool(_NSFW_TITLE.match(line))
             continue
-        bullet = _BULLET.match(line)
-        if bullet:
-            out.append(bullet.group(1))
-        elif line.strip() or out:
+        item = None
+        for name, pattern in _ITEMS:
+            m = pattern.match(line)
+            if m and style in (None, name):
+                item, style = m.group(1), name
+                break
+        if item is not None:
+            if not any(mark in item for mark in _COMMENT_MARKS):
+                out.append(item)
+        elif line.strip() or style:
             break
     return out
+
+
+def nsfw_unmatched(persona):
+    """人设里提到 NSFW、却没认出例句段（放 nsfw 技能时提醒一句，免得以为原句抄进去了）。"""
+    return "nsfw" in (persona or "").lower() and not nsfw_lines(persona)
 
 
 def render(generic, appearance="", persona=""):
