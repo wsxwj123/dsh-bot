@@ -74,6 +74,43 @@ def test_开关只在17990的应用上打开_8765那边照旧(client, old_app, p
     assert old_html.replace(navs[0], MARK) == new_html
 
 
+# ---------------------------------------------------------------- 内嵌模式（?embed=1）
+#: 合并管理台把模型页嵌在供应商页下半块：没有自己的标题、导航和外边距，只留模型设置
+EMBED_GONE = ("<h1", 'class="sub"', "<nav")
+EMBED_KEPT = ('id="pform"', 'id="pickDialog"', 'id="editDialog"', "function hubApi")
+
+
+def test_内嵌_8765上embed1_没有标题与导航_清掉外边距与最小高度_模型设置都在(old_app):
+    html = old_app.test_client().get("/hub/dsh-model?embed=1").get_data(as_text=True)
+    for gone in EMBED_GONE:
+        assert gone not in html, "内嵌时页面里还有 %r" % gone
+    assert '<body class="embed">' in html
+    assert "body.embed{min-height:0;}" in html, "内嵌时 body 不该再撑满一屏（iframe 量高度只增不减）"
+    assert "body.embed .wrap{max-width:none;margin:0;padding:0;}" in html
+    for kept in EMBED_KEPT:
+        assert kept in html, "内嵌时少了 %r" % kept
+
+
+@pytest.mark.parametrize("query", ["?embed=0", "?embed=true", "?embed=1x", "?embed="])
+def test_内嵌_只认embed等于1_别的写法与不带时逐字节相同(old_app, query):
+    c = old_app.test_client()
+    assert c.get("/hub/dsh-model" + query).get_data() == c.get("/hub/dsh-model").get_data()
+
+
+def test_内嵌_页面服务上embed1_占位注释照旧单独一行_标题没了(client):
+    html = client.get("/hub/dsh-model?embed=1", headers=AUTH).get_data(as_text=True)
+    assert MARK in html.splitlines(), "页面服务要留着占位注释，换成什么由壳决定"
+    for gone in EMBED_GONE:
+        assert gone not in html, "内嵌时页面里还有 %r" % gone
+    assert '<body class="embed">' in html
+
+
+@pytest.mark.parametrize("path", ["/hub/bots", "/hub/addbot"])
+def test_内嵌_只有模型页认embed_别的页带了也逐字节照旧(old_app, path):
+    c = old_app.test_client()
+    assert c.get(path + "?embed=1").get_data() == c.get(path).get_data()
+
+
 # ---------------------------------------------------------------- 名单
 #: 名单外的路径：末尾斜杠、双斜杠、点段、编过码的写死段、大小写，还有 8765 上有而名单里没有的
 UNLISTED = [
