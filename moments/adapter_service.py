@@ -2470,6 +2470,26 @@ def _restore(archive_id):
     return {"ok": True, "bot_id": bot_id, "enabled": False, "running": False}      # 13.4
 
 
+def _secret_files(bot):
+    """删除时直接抹掉、不进废纸篓的两份密钥：频道目录的 .env（13.5）与 state/api.key（v1.1 5.18.4）。
+
+    这只 bot 自己家里的固定位置（``channel/.env``、``state/api.key``）一律算上，频道目录写到家里别处的再加上
+    那两处；所在目录一路没有软链、又在家里的才算（文件本身是软链的只删链接，不碰它指向的文件）。家以外的
+    （频道目录写到另一套系统那边的）不碰：那里的文件不归这边管，也不会跟着 bot 目录进废纸篓。"""
+    home = os.path.join(os.path.realpath(str(config_sources.dsh_home())), "bots", bot["id"])
+    paths = [os.path.join(home, "channel", ".env"), os.path.join(home, "state", "api.key")]
+    channel = _channel_file(bot, ".")
+    if channel is not None:
+        channel = os.path.normpath(channel)
+        paths += [os.path.join(channel, ".env"), os.path.join(os.path.dirname(channel), "state", "api.key")]
+    out = []
+    for path in paths:
+        parent = os.path.dirname(path)
+        if parent.startswith(home + os.sep) and os.path.realpath(parent) == parent and path not in out:
+            out.append(path)
+    return out
+
+
 def _delete(bot_id):
     """删除（草案 C，补充文件 12.4）：请求体只许 ``{"confirm": "<编号>"}``（422）→ 名单（404）→ 按 5.8 停掉
     （停不下来 503，什么都不动）→ 12.3 列的那些移进废纸篓（没有废纸篓才直接删）。
@@ -2485,10 +2505,9 @@ def _delete(bot_id):
     def drop_env_then_discard(items):
         # 13.5：Telegram 令牌所在的 .env 先直接删掉，不进废纸篓；删不掉整次 500，别的一样都没移。
         # 约定 v1.1 5.18.4：网关本机接口口令 state/api.key 同样直接抹掉（归档时照旧带走，恢复要用）
-        for secret in (_channel_file(bot, ".env"), _state_file(bot, "api.key")):
-            if secret is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(secret)
+        for secret in _secret_files(bot):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(secret)
         _discard(bot_id, items)
 
     _move_out(bot, bots, seams, drop_env_then_discard, "delete")
