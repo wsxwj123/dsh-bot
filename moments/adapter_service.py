@@ -44,6 +44,7 @@ import stat
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -170,7 +171,10 @@ CREATE_BUDGET = 55.0
 UNDO_RESERVE = 2 * bot_launchd.LAUNCHCTL_TIMEOUT
 CREATE_KEYS = ("bot_id", "telegram_token", "chat_id", "display_name", "persona_text", "persona_template",
                "fish_voice_id", "fish_api_key", "port", "enabled", "person", "telegram_username",
-               "telegram_user_id", "purpose")
+               "telegram_user_id", "purpose", "features", "appearance")
+#: 约定 v1.1 5.18.1：外貌去首尾空白后最多这么多个码点；不许出现的几样（注释标记与模板占位括号）
+APPEARANCE_MAX = 500
+APPEARANCE_BANNED = ("<!--", "-->", "{{", "}}")
 PROFILE_NAME_MAX = 32
 UTC_STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 ARCHIVE_ID_RE = re.compile(r"^([a-z][a-z0-9_]{1,31})-([0-9]{8}T[0-9]{6}Z)\Z")
@@ -1943,7 +1947,26 @@ def _create_fields(body, bots):
         raise _invalid("telegram_user_id 要是正整数")
     if body.get("purpose", "new") not in CREATE_PURPOSES:     # dsh 侧 new 与 switch_in 流程相同
         raise _invalid("purpose 只能是 new 或 switch_in")
-    extra = {"enabled": enabled, "person": person, "telegram_username": username, "telegram_user_id": user_id}
+    # 约定 v1.1 5.18.1：功能键数组（省略等于九个全关）与外貌
+    wanted = body.get("features", [])
+    if not isinstance(wanted, list) or len(set(map(repr, wanted))) != len(wanted) \
+            or not all(isinstance(k, str) and k in feature_switch.KEY_SET for k in wanted):
+        raise _invalid("features 要是功能键的数组，不重复，只能用 voice、image、stickers、moments、proactive、"
+                       "life、relationship、groups、nsfw")
+    appearance = body.get("appearance", "")
+    if appearance is None:
+        appearance = ""
+    if not isinstance(appearance, str):
+        raise _invalid("appearance 要是字符串")
+    appearance = appearance.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(appearance) > APPEARANCE_MAX or any(ch != "\n" and unicodedata.category(ch) == "Cc" for ch in appearance) \
+            or any(bad in appearance for bad in APPEARANCE_BANNED):
+        raise _invalid("appearance 去掉首尾空白后最多 %d 个字，可以换行，不能有别的控制字符，也不能含 <!--、-->、{{、}}"
+                       % APPEARANCE_MAX)
+    if appearance and "image" not in wanted:
+        raise _invalid("appearance 只在勾了生图（features 里有 image）时才能填")
+    extra = {"enabled": enabled, "person": person, "telegram_username": username, "telegram_user_id": user_id,
+             "features": [k for k, _label in feature_switch.KEYS if k in wanted], "appearance": appearance}
     name = hub_addbot._optional(body, "display_name")
     try:
         name = bot_id if name is None else hub_addbot._display_name(name)
@@ -2129,12 +2152,46 @@ def _undo_create(bot_id, seams):
         _log.error("create rollback failed: %s", type(e).__name__)
 
 
+def _create_features(fields):
+    """新建时的九个开关（约定 v1.1 5.18.1、5.19.4）：勾了且必需项齐的开，其余关；勾了但缺必需项的
+    不打开，列进 features_skipped。新 bot 的配置里还没有 image_skill_dir、life_config，按缺省判。"""
+    ready = {"voice": bool(fields.get("fish_voice_id")), "image": _has_novelai_token({}), "life": False}
+    final, skipped = {}, []
+    for key, _label in feature_switch.KEYS:
+        ticked = key in fields["features"]
+        final[key] = ticked and ready.get(key, True)
+        if ticked and not ready.get(key, True):
+            code, message = REQUIREMENT_TEXT[key]
+            skipped.append({"key": key, "missing": [{"code": code, "message": message}]})
+    return final, skipped
+
+
+def _create_skills(fields):
+    """按勾选放技能（约定 v1.1 5.18.1）：勾了的功能都放（缺必需项没打开的照放、写成停用，补齐后在 5.19
+    打开就能用）；外貌写进 image 的圈内，nsfw 的圈内取这份人设里的例句。返回放了的通用名。"""
+    bot_id = fields["bot_id"]
+    bot = {"id": bot_id, "cfg": {},
+           "channel": os.path.abspath(os.path.join(str(config_sources.dsh_bot_dir(bot_id)), "channel"))}
+    placed = []
+    for key in fields["features"]:
+        generic = feature_switch.SKILL_OF.get(key)
+        if generic is None:
+            continue
+        text = skill_templates.render(generic, appearance=fields["appearance"], persona=fields["persona"])
+        if not fields["features_final"][key]:
+            text = feature_switch.set_skill_disabled(text, True)
+        _place_skill(_skill_path(bot, generic), text)
+        placed.append(generic)
+    return placed
+
+
 def _create_locked(fields, bots, seams, deadline):
     """``_create_bot`` 持锁的那一段：409 → 端口 → 配置全文 → getMe → 令牌占用 → 落盘 → 装启动项。"""
     bot_id = fields["bot_id"]
     if any(os.path.lexists(path) for path, _rel in _bot_slots(bot_id, seams)):
         raise Refuse(409, "exists", "已经有一只叫 %s 的 bot 了（配置、bot 目录或启动项还在）" % bot_id)
     fields["port"] = _create_port(fields["port"], bot_id, bots)
+    fields["features_final"], fields["features_skipped"] = _create_features(fields)
     fields["yml_text"] = _create_yml(fields, bots)
     probe = hub_addbot.getme(fields["token"])
     if not probe.get("ok"):
@@ -2158,6 +2215,12 @@ def _create_locked(fields, bots, seams, deadline):
     except Exception as e:                  # noqa: BLE001  lay_down 已自己回滚；异常消息可能带路径，只记类名
         _log.error("create lay_down failed: %s", type(e).__name__)
         raise Refuse(500, "internal", "写新 bot 的文件失败，已撤回") from None
+    try:
+        fields["skills_placed"] = _create_skills(fields)
+    except Exception as e:                  # noqa: BLE001  技能没放成整只撤回；异常消息可能带路径，只记类名
+        _log.error("create skills failed: %s", type(e).__name__)
+        _undo_create(bot_id, seams)
+        raise Refuse(500, "internal", "放技能文件失败，已撤回这次写的文件") from None
     try:
         # 13.3：enabled 为 false 时启动项文件按停用收起（只写成 .plist.disabled），不装载、不启动
         step = hub_addbot._register_dsh(fields, deadline=deadline - UNDO_RESERVE, stashed=not fields["enabled"]) \
@@ -2198,7 +2261,10 @@ def _create_bot():
         and _unit_running(bot_id, seams)    # enabled 为 false 时没有装载，不必再问
     person = _person({"id": bot_id, "cfg": {"life_id": fields["person"]} if fields["person"] else {}})
     return {"ok": True, "bot_id": bot_id, "person": person, "username": username,
-            "enabled": fields["enabled"], "running": running}           # 约定 v1.0 5.18.1 的成功体
+            "enabled": fields["enabled"], "running": running,           # 约定 v1.0 5.18.1 的成功体
+            # 约定 v1.1 5.18.1 多带的三个键
+            "features": fields["features_final"], "skills": fields["skills_placed"],
+            "features_skipped": fields["features_skipped"]}
 
 
 def _archive_root():
@@ -2549,6 +2615,8 @@ def _create_extra(fields):
     want = {}
     if not fields["enabled"]:
         want["enabled"] = False
+    if "features_final" in fields:          # 约定 v1.1 5.19.4：新建时九个键都显式写进去
+        want["features"] = fields["features_final"]
     if fields["person"] and fields["person"] != fields["bot_id"]:
         want["life_id"] = fields["person"]
     if fields["telegram_username"]:
