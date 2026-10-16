@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(HERE))  # claudebotlife/
 import engine
 import deepseek_delta
 import config_loader
+from moments import features as feature_switch
 from chat_history import _project_slug_for  # slug 规则唯一实现（仓根 chat_history.py，与 worker-manager.ts 同规则）
 
 DEFAULT_STATE_DIR = os.path.expanduser("~/.claude/dispatcher/.jiwen-state")
@@ -474,9 +475,12 @@ def main():
     jiwen_cfg = load_jiwen_config() or {}
     # 新系统（dsh-bot 网关）的 bot：不需要 _global.yml，默认启用，状态放在 bot 自己的 state 目录
     dsh_bots = []
+    relationship_off = set()                # 功能开关（约定 v1.1 5.19）："关系进展"关着的跳过
     for _c in config_loader.list_enabled_bots():
         if _reader.dsh_state_dir(_c):
             dsh_bots.append(_c.get("_bot_id"))
+            if not feature_switch.enabled(_c, os.path.expanduser(_c.get("bot_channel_path") or ""), "relationship"):
+                relationship_off.add(_c.get("_bot_id"))
     if not jiwen_cfg and not dsh_bots and not args.bot:
         print("[jiwen.tick] _global.yml.jiwen 未配置，也没找到新系统的 bot，什么都没做", file=sys.stderr)
         sys.exit(2)
@@ -487,6 +491,9 @@ def main():
     print(f"[jiwen.tick] 开始 ts={int(time.time())} bots={bots}", file=sys.stderr)
 
     for bot_id in bots:
+        if bot_id in relationship_off:
+            print(f"[jiwen.tick] {bot_id}: 关系进展这项功能关着，跳过", file=sys.stderr)
+            continue
         enabled, bot_state_dir = _reader.resolve(bot_id, jiwen_cfg)
         # enabled=false 时不烧 DeepSeek API（仍允许 --dry-run 强跑测试）
         if not enabled and not args.dry_run:
