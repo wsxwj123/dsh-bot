@@ -5,8 +5,8 @@ import { loadAccess } from '../config'
 import type { Ledger } from '../ledger'
 import { safeError, type Logger } from '../log'
 import { Backoff, crashPoint } from '../util'
-import { TgApiError, type TelegramApi, type TgCallbackQuery, type TgMessage, type TgUpdate } from './api'
-import { gate, redactMessage, toInbound } from './inbound'
+import { TgApiError, type TelegramApi, type TgCallbackQuery, type TgChatMemberUpdated, type TgMessage, type TgUpdate } from './api'
+import { gate, GROUP_NOT_JOINED, redactMessage, toInbound } from './inbound'
 
 /**
  * 拦截钩子：返回 true = 这条由它接走，不入账、不写 chat.log、不进群聊记录、不交给模型。
@@ -36,6 +36,10 @@ export class Poller {
       intercept?: InterceptHook
       /** 按钮回调：offset 推进之后交给它 */
       onCallback?: (cq: TgCallbackQuery, updateId: number) => void
+      /** bot 在群里的身份变了（my_chat_member）：offset 推进之后交给它，记"刚发现的群"（约定 v1.1 5.20） */
+      onMyChatMember?: (u: TgChatMemberUpdated) => void
+      /** 没加入的群里有人说话、被挡下：交给它记"刚发现的群"（不记消息内容） */
+      onGroupDropped?: (msg: TgMessage) => void
     },
   ) {}
 
@@ -93,6 +97,11 @@ export class Poller {
   }
 
   private handle(u: TgUpdate): void {
+    if (u.my_chat_member) {
+      this.ledger.recordUpdate(u.update_id, null)
+      try { this.o.onMyChatMember?.(u.my_chat_member) } catch (e) { this.log.error('groups.seen_failed', { err: safeError(e) }) }
+      return
+    }
     if (u.callback_query) {
       this.ledger.recordUpdate(u.update_id, null)
       try { this.o.onCallback?.(u.callback_query, u.update_id) } catch (e) { this.log.error('inbound.dropped', { reason: 'callback handler failed', err: safeError(e) }) }
@@ -106,6 +115,9 @@ export class Poller {
     if (g.deliver === false) {
       this.ledger.recordUpdate(u.update_id, null)
       this.log.info('inbound.dropped', { chat: msg.chat.id, reason: g.reason })
+      if (g.reason === GROUP_NOT_JOINED) {
+        try { this.o.onGroupDropped?.(msg) } catch (e) { this.log.error('groups.seen_failed', { err: safeError(e) }) }
+      }
       return
     }
     if (g.deliver === 'observe') {
