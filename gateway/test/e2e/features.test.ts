@@ -73,3 +73,15 @@ test('改开关：网关发现 yml 里的 features 变了，记一次需要重�
   writeConfig(b)
   await until(() => events('config.restart_needed').length > 0, 'restart needed', 20_000)
 })
+
+test('yml 被改坏：网关保留原来的开关，不全部放开', async () => {
+  const { tg, b } = await setup({ stickers: false })
+  tg.pushText(OWNER, '先聊一句')
+  await until(() => prompts(b).some(p => p.text.includes('先聊一句')), 'first turn')
+  writeFileSync(b.configPath, 'id: [\n')
+  await until(() => events('config.reload_failed').length > 0, 'reload failed', 20_000)
+  expect(events('features.unreadable').length).toBeGreaterThan(0)
+  tg.pushText(OWNER, '!tool:sticker|{"action":"list"}')
+  await until(() => toolResults(b).some(r => r.name === 'sticker'), 'sticker tool result')
+  expect(toolResults(b).find(r => r.name === 'sticker')).toMatchObject({ text: '这个功能现在关着。', isError: true })
+})
