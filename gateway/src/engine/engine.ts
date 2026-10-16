@@ -26,6 +26,7 @@ import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
 import { LifeActions } from '../life/actions'
 import { effectiveEngine, ImageSwitch } from '../life/image_switch'
+import { loadFeatures, type Features } from '../features'
 import { StickerService } from '../stickers/sticker'
 import {
   escapeUserText,
@@ -230,6 +231,8 @@ export class Engine {
   readonly stickers: StickerService
   /** 发过图片但被 dsh 拒了的模型（看不了图）：之后对这个模型只说"有一张图"，不再附图 */
   private noImages = new Set<string>()
+  /** 功能开关（约定 v1.1 5.19）：启动时读，配置文件变了重读；工具与运行规则跟着它，等空闲换新会话生效 */
+  features: Features
 
   constructor(
     readonly cfg: BotConfig,
@@ -240,6 +243,7 @@ export class Engine {
     readonly dsh: DshProcess,
     readonly mcp: McpServer,
   ) {
+    this.features = this.readFeatures()
     this.fileRoutes = cfg.brain.routes
     this.providerMerge = mergeRoutes(this.fileRoutes, null)
     this.configBrain = { ...cfg.brain, routes: this.providerMerge.routes }
@@ -265,6 +269,7 @@ export class Engine {
     this.stickers = new StickerService({ api, ledger, log })
     this.commitments = new Commitments({
       ledger, log, situation: this.situation,
+      lifeOn: () => this.features.life,
       timeZone: () => this.cfg.gw.timezone,
       inject: (chatId, text, key, meta) => this.injectSynthetic(chatId, text, key, meta),
       isBusy: chatId => this.chat(chatId).running,
@@ -451,7 +456,8 @@ export class Engine {
     at.toolsInFlight++
     at.replyCalls++
     at.lastProgressAt = Date.now()
-    const asVoice = args.as_voice === true || args.as_voice === 'true'
+    // 发语音关着（约定 v1.1 5.19）：as_voice 不生效，只发文字
+    const asVoice = this.features.voice && (args.as_voice === true || args.as_voice === 'true')
     // access.json 每次发语音现读（改了不用重启）：音色，和约定 v0.8 B.3 的合成模型（没设就不带）
     const voiceAccess = asVoice ? this.access() : undefined
     const voiceId = voiceAccess?.voiceId
@@ -594,7 +600,8 @@ export class Engine {
     this.timers.push(setInterval(() => void this.probe(), g.probeMs))
     this.timers.push(setInterval(() => this.watchHealth(), Math.min(10_000, g.heartbeatMs)))
     this.timers.push(setInterval(() => void this.situation.get().then(() => this.commitments.tick()).catch(e => this.log.error('commitment.tick_failed', { err: safeError(e) })), g.commitPollMs))
-    this.timers.push(setInterval(() => void this.situation.get().then(() => this.hang.tick()).catch(e => this.log.error('hang.tick_failed', { err: safeError(e) })), g.hangTickMs))
+    // 被晾之后追问属于"生活作息"：开关关着就不跑（约定 v1.1 5.19）
+    this.timers.push(setInterval(() => { if (this.features.life) void this.situation.get().then(() => this.hang.tick()).catch(e => this.log.error('hang.tick_failed', { err: safeError(e) })) }, g.hangTickMs))
     void this.situation.get()
     for (const chatId of this.ledger.chatsWithPending()) this.schedule(chatId)
   }
@@ -612,7 +619,7 @@ export class Engine {
   /** 私聊时附带"群里近况"（M5）：这个 bot 在的群里，上次带过之后又有人说话了，就带最近几句（最多 8 句，只看 12 小时内）。
    *  会话按聊天分开（群里的话不进私聊会话），只靠这一小段让它接得上话 */
   private groupRecap(chatId: string): string | null {
-    if (!this.groups || isGroupChat(chatId)) return null
+    if (!this.groups || !this.features.groups || isGroupChat(chatId)) return null
     const key = `group_recap:${chatId}`
     const after = Math.max(Number(this.ledger.getMeta(key) || 0), Date.now() - 12 * 3600_000)
     const rows = Object.keys(this.access().groups).flatMap(g => this.groups!.since(g, after, 8))
@@ -636,16 +643,18 @@ export class Engine {
   private lifeLines(chatId: string, segmentId: number, fresh: boolean): string[] {
     const out: string[] = []
     const every = !isGroupChat(chatId)
+    const f = this.features
     try {
-      const snippet = JSON.parse(readFileSync(join(this.cfg.channelDir, 'relationship.json'), 'utf8'))?.prompt_snippet
+      // 关系进展、生活作息关着（约定 v1.1 5.19）：关系状态那句、"她此刻在干什么"和被晾的迟到反应都不带
+      const snippet = f.relationship ? JSON.parse(readFileSync(join(this.cfg.channelDir, 'relationship.json'), 'utf8'))?.prompt_snippet : null
       if (typeof snippet === 'string' && snippet.trim()) {
         const k = `rel_seen:${segmentId}`
         if (every || fresh || this.ledger.getMeta(k) !== snippet) { out.push(`⟦关系状态⟧ ${snippet.trim()}`); this.ledger.setMeta(k, snippet) }
       }
     } catch {}
-    const situ = situLine(this.situation.current())
+    const situ = f.life ? situLine(this.situation.current()) : null
     if (situ && (every || fresh || this.ledger.getMeta(`situ_seen:${chatId}`) !== situ)) { out.push(situ); this.ledger.setMeta(`situ_seen:${chatId}`, situ) }
-    const late = takeHangArchive(this.cfg.stateDir, chatId)
+    const late = f.life ? takeHangArchive(this.cfg.stateDir, chatId) : null
     if (late) out.push(hangText(late))
     if (out.length) this.log.info('life.lines', { chat: chatId, relationship: out.some(l => l.startsWith('⟦关系状态')), situation: !!situ && out.includes(situ), late: !!late })
     return out
@@ -692,7 +701,23 @@ export class Engine {
     const skillDir = join(this.cfg.channelDir, 'skills')
     const access = this.access()
     return { persona, brain: this.brain, credentialsPath: this.cfg.credentialsPath, sessionsRoot: join(this.cfg.dshHome, 'sessions'), skillDir,
-      languages: { text: access.textLanguage, voice: access.voiceLanguage }, skillsDigest: skillsDigest(skillDir) }
+      languages: { text: access.textLanguage, voice: access.voiceLanguage }, skillsDigest: skillsDigest(skillDir), features: this.features }
+  }
+
+  /** 读这只 bot 的功能开关；存储里有不是真假的值记一条警告 */
+  private readFeatures(): Features {
+    const r = loadFeatures(this.cfg.configPath, join(this.cfg.channelDir, 'skills'))
+    for (const w of r.warnings) this.log.warn('features.invalid', { detail: w })
+    return r.features
+  }
+
+  /** 功能开关关掉的工具不给模型（约定 v1.1 5.19.1） */
+  toolVisible(name: string): boolean {
+    const f = this.features
+    if (name === 'image_guide' || name === 'generate_image') return f.image
+    if (name === 'sticker') return f.stickers
+    if (name === 'moments') return f.moments
+    return true
   }
 
   private harnessVersion(): string {
@@ -1814,6 +1839,7 @@ export class Engine {
     if (cm !== this.configMtime || pm !== this.personaMtime) {
       this.configMtime = cm
       this.personaMtime = pm
+      this.features = this.readFeatures()
       const nb = reloadBrain(this.cfg.configPath, Object.keys(this.sharedProviders?.valid ?? {}))
       if (!nb) { this.log.warn('config.reload_failed', { path: 'configs/<bot>.yml' }); return }
       this.fileRoutes = nb.routes
