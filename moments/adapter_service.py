@@ -1431,10 +1431,14 @@ def _skill_change(bot, generic, on, place, warnings):
     except FileNotFoundError:
         if not (on and place and bot["cfg"].get("skills_manual") is not True):
             return None
+        persona = _persona_text(bot)
         try:
-            return path, None, skill_templates.render(generic, persona=_persona_text(bot))
+            text = skill_templates.render(generic, persona=persona)
         except (OSError, ValueError):
             raise Refuse(500, "internal", "%s 的模板读不出来，开关没有改" % name) from None
+        if generic == "nsfw" and skill_templates.nsfw_unmatched(persona):
+            warnings.append("人设里提到 NSFW，但没认出例句段，skill-nsfw 里只写了“按人设自然反应”")
+        return path, None, text
     except (OSError, ValueError):
         warnings.append("%s 读不出来，没有跟着开关改" % name)
         return None
@@ -2250,6 +2254,8 @@ def _create_skills(fields):
         if generic is None:
             continue
         text = skill_templates.render(generic, appearance=fields["appearance"], persona=fields["persona"])
+        if generic == "nsfw" and skill_templates.nsfw_unmatched(fields["persona"]):
+            _log.warning("create: persona mentions NSFW but no example section matched")
         if not fields["features_final"][key]:
             text = feature_switch.set_skill_disabled(text, True)
         _place_skill(_skill_path(bot, generic), text)
