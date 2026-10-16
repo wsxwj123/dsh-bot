@@ -36,6 +36,8 @@ export type BotEnv = {
   tg: FakeTelegram
   gw: Record<string, unknown>
   brain: Record<string, unknown>
+  /** 配置文件里另加的顶层键（比如功能开关 features） */
+  extra?: Record<string, unknown>
 }
 
 export function makeBot(tg: FakeTelegram, o: { name?: string; root?: string; gw?: Record<string, unknown>; brain?: Record<string, unknown>; access?: Record<string, unknown> } = {}): BotEnv {
@@ -87,6 +89,7 @@ export function writeConfig(b: BotEnv): void {
     dispatcher_port: 0,
     brain: b.brain,
     gateway: b.gw,
+    ...(b.extra ?? {}),
   }
   // JSON 是 YAML 的子集
   writeFileSync(b.configPath, JSON.stringify(y, null, 1))
