@@ -57,7 +57,7 @@ from werkzeug.exceptions import HTTPException, InternalServerError, RequestEntit
 import gateway_client
 from moments import bot_launchd, bots_client, config_sources, hub_addbot, hub_routes, life_settings, redact
 from moments import features as feature_switch
-from moments import skill_templates
+from moments import handoff, skill_templates
 from moments.provider_model import HubError
 
 PREFIX = "/adapter/v1"
@@ -131,6 +131,8 @@ START_RESERVE = 4 * bot_launchd.LAUNCHCTL_TIMEOUT
 #: 切进导入（9.3）：旧频道目录根、Claude Code 会话目录根的缺省（测试接缝见 _switch_in）
 DEFAULT_CHANNELS_DIR = "~/.claude/channels"
 DEFAULT_PROJECTS_DIR = "~/.claude/projects"
+#: 切换底层时人设与技能的中立交接目录（约定 5.10），两边的适配器都读写这里
+DEFAULT_HANDOFF_DIR = "~/.config/claude-dsh-console/handoff"
 #: 群设置（约定 5.12.1、5.12.2）：六个键、群号、bot 用户名、列表与介绍的上限
 GROUP_KEYS = ("requireMention", "allowFrom", "selfAliases", "otherBotUsernames", "otherBotAliases", "intro")
 GROUP_ID_RE = re.compile(r"^-[0-9]{1,20}\Z")
@@ -1204,6 +1206,99 @@ def _switch_in(bot, import_from, seams, deadline):
     return {"messages": messages, "promises": promised}
 
 
+def _handoff_person(bot):
+    """中立目录里认这只 bot 用的 person（5.2）；拼路径前先校验，不合规回 None（不导出也不导入）。"""
+    person = _person(bot)
+    return person if isinstance(person, str) and BOT_ID_RE.match(person) and person not in (".", "..") else None
+
+
+def _switch_sync(bot):
+    """切进时导入人设与技能（约定 5.10，5.9 第 3 步）→ ``synced``。
+
+    读对方（claude）刚导出的那份，只换自己文件的圈内，标记外原样；导入前原文照 5.13、5.17 备份。自己没有的技能
+    按通用名新建：自己模板的圈外加对方的圈内，这只 bot 的功能开关关着就写成停用（v1.1）。没有导出、导出不是刚停下
+    的对方的、自己文件没有标记的都不算错，如实少报：``skills`` 只在导出里的技能全导进来时报。写盘出错不启动。
+    """
+    person = _handoff_person(bot)
+    got = handoff.read_export(_seam_dir("DSH_CONSOLE_HANDOFF_DIR", DEFAULT_HANDOFF_DIR), person, "claude") \
+        if person else None
+    if got is None:
+        return []
+    try:
+        synced = ["persona"] if got["persona"] is not None and _import_persona(bot, got["persona"]) else []
+        done = [_import_skill(bot, generic, text) for generic, text in sorted(got["skills"].items())]
+    except Refuse as e:
+        raise Refuse(e.status, e.code, "导入人设和技能这一步出错：%s，没有启动" % e.message) from None
+    if done and all(done):
+        synced.append("skills")
+    _log.info("switch-in synced: persona=%s skills=%d/%d", "persona" in synced, sum(done), len(done))
+    return synced
+
+
+def _import_persona(bot, segment):
+    """把人设的圈内换成 ``segment``；人设文件不在、不是 UTF-8、没有一对完整标记，回 False 不动。"""
+    path = _persona_path(bot)
+    old, mode = _read_persona(path, "人设")
+    try:
+        new = handoff.replace(old.decode("utf-8"), segment) if mode is not None else None
+    except UnicodeDecodeError:
+        new = None
+    if new is None:
+        return False
+    _save_text(bot["id"], path, new, _persona_version(old), "人设", PERSONA_STALE, ("persona", "", PERSONA_BACKUP_RE))
+    return True
+
+
+def _import_skill(bot, generic, segment):
+    """把技能 ``generic`` 的圈内换成 ``segment``；没有这个技能按模板新建。落点不对、没有标记，回 False 不动。"""
+    try:
+        path = _skill_path(bot, generic)
+    except Refuse:
+        return False
+    old, mode = _read_persona(path, "技能")
+    if mode is None:
+        new = handoff.replace(skill_templates.render(generic), segment)
+        key = next(k for k, g in feature_switch.SKILL_OF.items() if g == generic)
+        if new is not None and not feature_switch.read(bot["cfg"], bot["channel"])[0][key]:
+            new = feature_switch.set_skill_disabled(new, True)
+        if new is not None:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+    else:
+        try:
+            new = handoff.replace(old.decode("utf-8"), segment)
+        except UnicodeDecodeError:
+            new = None
+    if new is None:
+        return False
+    _save_text(bot["id"], path, new, _persona_version(old), "技能", SKILL_STALE, _skill_backup(generic))
+    return True
+
+
+def _export_handoff(bot):
+    """切换任务里停稳之后，把人设与技能的圈内导出到中立目录（约定 5.10；5.8 v1.0：只在切换时导出）。
+    出错只记日志：停用已经成功，壳会把没带过去的项记成没同步。"""
+    def full_text(locate):
+        try:
+            raw, mode = _read_persona(locate(), "")
+            return raw.decode("utf-8") if mode is not None else None
+        except (Refuse, UnicodeDecodeError):
+            return None
+
+    person = _handoff_person(bot)
+    if person is None:
+        _log.error("handoff export skipped: person is not usable in a path")
+        return
+    try:
+        done = handoff.write_export(
+            _seam_dir("DSH_CONSOLE_HANDOFF_DIR", DEFAULT_HANDOFF_DIR), person, bot["id"],
+            full_text(lambda: _persona_path(bot)),
+            {g: full_text(lambda g=g: _skill_path(bot, g)) for g in skill_templates.GENERICS})
+    except (OSError, ValueError) as e:
+        _log.error("handoff export failed: %s", type(e).__name__)
+        return
+    _log.info("handoff export: bot=%s items=%d", bot["id"], len(done))
+
+
 def _set_enabled(bot_id):
     """启停（约定 5.8，补充文件 9.2、13.2）；带 ``import_from`` 时先切进导入（5.9，9.3）。整条请求 55 秒封顶。
 
@@ -1235,7 +1330,10 @@ def _set_enabled(bot_id):
     if not enabled:
         if "moved_to" in body:
             _write_moved(bot_id, body["moved_to"], body.get("op_id"))
-        return _stop_bot(bot, seams, deadline)
+        stopped = _stop_bot(bot, seams, deadline)
+        if body.get("moved_to") in MOVED_TARGETS:       # 切换任务里的停用（5.8 v1.0）：停稳之后导出圈内（5.10）
+            _export_handoff(bot)
+        return stopped
     if _moved_to(bot_id) is not None:
         raise Refuse(409, "moved", MOVED_REFUSED)
     if "import_from" not in body:
@@ -1243,8 +1341,8 @@ def _set_enabled(bot_id):
             return {"ok": True, "enabled": True, "running": True}     # 已是目标状态，不重复操作
         return _start_bot(bot, seams, deadline)
     imported = _switch_in(bot, import_from, seams, deadline - START_RESERVE)
-    # 5.10 的人设和技能同步不在本批（第 9 节），synced 恒为空
-    return dict(_start_bot(bot, seams, deadline), imported=imported, synced=[])
+    synced = _switch_sync(bot)
+    return dict(_start_bot(bot, seams, deadline), imported=imported, synced=synced)
 
 
 def _group_id(value):
@@ -1865,6 +1963,12 @@ def _skill_get(bot_id, name):
     return _text_view(raw, "技能")
 
 
+def _skill_backup(name):
+    """技能备份的 ``(子目录, 文件名后缀, 轮换只认的名字)``：时间加通用名，每个技能各留最近 2 份（11.2）。"""
+    suffix = ".%s.md" % name
+    return "skills", suffix, re.compile(r"^[0-9]{8}-[0-9]{6}(-[0-9]{2})?" + re.escape(suffix) + r"\Z")
+
+
 def _skill_put(bot_id, name):
     """改技能（草案 A.2，补充文件 11.2）：除了「文件不在 404、不新建」，全部同改人设（``_save_text``）。
 
@@ -1875,9 +1979,7 @@ def _skill_put(bot_id, name):
     _skill_name(name)
     text, version = _text_body()
     path = _skill_path(_require_bot(bot_id), name)
-    suffix = ".%s.md" % name
-    name_re = re.compile(r"^[0-9]{8}-[0-9]{6}(-[0-9]{2})?" + re.escape(suffix) + r"\Z")
-    return _save_text(bot_id, path, text, version, "技能", SKILL_STALE, ("skills", suffix, name_re),
+    return _save_text(bot_id, path, text, version, "技能", SKILL_STALE, _skill_backup(name),
                       missing=_no_such_skill())
 
 
