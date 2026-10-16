@@ -22,6 +22,8 @@ export class McpServer {
     private readonly tools: ToolDef[],
     private readonly resolve: SegmentResolver,
     private readonly log: Logger,
+    /** 功能开关关掉的工具不给模型（约定 v1.1 5.19）：清单里不列，调了也不执行 */
+    private readonly visible: (name: string) => boolean = () => true,
   ) {}
 
   get port(): number { return this.server?.port ?? 0 }
@@ -75,10 +77,11 @@ export class McpServer {
       case 'ping':
         return { jsonrpc: '2.0', id: r.id, result: {} }
       case 'tools/list':
-        return { jsonrpc: '2.0', id: r.id, result: { tools: this.tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) } }
+        return { jsonrpc: '2.0', id: r.id, result: { tools: this.tools.filter(t => this.visible(t.name)).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) } }
       case 'tools/call': {
         const tool = this.tools.find(t => t.name === r.params?.name)
         if (!tool) return { jsonrpc: '2.0', id: r.id, error: { code: -32602, message: `unknown tool ${String(r.params?.name).slice(0, 60)}` } }
+        if (!this.visible(tool.name)) return { jsonrpc: '2.0', id: r.id, result: { content: [{ type: 'text', text: '这个功能现在关着。' }], isError: true } }
         let res: ToolResult
         try {
           res = await tool.call((r.params?.arguments ?? {}) as Record<string, unknown>, ctx)
