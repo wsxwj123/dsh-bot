@@ -42,10 +42,10 @@ async function until(f: () => boolean, what: string, ms = 5_000) {
 }
 const ukey = (chat: number, mid: number) => `tg:${chat}:${mid}`
 
-test('getUpdates 显式声明 message 和 callback_query 两类', async () => {
+test('getUpdates 显式声明 message、callback_query、my_chat_member 三类（约定 v1.1 5.20：同一账号两边切换时都要声明 my_chat_member）', async () => {
   const { tg } = setup()
   await until(() => tg.lastAllowedUpdates !== null, '第一次 getUpdates')
-  expect([...tg.lastAllowedUpdates!].sort()).toEqual(['callback_query', 'message'])
+  expect([...tg.lastAllowedUpdates!].sort()).toEqual(['callback_query', 'message', 'my_chat_member'])
 })
 
 test('按钮回调：先推进 offset 再交给 onCallback；不入账', async () => {
