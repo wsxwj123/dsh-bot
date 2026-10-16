@@ -1402,6 +1402,23 @@ def _features_text(text, changes):
     return text + ("\n" if text and not text.endswith("\n") else "") + "features:\n" + lines
 
 
+def _follow_skill(bot, generic, on):
+    """技能跟着开关走（约定 v1.1 5.17）：关掉在技能头部写上 disable-model-invocation: true，打开去掉；
+    文件保留、正文一字不动。技能文件不在就什么都不做（打开时按模板放上的那一步另做；
+    yml 写了 skills_manual: true 的 bot 技能由人手管，不自动放、不重新生成，但停用与恢复照做）。
+    落点不对、是软链的不碰（同 5.17 读写）；没有头部的动不了，也不碰。"""
+    from moments import hub_config         # 延迟 import：同 _write_enabled
+    try:
+        path = _skill_path(bot, generic)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except (Refuse, OSError, ValueError):
+        return
+    new_text = feature_switch.set_skill_disabled(text, disabled=not on)
+    if new_text is not None and new_text != text:
+        hub_config.atomic_write(new_text, path)
+
+
 def _features_put(bot_id):
     """改功能开关（约定 5.19.3）：只改给了的键；打开缺必需项回 422 requirement_missing；锁被占 409 busy。
     改了的开关等这只 bot 空闲时换新会话生效（5.19.5）：网关盯着自己的 yml，见 features 变了就排一次空闲重载。"""
@@ -1436,6 +1453,9 @@ def _features_put(bot_id):
                 if any(got.get(k) is not want[k] for k in changed):
                     raise Refuse(500, "internal", "开关写进配置之后读不回来，配置没有改")
                 hub_config.atomic_write(new_text, path)
+                for key in changed:              # 技能跟着开关走（5.17）
+                    if key in feature_switch.SKILL_OF:
+                        _follow_skill(bot, feature_switch.SKILL_OF[key], on=want[key])
     except HubError as e:
         raise _config_failure(e, "这只 bot 的配置") from None
     except yaml.YAMLError:
