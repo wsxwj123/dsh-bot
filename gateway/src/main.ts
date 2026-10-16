@@ -10,8 +10,9 @@ import { GroupTranscript } from './group/transcript'
 import { Ledger } from './ledger'
 import { Logger, registerSecret, safeError } from './log'
 import { McpServer } from './mcp/server'
-import { TelegramApi } from './telegram/api'
+import { TelegramApi, type TgUser } from './telegram/api'
 import { isGroupChat } from './telegram/inbound'
+import { GroupsSeen } from './telegram/groups_seen'
 import { Poller } from './telegram/poller'
 import { Sender } from './telegram/sender'
 import { addNoProxyHosts, ensureSecretFile, sleep, writeAtomic, writeLastUser } from './util'
@@ -75,7 +76,7 @@ async function main(): Promise<void> {
   // 能发出去的文件：网关的媒体目录（收到的、合成的语音）+ 生图结果目录
   const allowDirs = () => [cfg.mediaDir, ...cfg.gw.imageDirs.map(d => d.startsWith('~') ? join(homedir(), d.slice(1)) : d)]
   // 群聊记录：bot 自己在群里发出的话由自己记（Telegram 不把 bot 的消息投给别的 bot）
-  let me: { id: number; username?: string; first_name?: string } | null = null
+  let me: TgUser | null = null
   const transcript = new GroupTranscript(cfg.groupsDir, () => ({ id: me?.id ?? 0, username: me?.username ?? '', name: me?.first_name ?? cfg.displayName }), log)
   const sender = new Sender(api, ledger, log, {
     allowDirs, maxSendWaitMs: cfg.gw.maxSendWaitMs, access: () => loadAccess(cfg.channelDir),
@@ -131,6 +132,9 @@ async function main(): Promise<void> {
     }
   }
   engine.botUsername = me.username ?? ''
+  // BotFather 里的两项设置，给管理台"刚发现的群"用（约定 v1.1 5.20）
+  engine.botCaps = { canReadAll: me.can_read_all_group_messages ?? null, canJoinGroups: me.can_join_groups ?? null }
+  const groupsSeen = new GroupsSeen(join(cfg.stateDir, 'groups-seen.json'), () => loadAccess(cfg.channelDir).allowFrom.map(String), log)
   engine.groups = transcript
   // 导演按这个文件认出群里哪条是哪个 bot 说的
   writeAtomic(join(cfg.stateDir, 'bot.json'), JSON.stringify({ id: me.id, username: me.username ?? '', name: cfg.displayName }))
@@ -145,6 +149,8 @@ async function main(): Promise<void> {
     // 引导：闸门放行后、入账之前接走（方案 3.3.1）；按钮回调交给引导
     intercept: (msg, updateId) => wizard.intercept(msg, updateId),
     onCallback: cq => wizard.onCallback(cq),
+    onMyChatMember: u => groupsSeen.onMember(u),
+    onGroupDropped: m => groupsSeen.onDropped(m),
     onHumanMessage: (msg, observed) => {
       if (observed) { transcript.observe(msg); return }
       // 主人私聊的"刚聊过"标记（INTERFACE-适配服务 10.5）：写中立目录，导演不点正在私聊的 bot 去群里说话。
