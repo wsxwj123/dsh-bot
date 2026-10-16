@@ -1612,7 +1612,8 @@ def _utc_second(value):
 
 
 def _note_left(bot, chat_id, left):
-    """管理台退群（5.12.2 的 join: false）记下时间；再加入就抹掉。写在网关不碰的另一份文件里，原子写、0600。"""
+    """管理台退群（5.12.2 的 join: false）记下时间；再加入就抹掉。写在网关不碰的另一份文件里，原子写、0600。
+    这只是一份记录：写不进去只记日志，退群已经生效，不能因为它回 500。"""
     path = _state_file(bot, LEFT_FILE)
     if path is None:
         return
@@ -1622,20 +1623,24 @@ def _note_left(bot, chat_id, left):
     elif marks.pop(chat_id, None) is None:
         return
     from moments import hub_config         # 延迟 import：同 _groups_post
-    hub_config.atomic_write(json.dumps(marks, ensure_ascii=False, indent=1) + "\n", path)
+    try:
+        hub_config.atomic_write(json.dumps(marks, ensure_ascii=False, indent=1) + "\n", path)
+    except (OSError, HubError) as e:
+        _log.error("note left failed: %s", type(e).__name__)
 
 
 def _groups_discovered(bot_id):
     """刚发现的群（约定 5.20.2）：网关记下的群里，去掉已经在 access.json 里的、bot 已经不在群里的。
 
-    停用的 bot 也能列，只读记录文件；网关在跑时 can_read_all、can_join_groups 从它的 health 取，不在跑为 null。
+    停用的 bot 也能列，只读记录文件、不去问网关；启用的网关在跑时 can_read_all、can_join_groups 从它的 health
+    取，停用或网关不在跑为 null。
     在管理台退过的群带上退群时间。按最后看到从新到旧，最多 50 条。
     """
     bot = _require_bot(bot_id)
     joined = _read_access(bot)[2]
     seen = _read_state_json(bot, SEEN_FILE)
     left = _read_state_json(bot, LEFT_FILE)
-    tg = _gateway_health(bot["channel"])
+    tg = _gateway_health(bot["channel"]) if bot["enabled"] else {}
     can_read = tg.get("can_read_all") if type(tg.get("can_read_all")) is bool else None
     can_join = tg.get("can_join_groups") if type(tg.get("can_join_groups")) is bool else None
     rows = []
