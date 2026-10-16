@@ -69,6 +69,12 @@ export function tmuxLogsAgent(o: { repo: string; root: string; env: Record<strin
 }
 
 /** 新系统接手的 Python 周边：每个 bot 的主动消息，以及所有 bot 共用的定时任务和服务（全部切完以后装） */
+/** install-jobs 给这只 bot 的定时任务（主动找你）带的环境变量：朋友圈库和网关用同一个（gateway.botlife_db）。
+ *  不带的话任务退回仓库目录里的 state.db，和共用库分叉 */
+export function jobsEnv(gw: { botlifeDb?: string }, home: string): Record<string, string> {
+  return gw.botlifeDb ? { BOTLIFE_STATE_DB: posix.resolve(gw.botlifeDb.replace(/^~/, home)) } : {}
+}
+
 export function pythonAgent(o: { name: string; python: string; repo: string; script: string[]; root: string; env: Record<string, string>; extraEnv?: Record<string, string>; interval?: number; calendar?: Record<string, number> }): Agent {
   return {
     label: `com.dsh-bot.${o.name}`,
