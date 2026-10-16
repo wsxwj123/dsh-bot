@@ -216,6 +216,30 @@ export function parseDaily(text: string, ctx: WhenCtx): { h: number; mi: number;
   return { h, mi: clock.mi, at: nextDaily(h, clock.mi, ctx.now, ctx.timeZone) }
 }
 
+/**
+ * 时间说得含糊的许诺先给一个缺省时间（用户 2026-10-16 定）：等会儿一类 30 分钟后，晚点一类 2 小时后，
+ * 明天、后天上午 10 点，周末是最近一个还没过的周六或周日上午 10 点。回头、改天、有空、下次、以后、
+ * 这周、下周、过几天、过两天太含糊，不给（返回 null，照旧只提示她登记一个具体时间）。
+ */
+export function defaultWhen(text: string, ctx: WhenCtx): { at: number; word: string } | null {
+  const l = localParts(ctx.now, ctx.timeZone)
+  const tenOn = (dayOffset: number) => zoned(l.y, l.mo, l.d + dayOffset, 10, 0, ctx.timeZone)
+  if (/周末/.test(text)) {
+    for (let k = 0; k < 8; k++) {
+      const t = tenOn(k)
+      const wd = localParts(t, ctx.timeZone).wd
+      if ((wd === 6 || wd === 7) && t > ctx.now) return { at: t, word: '周末' }
+    }
+  }
+  if (/后天/.test(text)) return { at: tenOn(2), word: '后天' }
+  if (/明天/.test(text)) return { at: tenOn(1), word: '明天' }
+  const late = text.match(/晚点|晚些/)
+  if (late) return { at: ctx.now + 2 * HOUR, word: late[0] }
+  const soon = text.match(/等会儿?|待会儿?|一会儿?|过会儿?|稍后/)
+  if (soon) return { at: ctx.now + 30 * MIN, word: soon[0] }
+  return null
+}
+
 /** 每天 h:mi 在 after 之后（不含 after）的第一次 */
 export function nextDaily(h: number, mi: number, after: number, tz: string): number {
   const l = localParts(after, tz)
