@@ -34,14 +34,14 @@ export type Fault = {
   delayMs?: number
 }
 
-type Update = { update_id: number; message?: any; callback_query?: any }
+type Update = { update_id: number; message?: any; callback_query?: any; my_chat_member?: any }
 type Stored = { chatId: string; messageId: number; fromBot: boolean; text: string; markup: any; buttons: Button[]; date: number; deleted: boolean; tooOld: boolean; touched: number }
 
 const key = (chatId: number | string, messageId: number) => `${chatId}:${messageId}`
 
 export class FakeTelegram {
   readonly token = '123456789:AAFakeTokenForTestsOnly_abcdefghijklmnop'
-  readonly bot: { id: number; is_bot: true; first_name: string; username: string }
+  readonly bot: { id: number; is_bot: true; first_name: string; username: string; can_join_groups?: boolean; can_read_all_group_messages?: boolean }
   server: ReturnType<typeof Bun.serve>
   sent: Sent[] = []
   calls: { method: string; at: number; params: Record<string, any> }[] = []
@@ -66,8 +66,9 @@ export class FakeTelegram {
   private notAdmin = new Set<string>()
 
   /** 多个 bot（群聊测试）：每个假 Telegram 当一个不同的 bot */
-  constructor(o: { botId?: number; username?: string } = {}) {
-    this.bot = { id: o.botId ?? 900001, is_bot: true, first_name: o.username ?? 'TestBot', username: o.username ?? 'test_dsh_bot' }
+  constructor(o: { botId?: number; username?: string; canJoinGroups?: boolean; canReadAll?: boolean } = {}) {
+    this.bot = { id: o.botId ?? 900001, is_bot: true, first_name: o.username ?? 'TestBot', username: o.username ?? 'test_dsh_bot',
+      ...(o.canJoinGroups !== undefined ? { can_join_groups: o.canJoinGroups } : {}), ...(o.canReadAll !== undefined ? { can_read_all_group_messages: o.canReadAll } : {}) }
     this.server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: req => this.handle(req) })
   }
 
@@ -77,6 +78,17 @@ export class FakeTelegram {
   get lastUpdateId(): number { return this.nextUpdate - 1 }
 
   stop(): void { this.server.stop(true) }
+
+  /** bot 在某个群里的身份变了（被拉进群、设成管理员、移出群）：Telegram 推 my_chat_member */
+  pushMyChatMember(o: { chatId: number; fromId: number; oldStatus: string; newStatus: string; title?: string; type?: 'group' | 'supergroup'; isMember?: boolean }): void {
+    const member = (status: string) => ({ status, user: this.bot, ...(status === 'restricted' ? { is_member: o.isMember ?? true } : {}) })
+    this.updates.push({ update_id: this.nextUpdate++, my_chat_member: {
+      chat: { id: o.chatId, type: o.type ?? 'supergroup', title: o.title ?? `群${o.chatId}` },
+      from: { id: o.fromId, is_bot: false, first_name: `user${o.fromId}` },
+      date: Math.floor(Date.now() / 1000), old_chat_member: member(o.oldStatus), new_chat_member: member(o.newStatus),
+    } })
+    for (const w of this.waiters.splice(0)) w()
+  }
 
   /** 用户发来一条私聊文字 */
   pushText(fromId: number, text: string, o: { chatId?: number; replyTo?: { message_id: number; text?: string; fromBot?: boolean }; firstName?: string; messageId?: number } = {}): number {
@@ -309,7 +321,7 @@ export class FakeTelegram {
   private allowed(u: Update): boolean {
     const l = this.lastAllowedUpdates
     if (!l || l.length === 0) return true
-    return u.callback_query ? l.includes('callback_query') : l.includes('message')
+    return u.my_chat_member ? l.includes('my_chat_member') : u.callback_query ? l.includes('callback_query') : l.includes('message')
   }
 
   private async getUpdates(offset: number, timeoutS: number): Promise<Update[]> {
