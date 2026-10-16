@@ -25,10 +25,10 @@ def health_hits(gw):
 def test_meta_能力清单恰好十三个键_新增启停切进群聊三项都为真(adapter):
     caps = adapter.ok(adapter.call("GET", au.META)).get("capabilities")
     assert isinstance(caps, dict), "capabilities 应是对象：%r" % (caps,)
-    missing = sorted(set(au.CAPABILITIES_V10S) - set(caps))
-    extra = sorted(set(caps) - set(au.CAPABILITIES_V10S))
-    assert not missing and not extra, "能力清单应恰好二十一个键：缺 %r，多 %r" % (missing, extra)
-    for key, want in au.CAPABILITIES_V10S.items():
+    missing = sorted(set(au.CAPABILITIES_V11) - set(caps))
+    extra = sorted(set(caps) - set(au.CAPABILITIES_V11))
+    assert not missing and not extra, "能力清单应恰好二十二个键：缺 %r，多 %r" % (missing, extra)
+    for key, want in au.CAPABILITIES_V11.items():
         assert caps[key] is want, "能力 %s 应为布尔 %r，实际 %r" % (key, want, caps[key])
 
 
