@@ -17,15 +17,31 @@ test('读开关：没写的前八个开、nsfw 有技能才开；不是真假的
     mkdirSync(join(dir, 'skill-nsfw'))
     writeFileSync(join(dir, 'skill-nsfw', 'SKILL.md'), 'x')
     expect(readFeatures(undefined, dir).features.nsfw).toBe(true)
-    const r = readFeatures({ voice: 'yes', image: false }, dir)
+    const r = readFeatures({ voice: 'maybe', image: false }, dir)
     expect([r.features.voice, r.features.image, r.features.stickers]).toEqual([false, false, true])
     expect(r.warnings).toEqual(['features.voice 的值不是真或假，按关处理'])
     expect(readFeatures(['voice'], dir).warnings).toEqual(['配置里的 features 不是一组开关，全部按缺省处理'])
     const yml = join(dir, 'b.yml')
     writeFileSync(yml, 'id: b\nfeatures:\n  moments: false\n')
-    expect(loadFeatures(yml, dir).features.moments).toBe(false)
-    expect(loadFeatures(join(dir, 'missing.yml'), dir).features.moments).toBe(true)
+    expect(loadFeatures(yml, dir)!.features.moments).toBe(false)
     expect(FEATURE_KEYS.length).toBe(9)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('读开关：yes/no/on/off、带引号的 true/false 和 Python 那边一样认成真假，别的字符串按关', () => {
+  const r = readFeatures({ voice: 'on', image: 'No', stickers: 'YES', moments: 'off', groups: 'True', proactive: 'false', life: 'y' }, '/nonexistent')
+  expect(r.features).toMatchObject({ voice: true, image: false, stickers: true, moments: false, groups: true, proactive: false, life: false })
+  expect(r.warnings).toEqual(['features.life 的值不是真或假，按关处理'])
+  expect(readFeatures({ voice: 'toString' }, '/nonexistent').features.voice).toBe(false)
+})
+
+test('读开关：配置文件读不出（不在、写坏了）回 null，交给调用方保留原来的开关', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'feat-'))
+  try {
+    const yml = join(dir, 'b.yml')
+    writeFileSync(yml, 'id: b\nfeatures: [\n')
+    expect(loadFeatures(yml, dir)).toBeNull()
+    expect(loadFeatures(join(dir, 'missing.yml'), dir)).toBeNull()
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
