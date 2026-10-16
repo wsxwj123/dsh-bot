@@ -59,10 +59,20 @@ export function effectiveLanguages(l: Languages = {}): { text: string; voice: st
 }
 
 /** 运行规则里的语言一节（补充文件 11.4，语义照 v0.9 claude 侧草案第二节），按这只 bot 的两种语言现填。
- *  语音关着（约定 v1.1 5.19）只留文字语言那一句 */
-function languageRules(l: Languages, voiceOn = true): string[] {
+ *  语音关着（约定 v1.1 5.19）只留文字语言那一句；语音模型生效为 s1（5.14.5 第 6 条）时不写方括号标签 */
+function languageRules(l: Languages, voiceOn = true, voiceModel = ''): string[] {
   const { text, voice } = effectiveLanguages(l)
   if (!voiceOn) return ['', '### 语言', `- 文字语言是${text}。文字气泡始终用文字语言写。`]
+  if (voiceModel === 's1') return [
+    '',
+    '### 语言',
+    `- 文字语言是${text}，语音语言是${voice}。文字气泡始终用文字语言写。`,
+    `- 发语音（${toolName('reply')} 带 as_voice=true）时 text 与 voice_text 都要写，两种语言相同时也要写。`,
+    '- text 用文字语言写，只显示、不朗读。',
+    '- voice_text 用语音语言写，只朗读、不显示。不写方括号语气标签，语气靠用词表达；voice_instruct 和 voice_emotion 也不填。',
+    '- 两种语言相同时，voice_text 的内容与 text 一致，去掉不适合朗读的符号与表情。',
+    '- voice_text 的段数与 text 一致（按空行分段），一一对应。',
+  ]
   return [
     '',
     '### 语言',
@@ -87,7 +97,7 @@ function imageMomentsRule(f: Features): string[] {
  * 运行规则：放在人设后面，是单独的一段，不改人设文件。末尾是按 access.json 现填的语言一节。
  * 功能开关（约定 v1.1 5.19）关掉的：对应的工具那一条去掉，再说一句不能用；九项都开时与没有开关时逐字相同。
  */
-export function runtimeRules(lang: Languages = {}, f: Features = ALL_ON): string {
+export function runtimeRules(lang: Languages = {}, f: Features = ALL_ON, voiceModel = ''): string {
   return [
     '## 运行规则（程序附加，不属于人设）',
     `- 你在 Telegram 上和对方聊天。对方只能看到你用 ${toolName('reply')} 发出的内容，你直接输出的文字对方看不到。`,
@@ -105,7 +115,7 @@ export function runtimeRules(lang: Languages = {}, f: Features = ALL_ON): string
     ...(f.image ? [] : ['- 你不能发图。']),
     ...(f.stickers ? [] : ['- 你不能发表情包。']),
     ...(f.voice ? [] : ['- 你不能发语音，只发文字。']),
-    ...languageRules(lang, f.voice),
+    ...languageRules(lang, f.voice, voiceModel),
   ].join('\n')
 }
 
@@ -130,6 +140,8 @@ export type PatchInput = {
   skillsDigest?: string
   /** 功能开关（约定 v1.1 5.19）：运行规则与工具都跟着它；不给按九项全开 */
   features?: Features
+  /** 生效的语音模型（约定 v1.1 5.14.5）：s1 时语言一节不写方括号标签 */
+  voiceModel?: string
 }
 
 export function buildPatchRows(p: PatchInput): object[] {
@@ -151,7 +163,7 @@ export function buildPatchRows(p: PatchInput): object[] {
     includeHarnessIdentity: false,
     includeRuntimeContext: false,
     personaPrefix: escapePersona(p.persona),
-    personaSuffix: escapePersona(runtimeRules(p.languages, p.features)),
+    personaSuffix: escapePersona(runtimeRules(p.languages, p.features, p.voiceModel)),
   } })
   rows.push({ id: 'session-persistence-jsonl', config: { root: p.sessionsRoot, compression: 'none' } })
   rows.push({ id: 'compaction-basic', config: b.emergencyCompaction ? {} : { auto: false } })
@@ -171,7 +183,7 @@ export function patchText(rows: object[]): string {
 export function restartFingerprint(p: PatchInput): string {
   const b = p.brain
   // 功能开关变了也要重启：给模型的工具清单跟着开关变，dsh 只在启动时取一次（约定 v1.1 5.19.5）
-  return createHash('sha256').update(JSON.stringify([p.persona, b.routes, p.credentialsPath, b.emergencyCompaction, p.sessionsRoot, p.skillDir, p.skillsDigest ?? '', effectiveLanguages(p.languages), p.features ?? null])).digest('hex').slice(0, 16)
+  return createHash('sha256').update(JSON.stringify([p.persona, b.routes, p.credentialsPath, b.emergencyCompaction, p.sessionsRoot, p.skillDir, p.skillsDigest ?? '', effectiveLanguages(p.languages), p.features ?? null, p.voiceModel === 's1'])).digest('hex').slice(0, 16)
 }
 
 /**
@@ -180,7 +192,7 @@ export function restartFingerprint(p: PatchInput): string {
  * 旧的那份还留着，以后每轮都要再付一遍（M2 真机报告问题 2）。
  */
 export function promptFingerprint(p: PatchInput, harnessVersion: string): string {
-  return createHash('sha256').update(JSON.stringify([p.persona, runtimeRules(p.languages, p.features), harnessVersion, p.skillsDigest ?? ''])).digest('hex').slice(0, 16)
+  return createHash('sha256').update(JSON.stringify([p.persona, runtimeRules(p.languages, p.features, p.voiceModel), harnessVersion, p.skillsDigest ?? ''])).digest('hex').slice(0, 16)
 }
 
 /**
