@@ -76,7 +76,7 @@ test('群消息只记一次、不直接触发回复；导演点名后才说话�
   await until(() => prompts(a).some(p => p.text.includes('还在吗')), 'second private prompt')
   expect(prompts(a).find(p => p.text.includes('还在吗'))!.text).not.toContain('⟦群里近况')
   // 私聊"刚聊过"标记（导演据此不点正在私聊的 bot）
-  expect(existsSync(join(a.root, 'director', 'last-user', `a-${OWNER}.last-user`))).toBe(true)
+  expect(existsSync(join(a.root, 'director', 'last-user', 'a'))).toBe(true)        // 一只 bot 一个文件，文件名就是 bot 编号
   // 群里的话没有进私聊会话：群和私聊是两个不同的会话
   const sessions = new Set(prompts(a).map(p => p.sessionId))
   expect(sessions.size).toBe(2)
