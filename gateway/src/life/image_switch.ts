@@ -26,13 +26,19 @@ export function effectiveEngine(own: string, sw: { engine(scope: ImageScope): Im
 /** 按修改时间缓存地读开关文件。文件不在、不是合法 YAML 时返回 null；同一种读不到只记一次日志 */
 export class ImageSwitch {
   private stamp = ''
-  private doc: unknown = null
+  private parsed: unknown = null
   private ok = false
   private noted = ''
 
   constructor(readonly path: string, private readonly log: Logger) {}
 
   engine(scope: ImageScope): ImageEngine | null {
+    const doc = this.doc()
+    return doc === null ? null : pickEngine(doc, scope)
+  }
+
+  /** 整份全局配置（按修改时间缓存）；读不到为 null。语音模型的生效判定也从这里取 voice.tts_model */
+  doc(): unknown | null {
     let stamp: string
     try {
       const st = statSync(this.path)
@@ -44,7 +50,7 @@ export class ImageSwitch {
     if (stamp !== this.stamp) {
       this.stamp = stamp
       try {
-        this.doc = Bun.YAML.parse(readFileSync(this.path, 'utf8'))
+        this.parsed = Bun.YAML.parse(readFileSync(this.path, 'utf8'))
         this.ok = true
       } catch {
         this.ok = false
@@ -55,7 +61,7 @@ export class ImageSwitch {
       return null
     }
     this.noted = ''
-    return pickEngine(this.doc, scope)
+    return this.parsed
   }
 
   private note(why: string): void {
