@@ -56,6 +56,7 @@ from werkzeug.exceptions import HTTPException, InternalServerError, RequestEntit
 import gateway_client
 from moments import bot_launchd, bots_client, config_sources, hub_addbot, hub_routes, life_settings, redact
 from moments import features as feature_switch
+from moments import skill_templates
 from moments.provider_model import HubError
 
 PREFIX = "/adapter/v1"
@@ -1404,19 +1405,43 @@ def _features_text(text, changes):
 
 def _follow_skill(bot, generic, on):
     """技能跟着开关走（约定 v1.1 5.17）：关掉在技能头部写上 disable-model-invocation: true，打开去掉；
-    文件保留、正文一字不动。技能文件不在就什么都不做（打开时按模板放上的那一步另做；
-    yml 写了 skills_manual: true 的 bot 技能由人手管，不自动放、不重新生成，但停用与恢复照做）。
+    文件保留、正文一字不动。打开时技能文件不在，按仓库模板放上（成人内容取这只 bot 人设里的例句）；
+    yml 写了 skills_manual: true 的 bot 技能由人手管，不自动放、不重新生成，但停用与恢复照做。
     落点不对、是软链的不碰（同 5.17 读写）；没有头部的动不了，也不碰。"""
     from moments import hub_config         # 延迟 import：同 _write_enabled
     try:
         path = _skill_path(bot, generic)
+    except Refuse:
+        return
+    try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
-    except (Refuse, OSError, ValueError):
+    except FileNotFoundError:
+        if on and bot["cfg"].get("skills_manual") is not True:
+            _place_skill(path, skill_templates.render(generic, persona=_persona_text(bot)))
+        return
+    except (OSError, ValueError):
         return
     new_text = feature_switch.set_skill_disabled(text, disabled=not on)
     if new_text is not None and new_text != text:
         hub_config.atomic_write(new_text, path)
+
+
+def _persona_text(bot):
+    """这只 bot 的人设全文；读不到当空（放 nsfw 技能时就只写"按人设自然反应"）。"""
+    try:
+        with open(_persona_path(bot), encoding="utf-8") as f:
+            return f.read()
+    except (Refuse, OSError, ValueError):
+        return ""
+
+
+def _place_skill(path, text):
+    """按模板放一个技能：建好 skill-<通用名> 目录，原子写，权限 0644（同手放的那几个）。"""
+    from moments import hub_config         # 延迟 import：同 _write_enabled
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    hub_config.atomic_write(text, path)
+    os.chmod(path, 0o644)
 
 
 def _features_put(bot_id):
