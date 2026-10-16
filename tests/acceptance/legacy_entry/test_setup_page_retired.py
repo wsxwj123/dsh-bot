@@ -22,9 +22,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 PW = "hub-access-pw-12345"
 HTML = {"Accept": "text/html,application/xhtml+xml"}
 FETCH = {"Accept": "*/*"}
-#: 带导航条的页面（约定 4.2 点名的那几页）
+#: 带导航条的页面（约定 4.2 点名的那几页）。朋友圈页 / 自 2026-10-16 跳到壳，已经不是带导航条的页面
 PAGES = ["/hub", "/hub/bots", "/hub/addbot", "/hub/dsh-model", "/hub/params", "/hub/provider",
-         "/", "/styles"]
+         "/styles"]
 TRACES = ["nav-setup", "/hub/setup", "密钥待填", "/hub/api/setup/status"]
 
 
