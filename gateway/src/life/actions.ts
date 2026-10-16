@@ -67,11 +67,6 @@ const SYS_GUIDE: Record<'novelai' | 'comfyui', string> = {
 下面原文里凡是用"跑 bash 命令 & 并发"的写法，都按上面的方式替换。`,
 }
 
-/** ComfyUI 没画出来时给模型的话（约定 v1.1 5.21 第 5 条：改用 NovelAI 重画，在回复里自然提一句） */
-const COMFY_FALLBACK = 'ComfyUI 没画出来。改用 NovelAI 重画：先调用 image_guide（engine 填 novelai）看 NovelAI 的写法，再调用 generate_image（engine 填 novelai，用 intermediate 写描述）。回复里单独一句自然提到这次不是 ComfyUI 画的，不用括号。'
-const COMFY_FALLBACK_SOME = '没画出来的改用 NovelAI 重画：image_guide 和 generate_image 的 engine 都填 novelai，用 intermediate 写描述。回复里单独一句自然提到这几张不是 ComfyUI 画的，不用括号。'
-const NOVELAI_FALLBACK_BAD = 'intermediate 不能为空。这一张改用 NovelAI 画，先调用 image_guide（engine 填 novelai）看写法。'
-
 export type ActionsDeps = {
   /** 朋友圈、TELEGRAM_WORKER_BOT 里用的名字（lifeId，旧系统里的 bot 名） */
   botId: string
@@ -146,16 +141,15 @@ export class LifeActions {
 
   // ─── 生图 ───
 
-  /** 这次用哪个引擎：本 bot 没开生图就是 off；engine 填 novelai 是 ComfyUI 没画出来、这次改用 NovelAI 重画 */
-  private engineFor(args: Record<string, unknown>): ImageEngine | 'off' {
+  /** 这次用哪个引擎：本 bot 没开生图就是 off，否则按开关。出不了图也不换到另一个引擎（用户 2026-10-16 定） */
+  private engine(): ImageEngine | 'off' {
     const current = this.d.imageProvider()
     if (current === 'off') return 'off'
-    if (args.engine === 'novelai') return 'novelai'
     return current === 'comfyui' ? 'comfyui' : 'novelai'
   }
 
-  imageGuide(args: Record<string, unknown> = {}): Result {
-    const provider = this.engineFor(args)
+  imageGuide(): Result {
+    const provider = this.engine()
     if (provider === 'off') return { text: '这个 bot 没开生图。', isError: true }
     let guide = ''
     try { guide = readFileSync(join(expand(this.d.imageSkillDir(provider)), 'SKILL.md'), 'utf8') } catch { return { text: '找不到生图说明（SKILL.md）。', isError: true } }
@@ -169,7 +163,7 @@ export class LifeActions {
   }
 
   async generateImage(chatId: string, args: Record<string, unknown>): Promise<Result> {
-    const provider = this.engineFor(args)
+    const provider = this.engine()
     if (provider === 'off') return { text: '这个 bot 没开生图。', isError: true }
     const ws = join(this.d.mediaDir, 'image-work')
     mkdirSync(ws, { recursive: true })
@@ -190,7 +184,6 @@ export class LifeActions {
       const bad = provider === 'comfyui' ? !(typeof v === 'string' && v.trim()) : !v || (typeof v !== 'object' && typeof v !== 'string')
       if (!bad) continue
       if (multi) return { text: `第 ${i + 1} 张的 ${noun} 不能为空。`, isError: true }
-      if (args.engine === 'novelai') return { text: NOVELAI_FALLBACK_BAD, isError: true }
       return { text: provider === 'comfyui' ? 'prompt 不能为空（英文描述）。先调用 image_guide 看写法。' : 'intermediate 不能为空。先调用 image_guide 看写法。', isError: true }
     }
 
@@ -233,13 +226,10 @@ export class LifeActions {
       this.d.log.info('tool.generate_image', { provider, ok: ok.length, total: rs.length })
       for (const f of fails) this.d.log.warn('tool.generate_image_failed', { provider, ...(many ? { index: f.idx + 1 } : {}), err: safeError(f.err.split('\n').filter(Boolean).slice(-2).join(' ')) })
       if (ok.length === 0) {
-        const text = provider === 'comfyui' ? COMFY_FALLBACK : '这次没生成出来（生图服务出错）。可以和对方说一声，或者稍后再试。'
+        const text = '这次没生成出来（生图服务出错）。可以和对方说一声，或者稍后再试。'
         return { result: { text, isError: true }, late: `⟦系统·生图⟧ ${text}` }
       }
-      const nums = fails.map(f => f.idx + 1).join('、')
-      const failNote = !fails.length ? '' : provider === 'comfyui'
-        ? `\n第 ${nums} 张 ComfyUI 没画出来，其余照常发。${COMFY_FALLBACK_SOME}`
-        : `\n第 ${nums} 张没生成出来（生图服务出错），其余照常发。`
+      const failNote = fails.length ? `\n第 ${fails.map(f => f.idx + 1).join('、')} 张没生成出来（生图服务出错），其余照常发。` : ''
       if (!many) {
         return {
           result: { text: `图片生成好了：${ok[0]!.path}\n用 reply 的 files 发给对方，或者用 moments 工具的 set_image 配到朋友圈。` },
