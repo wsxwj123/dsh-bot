@@ -219,3 +219,19 @@ def test_PUT_成人内容只管技能(adapter, ready):
     body = adapter.ok(put(adapter, "botalpha", {"nsfw": False}))
     assert body["changed"] == ["nsfw"], body
     assert "disable-model-invocation: true" in au.skill_path(ready, "nsfw").read_text(encoding="utf-8")
+
+
+def test_PUT_打开时技能不在就按模板放上_成人内容取人设里的例句(adapter, ready):
+    au.put_file(au.persona_path(ready), "# 人设\n## 语料库\n2.NSFW\n- 示例一句\n- 示例两句\n\n## 别的\n")
+    adapter.ok(put(adapter, "botalpha", {"moments": False}))
+    adapter.ok(put(adapter, "botalpha", {"moments": True, "nsfw": True}))
+    moments = au.skill_path(ready, "moments").read_text(encoding="utf-8")
+    assert moments.startswith("---\nname: skill-moments\n") and "disable-model-invocation" not in moments, moments
+    nsfw = au.skill_path(ready, "nsfw").read_text(encoding="utf-8")
+    assert "- 示例一句\n- 示例两句" in nsfw and "只适用于成年角色" in nsfw, nsfw
+
+
+def test_PUT_技能手管的bot_打开时不放模板(adapter, ready):
+    au.set_cfg(ready, skills_manual=True)
+    adapter.ok(put(adapter, "botalpha", {"nsfw": True}))
+    assert not au.skill_path(ready, "nsfw").exists()
