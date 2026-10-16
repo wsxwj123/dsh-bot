@@ -22,6 +22,8 @@ export type CommitDeps = {
   notifyOwner: (key: string, text: string) => void
   /** 第 1、2 次没兑现后，等多久再提醒 */
   retryMs: number[]
+  /** 生活作息开着没有（约定 v1.1 5.19）：关着时到点就提醒，不按作息顺延；不给按开着 */
+  lifeOn?: () => boolean
 }
 
 export function fmtTime(ms: number, tz: string, now = Date.now()): string {
@@ -205,7 +207,7 @@ export class Commitments {
     for (const pending of due) {
       const c = this.catchUp(pending, now)
       if (this.d.isBusy(c.chat_id)) continue // 这个聊天正在回话，下一轮再提醒
-      if (isAsleep(sit)) {
+      if (this.d.lifeOn?.() !== false && isAsleep(sit)) {
         const wake = this.d.situation.nextWake(now)
         if (wake && wake > now) {
           L.updateCommitment(c.id, { next_at: wake, note: 'deferred_sleep' })
