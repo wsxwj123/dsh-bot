@@ -22,12 +22,19 @@ def got(client, path, **kw):
 # ============================================================ 页面都还打得开
 
 # 「密钥待填」页 /hub/setup 已下线（INTERFACE-dsh修补 4.4），不在这张名单里；它的去向见 test_setup_page_retired.py
+# 朋友圈页 / 自 2026-10-16 跳到壳（朋友圈只留壳里那一份），不在这张名单里，见下一条与 test_merged_redirects.py
 @pytest.mark.parametrize("path", ["/hub", "/hub/provider", "/hub/params", "/hub/bots",
-                                  "/hub/addbot", "/hub/dsh-model", "/", "/styles"])
+                                  "/hub/addbot", "/hub/dsh-model", "/styles"])
 def test_页面仍是200的HTML(hub, styles_env, path):
     r = u.go(hub, path=path)
     assert (r.status_code, "text/html" in (r.headers.get("Content-Type") or "")) == (200, True), \
         "%s 实得 %s %s" % (path, r.status_code, r.headers.get("Content-Type"))
+
+
+def test_朋友圈页跳到壳的朋友圈_不让浏览器记死(hub):
+    r = u.go(hub, path="/")
+    assert (r.status_code, r.headers.get("Location"), r.headers.get("Cache-Control")) == \
+        (302, "http://127.0.0.1:8767/moments", "no-store")
 
 
 def test_首页别的卡片入口一个不少(hub):
@@ -72,11 +79,11 @@ def test_朋友圈列表接口_空库回空列表(hub):
     assert got(hub, "/api/moments") == (200, [])
 
 
-def test_发一条朋友圈_列表里就有这一条(hub):
+def test_发朋友圈回410_说去合并管理台_列表里没有多出这一条(hub):
+    """2026-10-16 起 8765 不再收发帖：发帖后的通知只留壳里那一份。"""
     posted = hub.post("/api/moment", json={"text": "对照用的一条"})
-    assert posted.status_code == 200, "发朋友圈期望 200，实得 %s" % posted.status_code
-    code, body = got(hub, "/api/moments")
-    assert (code, [m.get("text") for m in body or []]) == (200, ["对照用的一条"])
+    assert (posted.status_code, (posted.get_json() or {}).get("error")) == (410, "moved")
+    assert got(hub, "/api/moments") == (200, [])
 
 
 def test_朋友圈资料接口_没有资料的名字照旧200(hub):
@@ -150,7 +157,8 @@ def test_设了管理口令只过访问口令_调管理台接口_照旧被管理
 def test_设了管理口令只过访问口令_朋友圈照旧能看(make_client, login):
     c = make_client(HUB_ACCESS_PASSWORD=PW, HUB_ADMIN_PASSWORD=ADMIN_PW)
     assert login(c, PW).status_code == 303, "前提：只用访问口令登录成功"
-    assert u.go(c, path="/", headers=HTML).status_code == 200
+    r = u.go(c, path="/", headers=HTML)             # 朋友圈页跳到壳：过了访问口令就放行到跳转，不要管理口令
+    assert (r.status_code, r.headers.get("Location")) == (302, "http://127.0.0.1:8767/moments")
 
 
 # ============================================================ 框架级错误仍回 JSON
