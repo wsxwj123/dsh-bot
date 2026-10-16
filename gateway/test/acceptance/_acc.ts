@@ -91,6 +91,8 @@ export function makeBot(tg: FakeTelegram, o: BotOpts = {}): BotEnv {
       probe_ms: 60_000,
       log_level: 'debug',
       model_fetch_timeout_ms: 3_000,
+      // 私聊"刚聊过"标记写进临时目录：缺省是真机上导演读的共用目录，测试不许往那里写
+      last_user_dir: join(root, 'director', 'last-user'),
       ...o.gw,
     },
     brain: { provider: 'deepseek-official', model: 'deepseek-flash', reasoning_effort: 'low', ...o.brain },
