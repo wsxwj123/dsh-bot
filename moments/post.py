@@ -328,14 +328,30 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
     return moment_id
 
 
+def _moment_engine(img: dict) -> str:
+    """朋友圈配图用哪个引擎（约定 v1.1 5.21）：依次看 provider_moment、provider，都没有用 novelai，值不认识按没有。
+    设了 CLAUDEBOT_GLOBAL_CFG（管理台共用开关所在的全局配置）就按那份读，读不到才用传进来的本仓库配置。"""
+    path = os.environ.get("CLAUDEBOT_GLOBAL_CFG")
+    if path:
+        try:
+            import yaml
+            with open(os.path.expanduser(path), encoding="utf-8") as f:
+                img = ((yaml.safe_load(f) or {}).get("moments", {}) or {}).get("image_generation", {}) or {}
+        except Exception as e:
+            sys.stderr.write(f"[moments] 读共用生图开关失败，按本仓库配置：{e}\n")
+    for k in ("provider_moment", "provider"):
+        if img.get(k) in ("novelai", "comfyui"):
+            return img[k]
+    return "novelai"
+
+
 def _trigger_bot_image_gen(bot_id: str, bot_cfg: dict, moment_id: int,
                            text: str, visibility: str):
     """根据 provider 路由：novelai 走 worker；comfyui 直接 HTTP API。"""
     import config_loader as _cfg
     g = _cfg.load_global()
-    img = (g.get("moments", {}) or {}).get("image_generation", {})
-    # 朋友圈走 provider_moment，没设回退兼容字段 provider
-    provider = img.get("provider_moment") or img.get("provider", "novelai")
+    img = (g.get("moments", {}) or {}).get("image_generation", {}) or {}
+    provider = _moment_engine(img)
 
     if provider == "comfyui":
         _gen_image_comfyui(bot_id, moment_id, text, visibility)
@@ -358,7 +374,12 @@ def _gen_image_comfyui(bot_id: str, moment_id: int, text: str, visibility: str):
     import subprocess
     import config_loader as _cfg
     PYBIN = os.environ.get("CLAUDEBOTLIFE_PYTHON", sys.executable)
-    SCRIPT = os.path.join(_REPO_ROOT, "scripts", "comfyui_gen.py")
+    # 共用的 comfyui-skill 脚本（约定 v1.1 5.21 第 4 条）；全局配置用开关所在的那份，没设就用本仓库的
+    skill_dir = os.path.expanduser(os.environ.get("COMFYUI_SKILL_DIR") or os.path.join(_REPO_ROOT, "skills", "comfyui-skill"))
+    SCRIPT = os.path.join(skill_dir, "scripts", "comfyui_gen.py")
+    global_cfg = os.path.expanduser(os.environ.get("CLAUDEBOT_GLOBAL_CFG") or _cfg.GLOBAL_CFG_PATH)
+    # 脚本按 $CLAUDEBOTLIFE_REPO/configs/<bot>.yml 找 face_traits；本仓库的 bot yml 就在 configs/ 下
+    child_env = {**os.environ, "CLAUDEBOTLIFE_REPO": os.environ.get("CLAUDEBOTLIFE_REPO") or _REPO_ROOT}
 
     # 读 bot yml（必拿到 bot_cfg 以便降级时调 _gen_image_novelai）
     # 注：face_traits 由 comfyui_gen.py 自动从 bot yml 读取并拼接，post.py 不再读
@@ -481,12 +502,12 @@ def _gen_image_comfyui(bot_id: str, moment_id: int, text: str, visibility: str):
     def runner():
         fallback_reason = None
         try:
-            cmd = [PYBIN, SCRIPT, bot_id, en_prompt, "--size", size]
+            cmd = [PYBIN, SCRIPT, bot_id, en_prompt, "--size", size, "--global", global_cfg]
             if anchor_image:
                 cmd += ["--init-image", anchor_image]
                 if anchor_denoise is not None:
                     cmd += ["--denoise", str(anchor_denoise)]
-            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, env=child_env)
             for line in r.stdout.splitlines():
                 if line.startswith("MEDIA: "):
                     img = line[len("MEDIA: "):].strip()
