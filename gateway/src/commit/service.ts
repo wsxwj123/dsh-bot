@@ -6,7 +6,7 @@ import type { CommitmentRow, Ledger } from '../ledger'
 import type { Logger } from '../log'
 import { escapeUserText } from '../engine/format'
 import { isAsleep, type SituationBridge } from '../life/situation'
-import { DAILY_RE, detectPromises, lastDaily, localParts, nextDaily, parseDaily, parseWhen, type WhenCtx } from './when'
+import { DAILY_RE, defaultWhen, detectPromises, lastDaily, localParts, nextDaily, parseDaily, parseWhen, type WhenCtx } from './when'
 
 const MIN = 60_000
 const MAX_ATTEMPTS = 3
@@ -118,6 +118,23 @@ export class Commitments {
     return { text: `已取消 #${c.id}${dailyOf(c) ? '（每天的这件事，以后都不再提醒）' : ''}。` }
   }
 
+  /** commitment_done（用户 2026-10-16 定）：提前做到了或刚做完。一次性的标成完成；每天重复的只算这一次，排到下一天 */
+  done(chatId: string, args: Record<string, unknown>): { text: string; isError?: boolean } {
+    const id = Number(String(args.id ?? '').replace(/^#/, ''))
+    const c = Number.isInteger(id) ? this.d.ledger.commitment(id) : null
+    if (!c || c.chat_id !== chatId) return { text: `没有 #${args.id} 这个承诺。用 commitment_list 看看有哪些。`, isError: true }
+    if (!['pending', 'firing'].includes(c.state)) return { text: `#${c.id} 已经结束了（${c.state}），不用再标。` }
+    const now = Date.now()
+    if (this.nextDay(c, 'done', now)) {
+      const next = this.d.ledger.commitment(c.id)!
+      this.d.log.info('commitment.done', { chat: chatId, id: c.id, daily: true })
+      return { text: `已记下 #${c.id} 这一次做到了，下一次是 ${fmtTime(next.due_at, this.d.timeZone(), now)}。` }
+    }
+    this.d.ledger.updateCommitment(c.id, { state: 'done', note: str(args.note).slice(0, 200) || 'done' })
+    this.d.log.info('commitment.done', { chat: chatId, id: c.id, daily: false })
+    return { text: `已标成完成 #${c.id}。` }
+  }
+
   // ─── 兜底：这一轮 bot 说了"三点提醒你"却没登记 ───
 
   /** 一轮结束后调用。返回要在下一轮告诉模型的话（没有就是空数组）。dueTurn：这一轮是承诺到期的提醒（bot 会复述那件事）。 */
@@ -141,6 +158,7 @@ export class Commitments {
     const hints: string[] = []
     const open = L.openCommitments(chatId)
     for (const p of detectPromises(text, this.whenCtx(now))) {
+      let dft: ReturnType<typeof defaultWhen> = null
       if (L.hasCommitmentQuote(chatId, p.sentence, now - 24 * 60 * MIN)) continue
       // 复述还没兑现的承诺（真机：问"你答应过我什么"时 bot 把"1 分钟后提醒你"又说了一遍）：时间接近或说法相近就不再登记
       const dup = open.find(c => (p.when && Math.abs(c.due_at - p.when.at) <= 30 * MIN) || similar(c.quote ?? c.text, p.sentence) >= 0.6 || similar(c.text, p.sentence) >= 0.6)
@@ -151,6 +169,12 @@ export class Commitments {
         const c = L.addCommitment({ chatId, text: p.sentence, quote: p.sentence, dueAt: p.when.at, source })
         this.d.log.info('commitment.created', { chat: chatId, id: c.id, source, how: p.when.how, due_in_min: Math.round((c.due_at - now) / MIN) })
         hints.push(`⟦系统·承诺⟧ ${said}「${escapeUserText(p.sentence)}」，程序已替你登记成承诺 #${c.id}（${fmtTime(c.due_at, this.d.timeZone(), now)}）。如果这不是承诺，用 commitment_cancel 取消。`)
+      } else if (!p.when && !daily && (dft = defaultWhen(p.sentence, this.whenCtx(now))) && dft.at > now) {
+        // 时间含糊但能定（等会儿、晚点、明天、后天、周末）：先按缺省时间替她登记，告诉她按哪个词定的、不对怎么改
+        const c = L.addCommitment({ chatId, text: p.sentence, quote: p.sentence, dueAt: dft.at, source })
+        L.updateCommitment(c.id, { note: `default: ${dft.word}` })
+        this.d.log.info('commitment.created', { chat: chatId, id: c.id, source, how: 'default', due_in_min: Math.round((c.due_at - now) / MIN) })
+        hints.push(`⟦系统·承诺⟧ ${said}「${escapeUserText(p.sentence)}」，没说几点，程序按「${dft.word}」先替你登记成承诺 #${c.id}（${fmtTime(c.due_at, this.d.timeZone(), now)}）。时间不对就用 commitment_cancel 取消，再用 commitment_create 按对的时间登记；如果这不是承诺，直接取消。`)
       } else {
         // 时间说得含糊，换算不了：记一条空的占位，免得每轮都提醒同一句
         const v = L.addCommitment({ chatId, text: p.sentence, quote: p.sentence, dueAt: now, source })
