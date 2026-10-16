@@ -370,7 +370,7 @@ def _translate_via_cli(prompt: str, timeout: int = 60) -> dict:
 
 def _gen_image_comfyui(bot_id: str, moment_id: int, text: str, visibility: str):
     """ComfyUI：先用 LLM 按 comfyui-skill 规则把中文场景转 SD 风格英文 prompt。
-    失败（ComfyUI 没启动 / 超时 / 异常）时自动降级走 NovelAI，并打日志告知用户。"""
+    失败（ComfyUI 没启动 / 超时 / 异常）时只打日志，这条圈只发文字，不换到 NovelAI（用户 2026-10-16 定）。"""
     import subprocess
     import config_loader as _cfg
     PYBIN = os.environ.get("CLAUDEBOTLIFE_PYTHON", sys.executable)
@@ -381,7 +381,7 @@ def _gen_image_comfyui(bot_id: str, moment_id: int, text: str, visibility: str):
     # 脚本按 $CLAUDEBOTLIFE_REPO/configs/<bot>.yml 找 face_traits；本仓库的 bot yml 就在 configs/ 下
     child_env = {**os.environ, "CLAUDEBOTLIFE_REPO": os.environ.get("CLAUDEBOTLIFE_REPO") or _REPO_ROOT}
 
-    # 读 bot yml（必拿到 bot_cfg 以便降级时调 _gen_image_novelai）
+    # 读 bot yml：锚点图（anchor_image、anchor_denoise）从这里拿
     # 注：face_traits 由 comfyui_gen.py 自动从 bot yml 读取并拼接，post.py 不再读
     bot_cfg = {}
     anchor_image = ""
@@ -500,7 +500,7 @@ def _gen_image_comfyui(bot_id: str, moment_id: int, text: str, visibility: str):
     # 后台跑生图 + 完成后写回（不阻塞 maybe_post_moment）
     import threading
     def runner():
-        fallback_reason = None
+        fail_reason = None
         try:
             cmd = [PYBIN, SCRIPT, bot_id, en_prompt, "--size", size, "--global", global_cfg]
             if anchor_image:
@@ -521,22 +521,15 @@ def _gen_image_comfyui(bot_id: str, moment_id: int, text: str, visibility: str):
                         return
             # 没拿到 MEDIA → 失败
             tail = (r.stderr or r.stdout or "")[-200:]
-            fallback_reason = f"comfyui 子进程失败：{tail.strip()[:120]}"
+            fail_reason = f"comfyui 子进程失败：{tail.strip()[:120]}"
         except subprocess.TimeoutExpired:
-            fallback_reason = "comfyui 生图超时（>300s，可能 ComfyUI 卡死）"
+            fail_reason = "comfyui 生图超时（>300s，可能 ComfyUI 卡死）"
         except Exception as e:
-            fallback_reason = f"comfyui 异常：{e}"
+            fail_reason = f"comfyui 异常：{e}"
 
-        # ─── 降级到 NovelAI ───
-        if fallback_reason:
-            sys.stderr.write(f"⚠️ [fallback] moment {moment_id}: {fallback_reason}\n")
-            sys.stderr.write(f"⚠️ [fallback] 自动改用 novelai 重试（请检查 ComfyUI 是否在 :8188）\n")
-            try:
-                if bot_cfg:
-                    _gen_image_novelai(bot_id, bot_cfg, moment_id, text, visibility)
-                    sys.stderr.write(f"✓ [fallback] novelai 已接管 moment {moment_id}\n")
-            except Exception as e2:
-                sys.stderr.write(f"❌ [fallback] novelai 兜底也失败：{e2}\n")
+        # 出不了图不换引擎：这条圈只发文字
+        if fail_reason:
+            sys.stderr.write(f"⚠️ [comfyui] moment {moment_id} 没配上图，只发文字：{fail_reason}（请检查 ComfyUI 是否在 :8188）\n")
     threading.Thread(target=runner, daemon=True).start()
 
 
