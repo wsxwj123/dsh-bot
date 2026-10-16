@@ -68,7 +68,7 @@ function languageRules(l: Languages, voiceOn = true, voiceModel = ''): string[] 
     '### 语言',
     `- 文字语言是${text}，语音语言是${voice}。文字气泡始终用文字语言写。`,
     `- 发语音（${toolName('reply')} 带 as_voice=true）时 text 与 voice_text 都要写，两种语言相同时也要写。`,
-    '- text 用文字语言写，只显示、不朗读。',
+    '- text 用文字语言写，只显示、不朗读，不加语气标签。',
     '- voice_text 用语音语言写，只朗读、不显示。不写方括号语气标签，语气靠用词表达；voice_instruct 和 voice_emotion 也不填。',
     '- 两种语言相同时，voice_text 的内容与 text 一致，去掉不适合朗读的符号与表情。',
     '- voice_text 的段数与 text 一致（按空行分段），一一对应。',
