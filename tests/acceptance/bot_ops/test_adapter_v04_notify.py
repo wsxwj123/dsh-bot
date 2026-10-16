@@ -259,8 +259,9 @@ def test_meta_v04_能力清单恰好十个键_多了notify与生活设定(adapte
                                     "bot.enable": True, "bot.switch_in": True, "bot.group_chat": True,
                                     "bot.persona": True, "bot.voice": True, "bot.skills": True,
                                     "bot.create": True, "bot.archive": True, "bot.delete": True,
-                                    "bot.profile": True, "bot.token_handoff": True})
-    assert body.get("capabilities") == want, "能力清单应恰好是二十一个键（补充文件 13.8）：%r" % body.get("capabilities")
+                                    "bot.profile": True, "bot.token_handoff": True,
+                                    "bot.groups_discovered": True})
+    assert body.get("capabilities") == want, "能力清单应恰好是二十二个键（补充文件 13.8，v1.1 加 bot.groups_discovered）：%r" % body.get("capabilities")
 
 
 # ============================================================ 敏感信息
