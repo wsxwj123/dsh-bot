@@ -8,7 +8,9 @@ import { sleep } from '../util'
 /** 内联按钮（按钮引导用，方案 3.3.2）。callback_data 的硬性上限是 64 字节，引导自己限 40 */
 export type TgInlineButton = { text: string; callback_data: string }
 export type TgInlineKeyboard = { inline_keyboard: TgInlineButton[][] }
-export type TgUser = { id: number; is_bot?: boolean; first_name?: string; last_name?: string; username?: string }
+export type TgUser = { id: number; is_bot?: boolean; first_name?: string; last_name?: string; username?: string
+  /** 只有 getMe 返回：BotFather 里是否允许进群、是否关了隐私模式（能看到群里全部消息） */
+  can_join_groups?: boolean; can_read_all_group_messages?: boolean }
 export type TgChat = { id: number; type: 'private' | 'group' | 'supergroup' | 'channel'; title?: string; username?: string; first_name?: string }
 export type TgMessage = {
   message_id: number
@@ -18,6 +20,9 @@ export type TgMessage = {
   text?: string
   caption?: string
   entities?: { type: string; offset: number; length: number }[]
+  /** 群升级成超级群：新群里的第一条消息带原群号，原群里的最后一条带新群号 */
+  migrate_from_chat_id?: number
+  migrate_to_chat_id?: number
   reply_to_message?: TgMessage
   photo?: { file_id: string; file_size?: number; width?: number; height?: number }[]
   voice?: { file_id: string; duration?: number; mime_type?: string; file_size?: number }
@@ -36,7 +41,11 @@ export type TgMessage = {
  * 所以用 date === 0 区分。
  */
 export type TgCallbackQuery = { id: string; from: TgUser; message?: TgMessage; inline_message_id?: string; chat_instance?: string; data?: string }
-export type TgUpdate = { update_id: number; message?: TgMessage; edited_message?: TgMessage; callback_query?: TgCallbackQuery }
+/** bot 自己在某个聊天里的身份。restricted 时 is_member 表示此刻还在不在群里 */
+export type TgChatMember = { status: string; user: TgUser; is_member?: boolean }
+/** my_chat_member：bot 被拉进群、被设成管理员、被移出群（不受隐私模式影响） */
+export type TgChatMemberUpdated = { chat: TgChat; from: TgUser; date: number; old_chat_member: TgChatMember; new_chat_member: TgChatMember }
+export type TgUpdate = { update_id: number; message?: TgMessage; edited_message?: TgMessage; callback_query?: TgCallbackQuery; my_chat_member?: TgChatMemberUpdated }
 
 /** Telegram 明确回了 ok:false */
 export class TgApiError extends Error {
@@ -131,7 +140,7 @@ export class TelegramApi {
 
   getUpdates(offset: number, timeoutS: number, signal?: AbortSignal) {
     // 两类都要显式写：不写时 Telegram 沿用上一次的声明，旧网关声明过只要 message，按钮点击就永远收不到（TG调研第 2 题）
-    return this.call<TgUpdate[]>('getUpdates', { offset, timeout: timeoutS, allowed_updates: ['message', 'callback_query'] }, { timeoutMs: (timeoutS + 15) * 1000, signal })
+    return this.call<TgUpdate[]>('getUpdates', { offset, timeout: timeoutS, allowed_updates: ['message', 'callback_query', 'my_chat_member'] }, { timeoutMs: (timeoutS + 15) * 1000, signal })
   }
 
   sendMessage(chatId: string, text: string, o: { replyTo?: number; replyMarkup?: TgInlineKeyboard } = {}) {
