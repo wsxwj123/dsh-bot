@@ -406,6 +406,12 @@ export class Engine {
         call: (args, ctx) => engine().toolCommit('cancel', args, ctx),
       },
       {
+        name: 'commitment_done',
+        description: '把一件承诺标成已经做到（提前做到了、刚做完）。每天重复的只算今天这一次，明天到点照常提醒。',
+        inputSchema: { type: 'object', properties: { id: { type: 'number', description: '承诺编号' }, note: { type: 'string', description: '怎么做到的，一句话（可选）' } }, required: ['id'] },
+        call: (args, ctx) => engine().toolCommit('done', args, ctx),
+      },
+      {
         name: 'stay_silent',
         description: '这一轮决定不回复对方时调用，写明原因（原因不会发给对方）。',
         inputSchema: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] },
@@ -535,12 +541,13 @@ export class Engine {
     }
   }
 
-  async toolCommit(op: 'create' | 'list' | 'cancel', args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
+  async toolCommit(op: 'create' | 'list' | 'cancel' | 'done', args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
     const at = this.activeFor(ctx.chatId, ctx.segmentId)
     if (!at) return { text: '这一轮已经结束。', isError: true }
     if (at.mode === 'summary') return LOCKED
     if (op === 'list') return this.commitments.list(at.chatId)
     if (op === 'create') return this.commitments.create(at.chatId, args)
+    if (op === 'done') return this.commitments.done(at.chatId, args)
     const r = this.commitments.cancel(at.chatId, args)
     // 到点提醒的这一轮里取消了这件事：等于选择这次不开口，不再追一句"你还没回复"
     const c = this.ledger.commitment(Number(String(args.id ?? '').replace(/^#/, '')))
