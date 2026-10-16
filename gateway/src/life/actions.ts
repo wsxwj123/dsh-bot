@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { safeError, type Logger } from '../log'
+import type { ImageEngine } from './image_switch'
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..', '..')
 // 生图一般要一分钟左右（真机 M4：7 次都超过 45 秒），久等只是让这一轮干等。短等一下（默认 10 秒 = gateway.image_wait_ms），
@@ -66,6 +67,11 @@ const SYS_GUIDE: Record<'novelai' | 'comfyui', string> = {
 下面原文里凡是用"跑 bash 命令 & 并发"的写法，都按上面的方式替换。`,
 }
 
+/** ComfyUI 没画出来时给模型的话（约定 v1.1 5.21 第 5 条：改用 NovelAI 重画，在回复里自然提一句） */
+const COMFY_FALLBACK = 'ComfyUI 没画出来。改用 NovelAI 重画：先调用 image_guide（engine 填 novelai）看 NovelAI 的写法，再调用 generate_image（engine 填 novelai，用 intermediate 写描述）。回复里单独一句自然提到这次不是 ComfyUI 画的，不用括号。'
+const COMFY_FALLBACK_SOME = '没画出来的改用 NovelAI 重画：image_guide 和 generate_image 的 engine 都填 novelai，用 intermediate 写描述。回复里单独一句自然提到这几张不是 ComfyUI 画的，不用括号。'
+const NOVELAI_FALLBACK_BAD = 'intermediate 不能为空。这一张改用 NovelAI 画，先调用 image_guide（engine 填 novelai）看写法。'
+
 export type ActionsDeps = {
   /** 朋友圈、TELEGRAM_WORKER_BOT 里用的名字（lifeId，旧系统里的 bot 名） */
   botId: string
@@ -75,10 +81,12 @@ export type ActionsDeps = {
   configPath: string
   log: Logger
   mediaDir: string
-  /** novelai | comfyui | off */
+  /** 此刻生效的引擎：novelai | comfyui | off（共用开关读得到就按开关，见 image_switch.ts） */
   imageProvider: () => string
-  /** 生图技能目录（里面的 SKILL.md 是写法说明，novelai 的 .env.local 可以放令牌） */
-  imageSkillDir: () => string
+  /** 各引擎的生图技能目录（里面的 SKILL.md 是写法说明，novelai 的 .env.local 可以放令牌；comfyui 的脚本在 scripts/ 下） */
+  imageSkillDir: (engine: ImageEngine) => string
+  /** 壳的全局配置文件（生图开关、ComfyUI 设置都在里面）；不设就用仓库里的 configs/_global.yml */
+  globalCfg?: () => string | undefined
   /** 朋友圈数据库（BOTLIFE_STATE_DB），不设就用仓库里的 state.db */
   stateDb: () => string | undefined
   /** 凭据文件里的值（NOVELAI_BEARER_TOKEN 等），只传给对应脚本 */
@@ -118,6 +126,10 @@ export class LifeActions {
     }
     const db = this.d.stateDb()
     if (db) env.BOTLIFE_STATE_DB = expand(db)
+    // 朋友圈脚本发圈配图时按同一个共用开关挑引擎、调同一份 ComfyUI 脚本（约定 v1.1 5.21）
+    const g = this.d.globalCfg?.()
+    if (g) env.CLAUDEBOT_GLOBAL_CFG = expand(g)
+    env.COMFYUI_SKILL_DIR = expand(this.d.imageSkillDir('comfyui'))
     for (const [k, v] of Object.entries(extra)) if (v) env[k] = v
     return env
   }
@@ -134,22 +146,30 @@ export class LifeActions {
 
   // ─── 生图 ───
 
-  imageGuide(): Result {
-    const provider = this.d.imageProvider()
+  /** 这次用哪个引擎：本 bot 没开生图就是 off；engine 填 novelai 是 ComfyUI 没画出来、这次改用 NovelAI 重画 */
+  private engineFor(args: Record<string, unknown>): ImageEngine | 'off' {
+    const current = this.d.imageProvider()
+    if (current === 'off') return 'off'
+    if (args.engine === 'novelai') return 'novelai'
+    return current === 'comfyui' ? 'comfyui' : 'novelai'
+  }
+
+  imageGuide(args: Record<string, unknown> = {}): Result {
+    const provider = this.engineFor(args)
     if (provider === 'off') return { text: '这个 bot 没开生图。', isError: true }
     let guide = ''
-    try { guide = readFileSync(join(expand(this.d.imageSkillDir()), 'SKILL.md'), 'utf8') } catch { return { text: '找不到生图说明（SKILL.md）。', isError: true } }
+    try { guide = readFileSync(join(expand(this.d.imageSkillDir(provider)), 'SKILL.md'), 'utf8') } catch { return { text: '找不到生图说明（SKILL.md）。', isError: true } }
     const how = provider === 'comfyui'
       ? '在这里：按下面的规则写好英文 prompt，作为 generate_image 的 prompt 参数传入。不需要（也不能）跑 Bash 或脚本。'
       : '在这里：按下面的规则写好 intermediate.json 的内容，作为 generate_image 的 intermediate 参数传入；--ratio 对应 ratio 参数，--reuse-seed 对应 reuse_seed 参数。不需要（也不能）跑 Bash 或脚本，也不用写文件。'
     // 交付时把 SKILL.md 里"用一条 bash 命令 & 并发"那段换成新系统说法；匹配不到就原样保留、靠系统说明兜底
     const { text, converted } = convertGuideSection(guide)
     this.d.log.info('tool.image_guide', { provider, converted })
-    return { text: `${how}\n\n${SYS_GUIDE[provider === 'comfyui' ? 'comfyui' : 'novelai']}\n\n${text}` }
+    return { text: `${how}\n\n${SYS_GUIDE[provider]}\n\n${text}` }
   }
 
   async generateImage(chatId: string, args: Record<string, unknown>): Promise<Result> {
-    const provider = this.d.imageProvider()
+    const provider = this.engineFor(args)
     if (provider === 'off') return { text: '这个 bot 没开生图。', isError: true }
     const ws = join(this.d.mediaDir, 'image-work')
     mkdirSync(ws, { recursive: true })
@@ -170,6 +190,7 @@ export class LifeActions {
       const bad = provider === 'comfyui' ? !(typeof v === 'string' && v.trim()) : !v || (typeof v !== 'object' && typeof v !== 'string')
       if (!bad) continue
       if (multi) return { text: `第 ${i + 1} 张的 ${noun} 不能为空。`, isError: true }
+      if (args.engine === 'novelai') return { text: NOVELAI_FALLBACK_BAD, isError: true }
       return { text: provider === 'comfyui' ? 'prompt 不能为空（英文描述）。先调用 image_guide 看写法。' : 'intermediate 不能为空。先调用 image_guide 看写法。', isError: true }
     }
 
@@ -179,17 +200,21 @@ export class LifeActions {
       if (provider === 'comfyui') {
         const prompt = String(it.prompt).trim()
         const out = join(this.d.mediaDir, `gen-${stamp}${tag}.png`)
-        // 第一个参数传配置 id（管理台面板键）：comfyui 脚本用它 load_bot() 读人设锚点，
-        // 对不认识的 id 会按 life_config 文件名反查目录——多个 bot 共用一份 life_config 时会读错人。
-        // 落盘位置不受影响：这条路径永远带 --out
-        return this.py([join(REPO_ROOT, 'scripts', 'comfyui_gen.py'), this.d.imageAgent, prompt, '--out', out], {}, 600_000)
-          .then(r => ({ idx, path: r.code === 0 ? out : null, err: r.err }))
+        // 共用的 comfyui-skill 脚本（约定 v1.1 5.21 第 4 条）。第一个参数传配置 id（管理台面板键）；
+        // 全局配置（ComfyUI 地址、工作流、正负前缀）用开关所在的那份。新系统的 bot 没有锚点配置，不传 --bot-config
+        const g = this.d.globalCfg?.()
+        const size = ['portrait', 'landscape', 'square', 'wide'].includes(String(it.ratio)) ? ['--size', String(it.ratio)] : []
+        const argv = [join(expand(this.d.imageSkillDir('comfyui')), 'scripts', 'comfyui_gen.py'), this.d.imageAgent, prompt, '--out', out,
+          '--global', g ? expand(g) : join(REPO_ROOT, 'configs', '_global.yml'), ...size]
+        // 失败原因脚本打在 stdout 的 FAIL 行：并进 err 只进日志，不给模型
+        return this.py(argv, {}, 600_000)
+          .then(r => ({ idx, path: r.code === 0 ? out : null, err: r.code === 0 ? r.err : [r.out.trim().split('\n').pop() ?? '', r.err].filter(Boolean).join('\n') }))
       }
       const im = it.intermediate
       const imPath = join(ws, `im-${stamp}${tag}.json`)
       const resPath = join(ws, `res-${stamp}${tag}.json`)
       writeFileSync(imPath, typeof im === 'string' ? im : JSON.stringify(im, null, 1))
-      const skill = expand(this.d.imageSkillDir())
+      const skill = expand(this.d.imageSkillDir('novelai'))
       const ratio = ['portrait', 'landscape', 'square', 'wide'].includes(String(it.ratio)) ? String(it.ratio) : 'portrait'
       const argv = [join(skill, 'scripts', 'generate_novelai_image.py'), '--intermediate', imPath, '--config', join(skill, 'assets', 'default_config.json'),
         '--ratio', ratio, '--agent-name', this.d.imageAgent, '--session-name', `telegram-${chatId}`, '--output-json', resPath, ...(it.reuse_seed === true ? ['--reuse-seed'] : [])]
@@ -208,10 +233,13 @@ export class LifeActions {
       this.d.log.info('tool.generate_image', { provider, ok: ok.length, total: rs.length })
       for (const f of fails) this.d.log.warn('tool.generate_image_failed', { provider, ...(many ? { index: f.idx + 1 } : {}), err: safeError(f.err.split('\n').filter(Boolean).slice(-2).join(' ')) })
       if (ok.length === 0) {
-        const text = '这次没生成出来（生图服务出错）。可以和对方说一声，或者稍后再试。'
+        const text = provider === 'comfyui' ? COMFY_FALLBACK : '这次没生成出来（生图服务出错）。可以和对方说一声，或者稍后再试。'
         return { result: { text, isError: true }, late: `⟦系统·生图⟧ ${text}` }
       }
-      const failNote = fails.length ? `\n第 ${fails.map(f => f.idx + 1).join('、')} 张没生成出来（生图服务出错），其余照常发。` : ''
+      const nums = fails.map(f => f.idx + 1).join('、')
+      const failNote = !fails.length ? '' : provider === 'comfyui'
+        ? `\n第 ${nums} 张 ComfyUI 没画出来，其余照常发。${COMFY_FALLBACK_SOME}`
+        : `\n第 ${nums} 张没生成出来（生图服务出错），其余照常发。`
       if (!many) {
         return {
           result: { text: `图片生成好了：${ok[0]!.path}\n用 reply 的 files 发给对方，或者用 moments 工具的 set_image 配到朋友圈。` },
