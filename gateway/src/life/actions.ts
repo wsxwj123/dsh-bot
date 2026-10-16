@@ -279,6 +279,10 @@ export class LifeActions {
       this.d.log.info('tool.moments', { action: s('action'), code: r.code, ...(skip ? { skip: skip.slice(0, 60) } : {}) })
       const out = (r.out.trim() || (r.code === 0 ? '完成。' : '')).slice(0, 3000)
       if (r.code === 0) return { text: out }
+      // 动态已经被主人删了：脚本先查、不写库，报 not found 退出 5。静静丢掉，不当出错（用户 2026-10-16 定）
+      if ((s('action') === 'like' || s('action') === 'reply') && r.code === 5 && /^moment \d+ not found$/.test(errLines[errLines.length - 1] ?? '')) {
+        return { text: '这条动态已经不在了，不用回，也不用点赞。' }
+      }
       const why = (errLines.pop() ?? '').slice(0, 300) || `退出码 ${r.code}`
       return { text: `没做成：${skip ? `被挡住了（${skip}），马上再试也一样。` : ''}${why}`, isError: true }
     } catch (e) {
