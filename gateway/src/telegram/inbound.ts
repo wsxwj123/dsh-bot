@@ -9,12 +9,15 @@ export type GateResult = { deliver: true } | { deliver: 'observe' } | { deliver:
 
 export const isGroupChat = (chatId: string | number) => String(chatId).startsWith('-')
 
+/** 挡下的群消息里，这个原因表示"这个群没加入"：收消息层据此把群记进"刚发现的群"（约定 v1.1 5.20） */
+export const GROUP_NOT_JOINED = 'group not in access.json'
+
 export function gate(msg: TgMessage, access: Access): GateResult {
   if (access.dmPolicy === 'disabled') return { deliver: false, reason: 'dm disabled' }
   if (!msg.from) return { deliver: false, reason: 'no sender' }
   if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
     const policy = access.groups[String(msg.chat.id)]
-    if (!policy) return { deliver: false, reason: 'group not in access.json' }
+    if (!policy) return { deliver: false, reason: GROUP_NOT_JOINED }
     const allow = (policy.allowFrom ?? []).map(String)
     if (allow.length > 0 && !allow.includes(String(msg.from.id))) return { deliver: false, reason: 'sender not in group allowFrom' }
     // 群里只有点名本 bot 的命令（/clear@本bot 等）直接交给网关，其余都只记录
