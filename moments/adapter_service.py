@@ -739,14 +739,28 @@ def _catalog_time(stamp):
 def _load_catalog():
     """读供应商清单存档 → ``(清单, saved_at)``；没有、读不出、不是 JSON、任何一处形状不对回 None，整份不用。
 
+    读法同生活设定（``life_settings._read``）：不跟软链、不阻塞地打开，只认普通文件，最多 1 MiB。所以路径是软链
+    （哪怕指向合规的清单）、目录、FIFO，或文件超过 1 MiB，都算读不出，不会卡在 FIFO 上。
+
     形状：顶层只能是 ``saved_at``、``providers`` 两个键，``saved_at`` 是 ``_catalog_time`` 认的写法，
-    ``providers`` 是数组；每项只能是 ``id``、``name``、``has_key``、``models`` 四个键，id、name 是非空字符串，
-    has_key 是真假值，models 是字符串数组。键一个不多：存档里的项原样回给调用方，多出来的键不能带出去。
+    ``providers`` 是数组（空数组也算合规）；每项只能是 ``id``、``name``、``has_key``、``models`` 四个键，
+    id、name 是非空字符串，has_key 是真假值，models 是字符串数组。键一个不多：存档里的项原样回给调用方，
+    多出来的键不能带出去。
     """
+    path = _catalog_path()
     try:
-        with open(_catalog_path(), "rb") as f:
-            data = json.loads(f.read().decode("utf-8"))
-    except (OSError, ValueError, RecursionError):
+        # _read 碰上目录会在 fdopen 处抛 IsADirectoryError、还漏掉那个 fd：先用 lstat 挡掉不是普通文件的（软链、
+        # 目录、FIFO 都不去打开）。lstat 之后、打开之前被换掉的，_read 自己按 fstat 再核一遍，抛出来的也算读不出。
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        raw, _st = life_settings._read(path)
+    except OSError:
+        return None
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
         return None
     if not isinstance(data, dict) or set(data) != {"saved_at", "providers"} \
             or _catalog_time(data["saved_at"]) is None or not isinstance(data["providers"], list):
@@ -763,10 +777,15 @@ def _save_catalog(catalog):
     """刚从在跑的网关读到的清单存进存档，供 bot 全停时用：只有 ``saved_at``（此刻的 UTC 时间）与这份清单，
     0600，原子写，``state/`` 不在就建。
 
-    清单与存档里的一样、上次存的又没超过 10 分钟，就不重写。写不成只记异常类名，这次读到的清单照常回；
+    清单是空数组、或每一家都没有模型（网关拿不到 choices 时就是这样），不写：这样的清单拿来核对什么都过不了，
+    不能顶掉更早那份有用的；已有的存档一个字节不动，``saved_at`` 也不刷新。只要有一家有模型就照常往下走。
+    清单与存档里的一样、上次存的又没超过 10 分钟，就不重写；存档读不出（软链、不是普通文件、太大）当作没有，
+    照常写，原子替换换掉的是路径上的软链本身，不跟过去写。写不成只记异常类名，这次读到的清单照常回；
     日志不写清单。JSON 按默认的 ASCII 转义写：网关报来的名字里就算有落单的代理码位也写得出、读回来一字不差。
     """
     try:
+        if not any(p["models"] for p in catalog):
+            return
         now = datetime.now(timezone.utc).replace(microsecond=0)
         saved = _load_catalog()
         if saved is not None and saved[0] == catalog \
