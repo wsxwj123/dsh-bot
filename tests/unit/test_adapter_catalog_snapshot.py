@@ -208,7 +208,7 @@ def test_存档是目录_读回None(archive):
 
 @pytest.mark.skipif(not os.path.isdir("/dev/fd"), reason="这个平台数不了本进程打开的 fd")
 def test_存档是目录_反复读也不漏fd(archive):
-    """``life_settings._read`` 碰上目录会抛、并漏掉打开的 fd；这里挡在它前面，读多少次 fd 数都不涨。"""
+    """存档路径是目录：``life_settings._read`` 关掉打开的 fd 再回读不出，读多少次 fd 数都不涨。"""
     archive.mkdir(parents=True)
     before = len(os.listdir("/dev/fd"))
     for _ in range(20):
