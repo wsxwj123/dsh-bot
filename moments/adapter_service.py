@@ -747,15 +747,7 @@ def _load_catalog():
     id、name 是非空字符串，has_key 是真假值，models 是字符串数组。键一个不多：存档里的项原样回给调用方，
     多出来的键不能带出去。
     """
-    path = _catalog_path()
-    try:
-        # _read 碰上目录会在 fdopen 处抛 IsADirectoryError、还漏掉那个 fd：先用 lstat 挡掉不是普通文件的（软链、
-        # 目录、FIFO 都不去打开）。lstat 之后、打开之前被换掉的，_read 自己按 fstat 再核一遍，抛出来的也算读不出。
-        if not stat.S_ISREG(os.lstat(path).st_mode):
-            return None
-        raw, _st = life_settings._read(path)
-    except OSError:
-        return None
+    raw, _st = life_settings._read(_catalog_path())
     if raw is None:
         return None
     try:
