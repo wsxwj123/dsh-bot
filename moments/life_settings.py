@@ -293,7 +293,13 @@ def _read(path, expect=None):
         fd = os.open(path, _READ_FLAGS)
     except OSError:
         return None, None
-    with os.fdopen(fd, "rb") as f:
+    try:
+        f = os.fdopen(fd, "rb")
+    except OSError:                         # 目录在这里抛 IsADirectoryError，传进去的 fd 它不关：自己关，不漏
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return None, None
+    with f:
         try:
             cur = os.fstat(f.fileno())
             if not stat.S_ISREG(cur.st_mode) or (
