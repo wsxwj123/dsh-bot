@@ -218,6 +218,11 @@ CONFIG_DEFAULT_MODEL = "deepseek-flash"
 MAX_SPEC = 200
 #: 网关 ``key`` 的四种取值里算「有密钥」的两种（补充文件 5.1：ok 已配，none 这家不需要）。
 KEY_READY = ("ok", "none")
+#: 供应商清单存档（``<DSH_BOT_HOME>/state/`` 下）：bot 全停时拿它当清单。清单没变时距上次存超过这么多秒才重写；
+#: ``saved_at`` 的写法（UTC 到秒，带 Z）
+CATALOG_FILE = "provider-catalog.json"
+CATALOG_REFRESH = 600
+CATALOG_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 NOT_SAVED = "这只 bot 的进程现在连不上，这次没有保存"
 NOT_SAVED_SLOW = "这只 bot 的进程没有及时回应，这次没有保存"
@@ -649,15 +654,16 @@ def _bots():
 
 
 def _provider_catalog():
-    """4.3 的供应商列表 ``[{"id", "name", "has_key", "models"}]``，向正在运行的 bot 的网关读来。
+    """4.3 的供应商列表 ``[{"id", "name", "has_key", "models"}]`` 与它存下的时间：回 ``(清单, cached_at)``。
 
     补充文件 4.3、5.1：所有 bot 共用一份清单，按 bot 编号的字典序问第一只连得上的，读的是
     ``GET /v1/model``（映射见 ``_catalog``），不读任何本地的凭据文件。停用的 bot、没有网关
-    文件的 bot 跳过，不发请求。
+    文件的 bot 跳过，不发请求。读到了先存进存档（``_save_catalog``）再回，``cached_at`` 为 None。
 
     - 没连上、发出后断了或超时：这是只读请求，换下一只问不会多写什么；
-    - 连上了但回的东西认不出（不是 JSON、状态码不对、形状不对）：不再问别的，抛，外层回 500；
-    - 一只都问不到（都停用了、都没在跑、一只 bot 都没有）：503。
+    - 连上了但回的东西认不出（不是 JSON、状态码不对、形状不对）：不再问别的，也不拿存档顶替，抛，外层回 500；
+    - 一只都问不到（都停用了、都没在跑、一只 bot 都没有）：改用存档（``_load_catalog``），``cached_at``
+      是存档的 ``saved_at``；存档没有、读不出、形状不对，503。
 
     换供应商的第 4 步不走这里：它只问那只 bot 自己的网关（见 ``_set_provider``）。
     """
@@ -673,8 +679,13 @@ def _provider_catalog():
             if gateway_client.net_kind(e) is None:
                 raise
             continue
-        return _catalog(info)
-    raise Refuse(503, "unavailable", NO_RUNNING_BOT)
+        catalog = _catalog(info)
+        _save_catalog(catalog)
+        return catalog, None
+    saved = _load_catalog()
+    if saved is None:
+        raise Refuse(503, "unavailable", NO_RUNNING_BOT)
+    return saved
 
 
 def _catalog(info):
@@ -709,6 +720,66 @@ def _catalog(info):
     return catalog
 
 
+def _catalog_path():
+    return os.path.join(str(config_sources.dsh_home()), "state", CATALOG_FILE)
+
+
+def _catalog_time(stamp):
+    """存档的 ``saved_at``（形如 ``2026-10-17T02:15:00Z``）→ 带 UTC 时区的时刻。
+
+    不是这个写法（补零、到秒、带 Z，strptime 放过的不补零写法也算不对）或不是真实存在的时刻回 None。
+    """
+    try:
+        moment = datetime.strptime(stamp, CATALOG_TIME_FORMAT)
+    except (TypeError, ValueError):
+        return None
+    return moment.replace(tzinfo=timezone.utc) if moment.strftime(CATALOG_TIME_FORMAT) == stamp else None
+
+
+def _load_catalog():
+    """读供应商清单存档 → ``(清单, saved_at)``；没有、读不出、不是 JSON、任何一处形状不对回 None，整份不用。
+
+    形状：顶层只能是 ``saved_at``、``providers`` 两个键，``saved_at`` 是 ``_catalog_time`` 认的写法，
+    ``providers`` 是数组；每项只能是 ``id``、``name``、``has_key``、``models`` 四个键，id、name 是非空字符串，
+    has_key 是真假值，models 是字符串数组。键一个不多：存档里的项原样回给调用方，多出来的键不能带出去。
+    """
+    try:
+        with open(_catalog_path(), "rb") as f:
+            data = json.loads(f.read().decode("utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or set(data) != {"saved_at", "providers"} \
+            or _catalog_time(data["saved_at"]) is None or not isinstance(data["providers"], list):
+        return None
+    for p in data["providers"]:
+        if not isinstance(p, dict) or set(p) != {"id", "name", "has_key", "models"} \
+                or not _text(p["id"]) or not _text(p["name"]) or not isinstance(p["has_key"], bool) \
+                or not isinstance(p["models"], list) or not all(isinstance(m, str) for m in p["models"]):
+            return None
+    return data["providers"], data["saved_at"]
+
+
+def _save_catalog(catalog):
+    """刚从在跑的网关读到的清单存进存档，供 bot 全停时用：只有 ``saved_at``（此刻的 UTC 时间）与这份清单，
+    0600，原子写，``state/`` 不在就建。
+
+    清单与存档里的一样、上次存的又没超过 10 分钟，就不重写。写不成只记异常类名，这次读到的清单照常回；
+    日志不写清单。JSON 按默认的 ASCII 转义写：网关报来的名字里就算有落单的代理码位也写得出、读回来一字不差。
+    """
+    try:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        saved = _load_catalog()
+        if saved is not None and saved[0] == catalog \
+                and 0 <= (now - _catalog_time(saved[1])).total_seconds() <= CATALOG_REFRESH:
+            return
+        path = _catalog_path()
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        text = json.dumps({"saved_at": now.strftime(CATALOG_TIME_FORMAT), "providers": catalog}) + "\n"
+        life_settings._replace(path, text, 0o600)
+    except Exception as e:                  # noqa: BLE001  存档只是备用：写不成不连累这次已读到的清单
+        _log.error("provider catalog snapshot failed: %s", type(e).__name__)
+
+
 def _require_offered(catalog, provider_id, model):
     """换供应商第 4 步的两项校验（补充文件 4.4）：只看这只 bot 的网关刚读来的清单。"""
     for provider in catalog:
@@ -723,7 +794,11 @@ def _require_offered(catalog, provider_id, model):
 
 
 def _providers():
-    return {"ok": True, "providers": _provider_catalog(), "default": {"label": DEFAULT_LABEL}}
+    catalog, cached_at = _provider_catalog()
+    body = {"ok": True, "providers": catalog, "default": {"label": DEFAULT_LABEL}}
+    if cached_at is not None:               # bot 全停、用的是存档：带上存档存下的时间
+        body["cached_at"] = cached_at
+    return body
 
 
 def _provider_budget():
@@ -2737,8 +2812,9 @@ def _valid_op_id(value, kinds=OP_KINDS):
 def _queue_provider(bot, body, has_provider, has_effort):
     """13.7：停着的 bot 换供应商、模型、强度——核对过就写进它配置的 brain 段，不启动，回 queued。
 
-    供应商与模型用在跑的 bot 的网关读来的清单核对（``_provider_catalog``）：一只都问不到、或回的东西认不出，都算
-    核对不了，503，什么都不写；不在清单 404，这家没有这个模型 422。只改强度不用核对。不碰这只自己的网关。
+    供应商与模型用在跑的 bot 的网关读来的清单核对（``_provider_catalog``），一只都问不到时按存档核对；存档也用不了、
+    或回的东西认不出，都算核对不了，503，什么都不写；不在清单 404，这家没有这个模型 422。只改强度不用核对。
+    不碰这只自己的网关。
     网关下次启动按配置这一组起：它账本里的单独指定（brain_override）记着当时配置那一组与 ``chosen_at``，
     两样有一样变了就清掉（gateway/src/engine/engine.ts 的 withOverride、overrideKey）。每次都写一个新的
     ``chosen_at``：选的正好就是配置里现在这一组时，配置那一组没变，靠它清掉聊天里临时切的。
@@ -2746,7 +2822,7 @@ def _queue_provider(bot, body, has_provider, has_effort):
     changes = {}
     if has_provider:
         try:
-            catalog = _provider_catalog()
+            catalog = _provider_catalog()[0]
         except Refuse:
             raise
         except Exception as e:              # noqa: BLE001  认不出的回复同样是核对不了；只记类名
