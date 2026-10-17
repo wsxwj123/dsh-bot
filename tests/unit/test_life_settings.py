@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """生活设定（moments/life_settings.py）里验收测试碰不到的几处：一次改几个键、写法特殊、锁内发现被改过、
-自检兜底、允许目录的禁区、只读字段原样交回。
+自检兜底、允许目录的禁区、只读字段原样交回、读到目录算读不出且不漏 fd。
 
 直接调 view / save；bot 条目照适配服务 _own_bots 的形状手摆，目录全在 tmp_path。
 """
@@ -160,3 +160,14 @@ def test_备份_同一秒轮换删掉较早的之后_新的一份仍接在最后
             contents.append(f.read())
     assert contents == [b"v%d" % i for i in range(5, 7)]
     assert all(os.stat(os.path.join(folder, n)).st_mode & 0o777 == 0o600 for n in names)
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/fd"), reason="这个平台数不了本进程打开的 fd")
+def test_读到目录_回None_None_连读多次进程打开的fd数不涨(tmp_path):
+    """目录 os.open 打得开，到 fdopen 才抛 IsADirectoryError，而且不关传进去的 fd：_read 得自己关。"""
+    folder = tmp_path / "a-dir"
+    folder.mkdir()
+    before = len(os.listdir("/dev/fd"))
+    for _ in range(10):
+        assert life._read(str(folder)) == (None, None)
+    assert len(os.listdir("/dev/fd")) == before
