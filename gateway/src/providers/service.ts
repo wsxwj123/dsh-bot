@@ -307,7 +307,8 @@ export class ProviderService {
       seen.add(f.id)
       const keep = existingById.get(f.id)
       const ctx = owner.has(f.id) && keep ? keep.contextWindow : (f.contextWindow ?? DEFAULT_CONTEXT)
-      out.push({ id: f.id, contextWindow: ctx })
+      // input 与上下文长度并列：已有条目有就保留（拉列表不会给出 input）；新出现的模型不带
+      out.push({ id: f.id, contextWindow: ctx, ...(keep?.input !== undefined ? { input: [...keep.input] } : {}) })
     }
     // 更新时（拉成功或失败都）保留手动加的模型；新建时没有
     for (const id of entry?.meta.manualModels ?? []) {
