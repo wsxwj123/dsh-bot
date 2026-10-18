@@ -28,6 +28,7 @@ import engine
 import deepseek_delta
 import config_loader
 from moments import features as feature_switch
+from moments import config_sources
 from chat_history import _project_slug_for  # slug 规则唯一实现（仓根 chat_history.py，与 worker-manager.ts 同规则）
 
 DEFAULT_STATE_DIR = os.path.expanduser("~/.claude/dispatcher/.jiwen-state")
@@ -253,6 +254,9 @@ def tick_one_bot(bot_id: str, jiwen_cfg: dict, state_dir: str, dry_run: bool = F
     except Exception as e:
         summary["error"] = f"load_bot: {e}"
         return summary
+    # 共用库里的进行中事件记在 person 名下（bot4 记 chenlulu，和 life-context 写的同一个人）；
+    # 状态文件（state_path）和 main 里 reader.resolve 的开关判定仍按编号 bot_id。
+    person = config_sources.person_key(bot_cfg, bot_id)
 
     chat_id = str(bot_cfg.get("chat_id", "")).strip()
     if not chat_id:
@@ -307,7 +311,7 @@ def tick_one_bot(bot_id: str, jiwen_cfg: dict, state_dir: str, dry_run: bool = F
     try:
         import db as _db
         from datetime import datetime as _dt
-        _ev = _db.get_ongoing_event(bot_id, _dt.fromtimestamp(now))
+        _ev = _db.get_ongoing_event(person, _dt.fromtimestamp(now))
         state, _md = apply_event_emotion(state, _ev, prev_tick_ts)
         if _md is not None:
             summary["actions"].append(
