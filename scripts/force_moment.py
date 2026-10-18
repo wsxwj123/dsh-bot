@@ -18,6 +18,7 @@ from generators import situation as sit_mod
 from generators import world as world_mod
 from generators import wildcard as wc_mod
 from generators.mood import mood_at
+from moments import config_sources
 
 
 Situation = namedtuple("Situation", ["recurring", "sporadic", "hobby"])
@@ -38,13 +39,16 @@ def main():
     inject_hobby = "--inject-hobby" in sys.argv
     cfg = config_loader.load_bot(bot_id)
     cfg["_bot_id"] = bot_id
+    # 共用库里的骰子、爱好、事件、每日卡、痴迷和发出的圈都记在 person 名下（bot4 记 chenlulu），
+    # 和主动找你、网关发圈同一个人；找配置、心情、打印仍用编号
+    person = config_sources.person_key(cfg, bot_id)
     g = config_loader.load_global()
     now = datetime.now()
 
     # 收集真实情境（和心跳同源）
-    sit = sit_mod.collect(bot_id, now, cfg)
+    sit = sit_mod.collect(person, now, cfg)
     world = world_mod.collect_world(cfg, now)
-    wildcard = wc_mod.pick_today_wildcard(bot_id, now)
+    wildcard = wc_mod.pick_today_wildcard(person, now)
     mood, mood_factors = mood_at(now, bot_id, sit, world, cfg)
 
     # --inject-hobby: 测试模式，从 yml 随机抽一个长期爱好注入
@@ -59,7 +63,7 @@ def main():
 
     # --inject-obsession: 测试模式，从 DB 短期痴迷里随机抽一个注入
     if "--inject-obsession" in sys.argv and not sit.hobby:
-        obs = db.list_active_obsessions(bot_id)
+        obs = db.list_active_obsessions(person)
         if obs:
             import secrets
             picked = secrets.SystemRandom().choice(obs)
@@ -86,7 +90,7 @@ def main():
     print(f"新闻命中: {len(world.matched_news) if world else 0}")
 
     from moments.post import maybe_post_moment
-    mid = maybe_post_moment(bot_id, cfg_force, now, sit, world, wildcard,
+    mid = maybe_post_moment(person, cfg_force, now, sit, world, wildcard,
                             mood, mood_factors, 999, g_force)
 
     if mid:
