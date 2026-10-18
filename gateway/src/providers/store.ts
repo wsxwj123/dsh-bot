@@ -15,7 +15,9 @@ export const PROVIDER_APIS: readonly ProviderApi[] = ['anthropic-messages', 'ope
 
 /** dsh 认的思考档位声明（S9；dsh-llm-pi-ai 的 THINKING_LEVELS）。写错 dsh 会起不来，所以读的时候就筛掉 */
 export type ReasoningEfforts = false | Record<string, string | null>
-export type ProviderModel = { id: string; contextWindow: number; reasoningEfforts?: ReasoningEfforts }
+/** 模型能接收的内容类型（dsh 的 input 声明）；只认这两个值 */
+export type ModelInput = 'text' | 'image'
+export type ProviderModel = { id: string; contextWindow: number; reasoningEfforts?: ReasoningEfforts; input?: ModelInput[] }
 export type ProviderRoute = { api: ProviderApi; baseURL: string; apiKeyEnv: string; models: ProviderModel[] }
 export type LastRefresh = { at: number; ok: boolean; count: number; reason: string | null }
 export type ProviderMeta = {
@@ -167,7 +169,21 @@ function cleanEfforts(v: unknown): ReasoningEfforts | undefined {
   return out
 }
 
-/** 模型条目：id 不合格或上下文长度写了但不合格的整条丢弃；没写上下文长度按未知（DEFAULT_CONTEXT）；思考档位声明不合格只丢这个字段 */
+/**
+ * 模型能接收的内容类型：只认 "text"、"image"，去重、保持首次出现的顺序。
+ * 不是数组、空数组、元素认不出（含非字符串）就整个字段丢掉——模型本身照常保留。
+ */
+function cleanInput(v: unknown): ModelInput[] | undefined {
+  if (!Array.isArray(v) || v.length === 0) return undefined
+  const out: ModelInput[] = []
+  for (const x of v) {
+    if (x !== 'text' && x !== 'image') return undefined
+    if (!out.includes(x)) out.push(x)
+  }
+  return out
+}
+
+/** 模型条目：id 不合格或上下文长度写了但不合格的整条丢弃；没写上下文长度按未知（DEFAULT_CONTEXT）；思考档位、input 声明不合格只丢这个字段 */
 function cleanModels(v: unknown): ProviderModel[] {
   if (!Array.isArray(v)) return []
   const out: ProviderModel[] = []
@@ -179,8 +195,9 @@ function cleanModels(v: unknown): ProviderModel[] {
     if (!id || seen.has(id)) continue
     if (o.contextWindow !== undefined && !isContextWindow(o.contextWindow)) continue
     const efforts = cleanEfforts(o.reasoningEfforts)
+    const input = cleanInput(o.input)
     seen.add(id)
-    out.push({ id, contextWindow: (o.contextWindow as number | undefined) ?? DEFAULT_CONTEXT, ...(efforts !== undefined ? { reasoningEfforts: efforts } : {}) })
+    out.push({ id, contextWindow: (o.contextWindow as number | undefined) ?? DEFAULT_CONTEXT, ...(efforts !== undefined ? { reasoningEfforts: efforts } : {}), ...(input !== undefined ? { input } : {}) })
   }
   return out
 }
@@ -282,7 +299,7 @@ export type MergedProviders = {
 
 /**
  * 并进 dsh 的路由（方案 3.2 第 1 条、Q1）。同名时配置文件赢；只交白名单字段（api、baseURL、apiKeyEnv、
- * models[].id/contextWindow/reasoningEfforts），其它字段留在文件里但不交给 dsh；没有模型的不交给 dsh（S5）。
+ * models[].id/contextWindow/reasoningEfforts/input），其它字段留在文件里但不交给 dsh；没有模型的不交给 dsh（S5）。
  */
 export function mergeRoutes(configRoutes: Record<string, Route>, snap: ProvidersSnapshot | null): MergedProviders {
   const out: MergedProviders = { routes: { ...configRoutes }, enabled: {}, shadowed: [], invalid: [...(snap?.invalid ?? [])] }
@@ -295,7 +312,7 @@ export function mergeRoutes(configRoutes: Record<string, Route>, snap: Providers
     if (!e.route.models.length) continue
     out.routes[name] = {
       api: e.route.api, baseURL: e.route.baseURL, apiKeyEnv: e.route.apiKeyEnv,
-      models: e.route.models.map(m => ({ id: m.id, contextWindow: m.contextWindow, ...(m.reasoningEfforts !== undefined ? { reasoningEfforts: m.reasoningEfforts } : {}) })),
+      models: e.route.models.map(m => ({ id: m.id, contextWindow: m.contextWindow, ...(m.reasoningEfforts !== undefined ? { reasoningEfforts: m.reasoningEfforts } : {}), ...(m.input !== undefined ? { input: m.input } : {}) })),
     }
   }
   return out
