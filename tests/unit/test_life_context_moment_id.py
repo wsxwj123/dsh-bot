@@ -2,7 +2,8 @@
 """主动找你（life-context.py）顺带发的朋友圈，用朋友圈里的身份发。
 
 新系统的 bot 在朋友圈里叫 life_id（陈露露是 chenlulu），网关里 moments 工具发圈也用这个名字；
-用配置编号（bot4）发，管理台的朋友圈页对不上人。作息、积温那些记录照旧用配置编号，不在这里改。
+用配置编号（bot4）发，管理台的朋友圈页对不上人。名字由 config_sources.person_key 算，
+life-context 写进共用库的心跳、骰子、爱好等记录也记在同一个名字下。
 """
 import importlib.util
 from pathlib import Path
