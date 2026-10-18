@@ -18,6 +18,7 @@ import db
 import config_loader
 import quota
 from claude_cli import call_claude_json
+from moments import config_sources
 
 
 OBSESSION_PROMPT = """你帮一个 AI 角色生成本周的"短期痴迷"——ta 这阵子突然迷上的事/在追的内容/最近的小爱好。
@@ -49,12 +50,14 @@ WEEKDAY_ZH = ["周一", "周二", "周三", "周四", "周五", "周六", "周�
 
 def refresh_for_bot(bot_cfg: dict) -> int:
     bot_id = bot_cfg["_bot_id"]
+    # 痴迷记在共用库的 person 名下（bot4 记 chenlulu，life-context 按这个名字读）；日志前缀仍用编号
+    person = config_sources.person_key(bot_cfg, bot_id)
     persona = bot_cfg.get("persona_summary", "(未提供人设摘要)")
 
     long_term = bot_cfg.get("personal_hobbies", [])
     long_list = "; ".join(h.get("name", "") for h in long_term) or "(无)"
 
-    current = db.list_active_obsessions(bot_id)
+    current = db.list_active_obsessions(person)
     current_list = "; ".join(o["name"] for o in current) or "(无)"
 
     now = datetime.now()
@@ -83,7 +86,7 @@ def refresh_for_bot(bot_cfg: dict) -> int:
         theme = (item.get("theme") or "").strip()
         if not name or not effect:
             continue
-        db.add_obsession(bot_id, name, effect, theme, duration_days=14)
+        db.add_obsession(person, name, effect, theme, duration_days=14)
         print(f"  [{bot_id}] +{name} ({theme}) - {effect[:40]}")
         n += 1
     return n
