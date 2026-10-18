@@ -267,7 +267,7 @@ export function readProviders(root: string): any | null {
 }
 export const fileMode = (f: string) => statSync(f).mode & 0o777
 
-export type SeedModel = string | { id: string; contextWindow?: number; reasoningEfforts?: Record<string, unknown> }
+export type SeedModel = string | { id: string; contextWindow?: number; reasoningEfforts?: Record<string, unknown>; input?: string[] }
 export type SeedProvider = {
   name: string
   api?: 'openai-completions' | 'anthropic-messages' | 'openai-responses'
