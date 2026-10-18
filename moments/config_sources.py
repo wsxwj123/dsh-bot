@@ -224,6 +224,19 @@ def person_id(cfg):
     return cfg.get("_life_id") or cfg["_bot_id"]
 
 
+def person_key(cfg, name):
+    """共用库（BOTLIFE_STATE_DB）里这只 bot 记在谁名下：新系统 bot4 记 chenlulu。
+    规则：load_bot 算好的 _life_id → life_config 的文件名 → name（命令行传进来、拿去 load_bot 的名字）；
+    空值（None、空串、只有空白）跳到下一条。只读 cfg、不写 cfg，不抛异常。"""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    life = str(cfg.get("_life_id") or "").strip()
+    if not life:
+        lc = cfg.get("life_config")
+        if isinstance(lc, str) and lc.strip():
+            life = os.path.splitext(os.path.basename(lc.strip()))[0].strip()
+    return life or str(name or "")
+
+
 def config_rank(cfg):
     """同一个人撞名时两份配置谁赢：在跑的那份优先，其次新系统（dsh）优先。"""
     from bots_registry import is_enabled
