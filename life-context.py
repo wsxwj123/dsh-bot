@@ -35,6 +35,7 @@ from generators import world as world_mod
 from generators import recent as recent_mod
 from memory.memory_inject import read_memory_brief, pick_memory_hook
 from moments.post import maybe_post_moment
+from moments import config_sources
 
 
 def emit(action: str, **kw):
@@ -63,6 +64,9 @@ def main():
     except Exception as e:
         sys.stderr.write(f"配置加载失败：{e}\n")
         sys.exit(1)
+    # 共用库里按"这只 bot"区分的记录（心跳、骰子、事件、爱好、每日卡、签名、被赞）一律记在 person 名下
+    # （新系统 bot4 记 chenlulu，和网关的朋友圈动作同一个人）；找配置、账本、暂停开关、积温状态仍用编号 bot_id。
+    person = config_sources.person_key(bot_cfg, bot_id)
 
     now = datetime.now()
     # 新系统（dsh-bot 网关）的 bot 走 DeepSeek，不占 Claude 订阅的 5 小时配额
@@ -99,9 +103,9 @@ def main():
 
     # ─── 3. 收集情境 ───────────────────────────────────
     try:
-        situation = situation_mod.collect(bot_id, now, bot_cfg)
+        situation = situation_mod.collect(person, now, bot_cfg)
         world_snap = world_mod.collect_world(bot_cfg, now)
-        wildcard_pick = wildcard_mod.pick_today_wildcard(bot_id, now)
+        wildcard_pick = wildcard_mod.pick_today_wildcard(person, now)
         mood_val, mood_factors = mood_mod.mood_at(now, bot_id, situation, world_snap, bot_cfg)
         recent_msgs = recent_mod.recent_assistant_messages(
             bot_cfg["bot_channel_path"], days=3, limit=10
@@ -123,7 +127,7 @@ def main():
         now_ts = int(now.timestamp())
         last_user_ts = chat_history.last_user_msg_ts(
             bot_cfg["bot_channel_path"], chat_id=chat_id, bot_name=bot_id) or 0
-        last_self_init_ts = db.last_self_initiate_ts(bot_id, chat_id) or 0
+        last_self_init_ts = db.last_self_initiate_ts(person, chat_id) or 0
         if last_user_ts > 0:
             hours_since_user = max(0.0, (now_ts - last_user_ts) / 3600)
             if hours_since_user <= 48:
@@ -147,7 +151,7 @@ def main():
     if not dry_run:
         try:
             sig_mod.maybe_update_signature(
-                bot_id, bot_cfg, mood_val, mood_factors,
+                person, bot_cfg, mood_val, mood_factors,
                 situation.sporadic, wildcard_pick, world_snap,
             )
         except Exception as e:
@@ -184,7 +188,7 @@ def main():
         )
     if skip_reason:
         db.log_heartbeat(
-            bot_id, int(now.timestamp()), mood_val, mood_factors,
+            person, int(now.timestamp()), mood_val, mood_factors,
             situation.recurring.name,
             (situation.sporadic or {}).get("name", ""),
             (situation.hobby or {}).get("name", ""),
@@ -264,7 +268,7 @@ def main():
     # 6c. action=skip → 不发 self-initiate text（朋友圈已独立处理过）
     if action == "skip":
         db.log_heartbeat(
-            bot_id, int(now.timestamp()), mood_val, mood_factors,
+            person, int(now.timestamp()), mood_val, mood_factors,
             situation.recurring.name,
             (situation.sporadic or {}).get("name", ""),
             (situation.hobby or {}).get("name", ""),
@@ -281,8 +285,8 @@ def main():
     memory_hook = pick_memory_hook(bot_cfg["bot_channel_path"], chat_id=chat_id)
 
     # 取上次心跳后被赞的朋友圈（只看用户的赞，不包括 bot 自赞）
-    last_hb = db.last_heartbeat_ts(bot_id) or (int(now.timestamp()) - 7 * 86400)
-    pending_likes = db.pending_likes_for_bot(bot_id, since_ts=last_hb)
+    last_hb = db.last_heartbeat_ts(person) or (int(now.timestamp()) - 7 * 86400)
+    pending_likes = db.pending_likes_for_bot(person, since_ts=last_hb)
 
     text = formatter.format_self_initiate(
         now, situation, world_snap, wildcard_pick,
@@ -306,7 +310,7 @@ def main():
         # 标记事件已被注入（不能完全确定 bot 真的会提，但至少避免下次又强 SKIP）
         if situation.sporadic and situation.sporadic.get("started_at"):
             db.mark_event_mentioned(
-                bot_id,
+                person,
                 situation.sporadic["name"],
                 situation.sporadic["started_at"],
                 int(now.timestamp()),
@@ -316,7 +320,7 @@ def main():
     # 反复 dry-run 会把接续模式从 first_after_user 错判成 followup
     if not dry_run:
         db.log_heartbeat(
-            bot_id, int(now.timestamp()), mood_val, mood_factors,
+            person, int(now.timestamp()), mood_val, mood_factors,
             situation.recurring.name,
             (situation.sporadic or {}).get("name", ""),
             (situation.hobby or {}).get("name", ""),
@@ -372,11 +376,12 @@ def _try_post_moment(bot_id, bot_cfg, now, situation, world, wildcard,
                       jiwen_info=None):
     """朋友圈触发是独立判断。失败不影响主流程。返回 moment_id 或 None。
 
-    朋友圈里用 life_id 当身份（新系统的 bot：和网关 moments 工具发圈同一个名字，陈露露是 chenlulu），
-    没有就用配置编号。作息、积温那些记录照旧用配置编号。"""
+    朋友圈里用 person 当身份（新系统的 bot：和网关 moments 工具发圈同一个名字，陈露露是 chenlulu）：
+    life_id → life_config 的文件名 → 配置编号。和 main 里心跳、骰子、爱好这些共用库记录同一个名字，
+    都经 config_sources.person_key 算。"""
     try:
         return maybe_post_moment(
-            (bot_cfg or {}).get("_life_id") or bot_id, bot_cfg, now, situation, world, wildcard,
+            config_sources.person_key(bot_cfg, bot_id), bot_cfg, now, situation, world, wildcard,
             mood, mood_factors, since_user_min, global_cfg,
             jiwen_info=jiwen_info,
         )
