@@ -141,11 +141,15 @@ def test_行为5_看板触发不干扰启停本身的其它调用(adapter):
 
 def test_行为6_看板触发异步但不丢_接口返回后1秒内记录可见(adapter):
     adapter.bot("botalpha")
+    au.put_plists(adapter.sandbox, "botalpha")
     adapter.launchctl.set_default(installed=True, running=True, pid=4242)
-    adapter.heartbeat.tick("botalpha", pid=4242)
+    adapter.heartbeat.write("botalpha")
 
-    resp = _enable(adapter, "botalpha", True)
+    adapter.ok(_enable(adapter, "botalpha", False))           # 先停用
+    resp = _enable(adapter, "botalpha", True)                 # 再启用，走完整启动路径
     returned = time.time()                                    # 接口返回的时刻
+    assert resp.status_code == 200, \
+        "启用应回 200，实际 %s：%r" % (resp.status_code, au.body_of(resp))
     body = adapter.ok(resp)
     assert body.get("enabled") is True, body
 
