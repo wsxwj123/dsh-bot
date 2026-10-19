@@ -3158,6 +3158,14 @@ _HUB_ROUTES = [
     ("/hub/api/dsh-model/provider/<name>/refresh", {"POST": hub_routes.dsh_model_provider_refresh}),
     ("/hub/api/dsh-model/provider/<name>/remove", {"POST": hub_routes.dsh_model_provider_remove}),
     ("/hub/api/dsh-model/provider/<name>/test", {"POST": hub_routes.dsh_model_provider_test}),
+    # oauth 账号管理（与 8765 同一批处理函数）；activate 排在两段的删除路由之前，同「写死的段优先」
+    ("/hub/api/oauth/accounts", {"GET": hub_routes.oauth_accounts}),
+    ("/hub/api/oauth/start", {"POST": hub_routes.oauth_start}),
+    ("/hub/api/oauth/submit", {"POST": hub_routes.oauth_submit}),
+    ("/hub/api/oauth/status", {"GET": hub_routes.oauth_status}),
+    ("/hub/api/oauth/accounts/<provider>/<email_hash>/activate",
+     {"POST": hub_routes.oauth_account_activate}),
+    ("/hub/api/oauth/accounts/<provider>/<email_hash>", {"DELETE": hub_routes.oauth_account_delete}),
 ]
 _HUB_TABLE = [(rule.split("/"), methods) for rule, methods in _HUB_ROUTES]
 
