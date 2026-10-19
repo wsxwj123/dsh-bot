@@ -33,7 +33,7 @@
 | `POST /bots`、`GET /bots/templates` | 新建一只 bot（可以先建好不启动）；列出可用的人设模板 |
 | `GET /providers`、`POST /bots/{id}/provider` | 看可选的供应商和模型；给一只 bot 换供应商、模型、思考强度。bot 停着时只存进配置，下次启用生效 |
 | `POST /bots/{id}/restart` | 重启一只 bot |
-| `POST /bots/{id}/enabled` | 启用或停用；从旧系统切过来时可顺带导入旧的私聊记录与没到点的约定。停用时可记下「已迁到另一种底层」，有这个标记就不许再启用 |
+| `POST /bots/{id}/enabled` | 启用或停用；从旧系统切过来时可顺带导入旧的私聊记录与没到点的约定。停用时可记下「已迁到另一种底层」，有这个标记就不许再启用。真正启动（停用后再启用）成功后还会异步触发一次日志看板重建（launchd 任务 `com.dsh-bot.tmux-logs`）；触发失败只记日志，不影响回包与耗时 |
 | `POST /bots/{id}/archive`、`GET /archives`、`POST /archives/{archive_id}/restore` | 归档（整份移走，不删）、列出归档、恢复（恢复后是停用状态） |
 | `POST /bots/{id}/delete` | 删除本地数据：Telegram 令牌文件直接抹掉，其余移进废纸篓；Telegram 上的 bot 本身不受影响 |
 | `GET`、`PUT /bots/{id}/profile` | 显示名 |
