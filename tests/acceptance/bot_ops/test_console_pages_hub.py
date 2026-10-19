@@ -94,7 +94,6 @@ UNLISTED = [
     ("POST", "/hub/api/params"),
     ("GET", "/hub/api/provider"),
     ("POST", "/hub/api/provider"),
-    ("GET", "/hub/api/oauth/start"),
     ("POST", "/hub/api/oauth/callback"),
     ("GET", "/hub/bots/"),
     ("GET", "/hub//bots"),
