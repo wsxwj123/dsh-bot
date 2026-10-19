@@ -45,7 +45,7 @@
 | `GET`、`PUT /bots/{id}/voice` | 语音编号、语音模型、文字语言、语音语言 |
 | `GET`、`POST /bots/{id}/groups` | 在哪些群、各群的设置；进群、退群 |
 
-适配服务还提供 `/hub/bots`、`/hub/addbot`、`/hub/dsh-model` 三个页面及其接口，供壳转发显示。
+适配服务还提供 `/hub/bots`、`/hub/addbot`、`/hub/dsh-model` 三个页面及其接口，供壳转发显示。oauth 账号管理的 6 个接口（`GET /hub/api/oauth/accounts`、`POST /hub/api/oauth/start`、`POST /hub/api/oauth/submit`、`GET /hub/api/oauth/status`、`POST /hub/api/oauth/accounts/<provider>/<email_hash>/activate`、`DELETE /hub/api/oauth/accounts/<provider>/<email_hash>`）也在同一份名单里，经同一套适配令牌鉴权后转发。
 
 ## 安全边界
 
