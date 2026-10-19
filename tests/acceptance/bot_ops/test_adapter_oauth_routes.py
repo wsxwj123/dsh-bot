@@ -103,7 +103,11 @@ def test_行为5_不带令牌请求六个接口_全部401(adapter):
 def test_行为6_带令牌未知路径404_not_found且既有bots路径照常200(adapter):
     """行为清单第 6 条。"""
     unknown = adapter.call("GET", PREFIX + "/nosuch")
-    _assert_error(unknown, 404, "not_found")
+    body = _body(unknown)
+    assert unknown.status_code == 404, "应为 404，实际 %d：%r" % (unknown.status_code, body)
+    assert body.get("ok") is False, "ok 应为 false，实际 %r（响应体 %r）" % (body.get("ok"), body)
+    assert body.get("code") == "not_found", \
+        "code 应为 'not_found'，实际 %r（响应体 %r）" % (body.get("code"), body)
 
     existing = adapter.call("GET", "/hub/bots")
     assert existing.status_code == 200, \
