@@ -121,7 +121,7 @@ UNLISTED = [
     "/hub/api/dsh-model//effort", "/hub/api/dsh-model/provider//models",
     "/hub/api/dsh-model/provider/x/preview/", "/hub/api/dsh-model/provider/x/rename",
     "/hub/params", "/hub/provider", "/hub/setup", "/hub/healthz", "/hub/api/params",
-    "/hub/api/provider", "/hub/api/oauth/start", "/hub/api/claude-native/activate",
+    "/hub/api/provider", "/hub/api/claude-native/activate",
 ]
 
 
@@ -144,13 +144,13 @@ def test_框架的路由表里没有挂任何hub规则(client):
     assert [r.rule for r in client.application.url_map.iter_rules() if r.rule.startswith("/hub")] == []
 
 
-def test_名单正好23项_每项都是8765同一路径同一方法的那个处理函数(old_app):
+def test_名单正好29项_每项都是8765同一路径同一方法的那个处理函数(old_app):
     on_8765 = {}
     for rule in old_app.url_map.iter_rules():
         for method in rule.methods - {"HEAD", "OPTIONS"}:
             on_8765[(rule.rule, method)] = old_app.view_functions[rule.endpoint]
     pairs = [(rule, m, fn) for rule, methods in svc._HUB_ROUTES for m, fn in methods.items()]
-    assert len(pairs) == 23, "接口约定第 2 节是 3 页加 20 个接口"
+    assert len(pairs) == 29, "接口约定第 2 节是 3 页加 26 个接口（2026-10-20 新增 oauth 6 条）"
     for rule, method, fn in pairs:
         assert on_8765.get((rule, method)) is fn, "%s %s 不是 8765 上那个处理函数" % (method, rule)
 
