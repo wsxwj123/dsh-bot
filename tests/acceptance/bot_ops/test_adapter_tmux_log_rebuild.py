@@ -59,31 +59,37 @@ def test_行为1_停用后再启用_回200且看板重建kickstart出现一次(a
     assert kicks[0]["argv"] == ["kickstart", "gui/%d/%s" % (os.getuid(), TMUX_LABEL)], kicks[0]
 
 
-def test_行为2_已启用的bot幂等启用_回200且触发一次看板重建(adapter):
+def test_行为2_已启用的bot幂等启用_回200且不触发看板重建(adapter):
     adapter.bot("botalpha")                                   # 已启用
     au.put_plists(adapter.sandbox, "botalpha")
     adapter.launchctl.set_default(installed=True, running=True, pid=4242)
     adapter.heartbeat.tick("botalpha", pid=4242)
 
+    marker = len(adapter.launchctl.calls())
     body = adapter.ok(_enable(adapter, "botalpha", True))
     assert (body.get("enabled"), body.get("running")) == (True, True), body
 
-    kicks = _wait_tmux_since(adapter.launchctl)
-    assert len(kicks) == 1, \
-        "幂等启用也应触发一次看板重建，实际记录：%r" % adapter.launchctl.calls()
+    assert not _wait_for(lambda: _tmux_kickstarts(adapter.launchctl.calls()[marker:]), timeout=1.0), \
+        "幂等启用不该触发看板重建，实际记录：%r" % adapter.launchctl.calls()[marker:]
 
 
-def test_行为3_看板任务不存在_启用仍200且回包与正常启用一致(adapter):
-    # 对照：看板任务正常时的一次启用的回包
+def test_行为3_看板任务不存在_启用停用的bot仍200且回包与正常启用一致(adapter):
+    # 对照：看板任务正常时，一只停用的 bot 走完整启动路径的回包
     adapter.bot("botalpha")
+    au.put_plists(adapter.sandbox, "botalpha")
     adapter.launchctl.set_default(installed=True, running=True, pid=4242)
-    normal = adapter.ok(_enable(adapter, "botalpha", True))
+    adapter.heartbeat.write("botalpha")
+    adapter.ok(_enable(adapter, "botalpha", False))           # 先停用
+    normal = adapter.ok(_enable(adapter, "botalpha", True))   # 再启用
 
     # 让假 launchctl 对看板任务返回非 0（单元不存在，kickstart 退 3）
     adapter.launchctl.set_unit("tmux-logs", installed=False, running=False, pid=4242)
     adapter.bot("botbravo")
+    au.put_plists(adapter.sandbox, "botbravo")
+    adapter.heartbeat.write("botbravo")
+    adapter.ok(_enable(adapter, "botbravo", False))           # 先停用，准备走完整启动路径
     marker = len(adapter.launchctl.calls())
-    resp = _enable(adapter, "botbravo", True)
+    resp = _enable(adapter, "botbravo", True)                 # 再启用
     failed = au.body_of(resp)
     assert resp.status_code == 200, \
         "看板任务不存在时启用仍应回 200，实际 %s：%r" % (resp.status_code, failed)
