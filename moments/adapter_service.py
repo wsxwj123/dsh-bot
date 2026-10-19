@@ -128,6 +128,9 @@ STOP_POLL = 1.0
 #: 「启」这一步最坏要的时间：launchctl 最多四条（kickstart、回落 bootstrap、定时单元的 bootout 与 bootstrap），
 #: 每条最多一个超时。切进导入要在整条时限减去它之前做完，整条请求才不超过 55 秒。
 START_RESERVE = 4 * bot_launchd.LAUNCHCTL_TIMEOUT
+#: 日志看板重建：launchd 定时单元（每 5 分钟给启用中的 bot 补建 tmux 会话 ``tg-<bot>-dsh``）。
+#: 启用后立刻踢一次，用户不必等下一轮。只碰这一个 label，不碰其它单元。
+TMUX_LOGS_LABEL = "com.dsh-bot.tmux-logs"
 #: 切进导入（9.3）：旧频道目录根、Claude Code 会话目录根的缺省（测试接缝见 _switch_in）
 DEFAULT_CHANNELS_DIR = "~/.claude/channels"
 DEFAULT_PROJECTS_DIR = "~/.claude/projects"
@@ -1228,6 +1231,30 @@ def _stop_bot(bot, seams, deadline):
     return {"ok": True, "enabled": False, "running": False}
 
 
+def _kickstart_tmux_logs(seams):
+    """启用成功后异步踢一次日志看板重建：``launchctl kickstart gui/<uid>/com.dsh-bot.tmux-logs``。
+
+    看板任务每 5 分钟自己补建 ``tg-<bot>-dsh`` 的 tmux 会话；启用后马上踢一次，用户不必等下一轮。
+    在后台线程里调用、不等结果，不增加启用接口的耗时；任务没装、launchctl 报错或平台没有
+    launchctl 都只记一条日志，不影响回包与错误契约。``seams`` 是受理时定下的那一份（§1a），
+    后台线程不读环境。
+    """
+    def run():
+        try:
+            code, _text, why = bot_launchd._run(       # 复用启停那套接缝与超时处理
+                ["kickstart", "gui/%d/%s" % (bot_launchd._uid(), TMUX_LOGS_LABEL)], seams=seams)
+        except Exception as e:              # noqa: BLE001  后台线程里的异常不许冒出去
+            _log.warning("tmux log rebuild kickstart failed: %s", type(e).__name__)
+            return
+        if why is not None or code != 0:
+            _log.warning("tmux log rebuild kickstart failed: %s", why or ("exit %s" % code))
+
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except Exception as e:                  # noqa: BLE001  触发不了也只是少一次重建，不影响启用
+        _log.warning("tmux log rebuild kickstart failed: %s", type(e).__name__)
+
+
 def _start_bot(bot, seams, deadline):
     """「启」（约定 5.8，补充文件 9.2）：先记成启用，再装载并启动启动项，不等心跳。"""
     bot_id = bot["id"]
@@ -1239,6 +1266,7 @@ def _start_bot(bot, seams, deadline):
         raise Refuse(503, "unavailable", "已记成启用，但启动它的启动项失败：%s" % reason)
     # 再问一次 print 最多要一个 launchctl 超时：剩的时间不够就不问，按「还没在跑」报
     running = deadline - time.monotonic() > bot_launchd.LAUNCHCTL_TIMEOUT and _polling(bot_id, seams)   # 13.1 同一判定
+    _kickstart_tmux_logs(seams)             # 真正启动后补建看板；幂等启用不走这里
     return {"ok": True, "enabled": True, "running": running}
 
 
