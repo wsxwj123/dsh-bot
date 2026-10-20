@@ -130,7 +130,7 @@ export class StickerService {
   }
 
   private tierHead(tier: StickerTier, part: StickerEntry[]): string {
-    if (tier === 'sfw') return `sfw（${part.length} 条；标签是英文，如 Happy、Hug）`
+    if (tier === 'sfw') return `sfw（${part.length} 条；标签中英文都有，如 Happy、生气）`
     const cats = [...new Set(part.filter(e => e.category).map(e => e.category!))]
     return `nsfw（${part.length} 条；标签是中文${cats.length ? `，分类：${cats.join(' | ')}` : ''}）`
   }
@@ -192,7 +192,7 @@ export class StickerService {
       const head = id
         ? `id ${id} 不在库里（tier 只能是 sfw / nsfw）。`
         : `「${query}」在库里没有确切的一条。标签有英文也有中文（如 Happy、生气）。`
-      if (near.length === 0) return { text: `${head}可以不带关键词 list 看全部。`, isError: true }
+      if (near.length === 0) return { text: `${head}可以不带关键词 list 看分类汇总，再用 query 查具体分类。`, isError: true }
       const lines = [`${head}有几条沾边的，用 id 再发一次：`]
       for (const e of near) lines.push(`#${e.id} ${e.label}`)
       return { text: lines.join('\n'), isError: true }
