@@ -200,8 +200,9 @@ def generate_for_bot(cfg: dict, bot_id: str, date_str: str, now: datetime,
         print(f"[{bot_id}] LLM 返回 {len(cards)} 张卡，截断到 8 张", file=sys.stderr)
         cards = cards[:8]
     elif len(cards) < 5:
-        print(f"[{bot_id}] 只生成 {len(cards)} 张（少于 5 张），仍写入",
+        print(f"[{bot_id}] 只生成 {len(cards)} 张（少于 5 张），跳过（不写库）",
               file=sys.stderr)
+        return 0
 
     if dry_run:
         print(f"[{bot_id}] dry-run：将为 person={person} 写入 {len(cards)} 张卡")
