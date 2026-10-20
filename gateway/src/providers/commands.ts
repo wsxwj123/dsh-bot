@@ -302,7 +302,7 @@ export class ProviderCommands {
         name: normName(name),
         api: e.route.api,
         baseURL: e.route.baseURL,
-        modelList: e.route.models.map(m => ({ id: m.id, contextWindow: m.contextWindow, guessed: e.meta.guessedContext.includes(m.id) })),
+        modelList: e.route.models.map(m => ({ id: m.id, contextWindow: m.contextWindow, guessed: e.meta.guessedContext.includes(m.id), input: m.input ? [...m.input] : [] })),
         manualModels: [...e.meta.manualModels],
         key: this.d.service.credential(e.route.apiKeyEnv) ? 'ok' : 'missing',
         enabled: !shadowed,
