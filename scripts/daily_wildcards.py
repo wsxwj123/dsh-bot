@@ -7,7 +7,7 @@
 用法：
     BOTLIFE_STATE_DB=/path/to/state.db python3 scripts/daily_wildcards.py
     BOTLIFE_STATE_DB=... python3 scripts/daily_wildcards.py --dry-run
-    BOTLIFE_STATE_DB=... python3 scripts/daily_wildcards.py --bot chenlulu
+    BOTLIFE_STATE_DB=... python3 scripts/daily_wildcards.py --bot bot4
 
     --dry-run   只打印将写入的卡片，不写库
     --bot ID    只处理一只 bot（排查用）
@@ -163,7 +163,8 @@ def _build_prompt(cfg: dict, now: datetime, bot_id: str) -> str:
     """拼提示词。collect_world 整体失败时只用日期和人设摘要。"""
     date_str = now.strftime("%Y-%m-%d")
     try:
-        context = _format_world(world_mod.collect_world(cfg, now))
+        # 只读背景：不能把命中的新闻标成已读，否则 bot 主流程当天采集不到。
+        context = _format_world(world_mod.collect_world(cfg, now, mark_seen=False))
     except Exception as exc:
         print(f"[{bot_id}] 今日背景收集失败，改用日期和人设：{type(exc).__name__}: {exc}",
               file=sys.stderr)
@@ -194,6 +195,13 @@ def generate_for_bot(cfg: dict, bot_id: str, date_str: str, now: datetime,
         print(f"[{bot_id}] LLM 返回空数组、非数组或解析失败，跳过（不写库）",
               file=sys.stderr)
         return 0
+
+    if len(cards) > 8:
+        print(f"[{bot_id}] LLM 返回 {len(cards)} 张卡，截断到 8 张", file=sys.stderr)
+        cards = cards[:8]
+    elif len(cards) < 5:
+        print(f"[{bot_id}] 只生成 {len(cards)} 张（少于 5 张），仍写入",
+              file=sys.stderr)
 
     if dry_run:
         print(f"[{bot_id}] dry-run：将为 person={person} 写入 {len(cards)} 张卡")
