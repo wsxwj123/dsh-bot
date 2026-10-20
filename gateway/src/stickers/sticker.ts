@@ -21,7 +21,7 @@ const TIERS: StickerTier[] = ['sfw', 'nsfw']
 export const DEFAULT_STICKERS_FILE = join(homedir(), '.claude', 'channels', '_shared', 'stickers.json')
 export const DEFAULT_STICKERS_ROOT = join(homedir(), 'resource', 'stickers')
 
-/** 带关键词 list 一次最多列多少行（关键词太泛时防刷屏）；不带关键词时全列，模型好一次看全 */
+/** 带关键词 list 一次最多列多少行（关键词太泛时防刷屏）；不带关键词时只给分类汇总（库大了不撑爆上下文） */
 const LIST_LIMIT = 80
 
 /** 解析库文件：两档都认；条目缺 label / path 的跳过。读不出来返回 []（不抛，由工具层如实回报）。 */
@@ -135,6 +135,19 @@ export class StickerService {
     return `nsfw（${part.length} 条；标签是中文${cats.length ? `，分类：${cats.join(' | ')}` : ''}）`
   }
 
+  /** 不带关键词时：按分类汇总（没有 category 的归「未分类」），不逐条列，免得库大撑爆上下文 */
+  private summarize(hits: StickerEntry[]): string {
+    const counts = new Map<string, number>()
+    for (const e of hits) {
+      const cat = e.category ?? '未分类'
+      counts.set(cat, (counts.get(cat) ?? 0) + 1)
+    }
+    // 数量从多到少；同数量保持库里首次出现的顺序（sort 稳定，输出确定）
+    const rows = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([cat, n]) => `${cat}：${n} 张`)
+    rows.push('要看某个分类下的具体表情，用 query 传分类名再查。')
+    return rows.join('\n')
+  }
+
   /** list：按关键词看库里有什么。只给标签与 id，不给本地路径。 */
   list(args: Record<string, unknown>): StickerResult {
     const r = this.read()
@@ -152,9 +165,9 @@ export class StickerService {
           : '这一档里没有表情包。',
       }
     }
-    const cap = query ? LIST_LIMIT : hits.length
-    const shown = hits.slice(0, cap)
-    const lines: string[] = [query ? `匹配「${query}」的 ${hits.length} 条：` : `表情包库，共 ${all.length} 条。发的时候按人设里的表情包规则选用：`]
+    if (!query) return { text: this.summarize(hits) }
+    const shown = hits.slice(0, LIST_LIMIT)
+    const lines: string[] = [`匹配「${query}」的 ${hits.length} 条：`]
     for (const tier of TIERS) {
       const part = shown.filter(e => e.tier === tier)
       if (part.length === 0) continue
