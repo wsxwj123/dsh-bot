@@ -37,8 +37,8 @@ describe('GET /v1/provider 的正常路径', () => {
         api: 'openai-completions',
         baseURL: `${fm.url}/v1`,
         modelList: [
-          { id: 'm1', contextWindow: 1_048_576, guessed: true },
-          { id: 'm2', contextWindow: 64_000, guessed: false },
+          { id: 'm1', contextWindow: 1_048_576, guessed: true, input: [] },
+          { id: 'm2', contextWindow: 64_000, guessed: false, input: [] },
         ],
         manualModels: ['man1'],
         key: 'ok',
