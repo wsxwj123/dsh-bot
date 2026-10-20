@@ -161,7 +161,7 @@ export class StickerService {
     if (hits.length === 0) {
       return {
         text: query
-          ? `「${query}」在库里没有匹配的。sfw 的标签是英文（如 Happy、Hug、Kiss），nsfw 是中文；去掉关键词可以看全部。`
+          ? `「${query}」在库里没有匹配的。标签有英文也有中文（如 Happy、生气）；去掉关键词可以看分类汇总。`
           : '这一档里没有表情包。',
       }
     }
@@ -191,7 +191,7 @@ export class StickerService {
       const near = found.near ?? []
       const head = id
         ? `id ${id} 不在库里（tier 只能是 sfw / nsfw）。`
-        : `「${query}」在库里没有确切的一条。sfw 的标签是英文（如 Happy、Hug），nsfw 是中文。`
+        : `「${query}」在库里没有确切的一条。标签有英文也有中文（如 Happy、生气）。`
       if (near.length === 0) return { text: `${head}可以不带关键词 list 看全部。`, isError: true }
       const lines = [`${head}有几条沾边的，用 id 再发一次：`]
       for (const e of near) lines.push(`#${e.id} ${e.label}`)
