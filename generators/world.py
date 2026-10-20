@@ -57,12 +57,18 @@ class WorldSnapshot:
         return bool(di.get("festival") or di.get("solar_term") or di.get("lunar_festival"))
 
 
-def collect_world(cfg: dict, now: datetime) -> WorldSnapshot:
+def collect_world(cfg: dict, now: datetime, mark_seen: bool = True) -> WorldSnapshot:
+    """收集当天世界快照。
+
+    mark_seen=False 时不把命中的新闻标为已读，供只读背景的任务使用
+    （如每日 wildcard），避免抢占 bot 主流程当天的新闻采集。
+    """
     snap = WorldSnapshot()
     snap.date_info = _collect_date_info(now)
     snap.weather = _try(_fetch_weather, cfg.get("city", ""))
     snap.rss_items = _try(_fetch_rss, cfg.get("rss_feeds", [])) or []
-    snap.matched_news = _filter_by_interest(snap.rss_items, cfg.get("interest_keywords", []))
+    snap.matched_news = _filter_by_interest(
+        snap.rss_items, cfg.get("interest_keywords", []), mark_seen=mark_seen)
     snap.on_this_day = _try(_fetch_on_this_day, now) or []
     return snap
 
@@ -207,7 +213,8 @@ def _fetch_rss(feeds: list[str]) -> list[dict]:
     return items[:20]
 
 
-def _filter_by_interest(items: list[dict], keywords: list[str]) -> list[dict]:
+def _filter_by_interest(items: list[dict], keywords: list[str],
+                        mark_seen: bool = True) -> list[dict]:
     if not keywords:
         return items[:3]  # 没配兴趣词就返回前 3 条
     matched = []
@@ -216,7 +223,8 @@ def _filter_by_interest(items: list[dict], keywords: list[str]) -> list[dict]:
         for kw in keywords:
             if kw.lower() in text:
                 matched.append(item)
-                db.mark_news_seen(item["hash"])
+                if mark_seen:
+                    db.mark_news_seen(item["hash"])
                 break
     return matched[:3]
 
