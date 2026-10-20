@@ -191,7 +191,7 @@ def test_行为1_启用bot当天无卡_写入5到8张且全部used为0(tmp_path,
         r.returncode, r.stdout, r.stderr)
     rows = _rows(tmp_path / "state.db", "chenlulu")
     assert 5 <= len(rows) <= 8, "应为 5-8 张卡，实际 %d 张：%r" % (len(rows), rows)
-    used = {row[2] for row in rows}
+    used = {row[6] for row in rows}
     assert used == {0}, "所有卡 used 应为 0，实际出现 %r" % (used,)
 
 
@@ -220,7 +220,7 @@ def test_行为2_当天已有卡_一条不删不增也不改(tmp_path, fake_llm)
     finally:
         con.close()
     before = _rows(db, "chenlulu")
-    assert len(before) == 2 and {row[2] for row in before} == {1}
+    assert len(before) == 2 and {row[6] for row in before} == {1}
 
     r2 = _run(env, tmp_path)
     assert r2.returncode == 0, "第二次运行退出码应为 0：%s" % r2.stderr
