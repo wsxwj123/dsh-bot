@@ -164,3 +164,27 @@ describe('错误契约：input 元素不是字符串', () => {
     })
   })
 })
+
+describe('行为 9：GET /v1/provider 的 modelList 每项带 input', () => {
+  test('有声明的是原数组 ["text","image"]，没声明的是 []（键必须存在）', async () => {
+    await withBot({ before: b => {
+      seedProviders(b.root, [{ name: 'myproxy', baseURL: 'https://p.example.com/v1', models: [{ id: 'm1', input: ['text', 'image'] }, 'm2'] }])
+      seedCreds(b.root, { [defaultKeyEnv('myproxy')]: KEY })
+    } }, async ({ gw }) => {
+      const r = await gw.call('/v1/provider')
+      expect(r.status, `GET /v1/provider 应 200，实得 ${r.status}，正文 ${r.text.slice(0, 300)}`).toBe(200)
+      const p = (r.json?.providers ?? []).find((x: any) => x?.name === 'myproxy')
+      expect(p, `响应里应有 myproxy，实得 ${JSON.stringify(r.json?.providers)}`).toBeTruthy()
+      const listed = (id: string) => p.modelList.find((m: any) => m.id === id)
+
+      const declared = listed('m1')
+      expect(declared, `modelList 里应有 m1，实得 ${JSON.stringify(p.modelList)}`).toBeTruthy()
+      expect(declared.input, `m1 的 input 应是 ["text","image"]，实得 ${JSON.stringify(declared)}`).toEqual(['text', 'image'])
+
+      const undeclared = listed('m2')
+      expect(undeclared, `modelList 里应有 m2，实得 ${JSON.stringify(p.modelList)}`).toBeTruthy()
+      expect(Object.prototype.hasOwnProperty.call(undeclared, 'input'), `m2 的 input 键必须存在（哪怕是空数组），实得 ${JSON.stringify(undeclared)}`).toBe(true)
+      expect(undeclared.input, `m2 的 input 应是 []，实得 ${JSON.stringify(undeclared)}`).toEqual([])
+    })
+  })
+})
