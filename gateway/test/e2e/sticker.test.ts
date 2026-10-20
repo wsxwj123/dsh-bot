@@ -87,22 +87,17 @@ test('MCP 工具表：sticker 的 required / enum / 参数类型与说明要点'
 
 // ───────────────────────── list ─────────────────────────
 
-test('list 不给关键词：标题行、两档分组、逐条 #id label 全列，不含本地路径', async () => {
+test('list 不给关键词：分类汇总按数量降序、无分类归未分类、末尾提示 query，不含逐条条目与本地路径', async () => {
   const r = await callSticker(tg, b, { action: 'list' })
   expect(r.isError).toBe(false)
   expect(r.text.split('\n')).toEqual([
-    '表情包库，共 8 条。发的时候按人设里的表情包规则选用：',
-    'sfw（7 条；标签是英文，如 Happy、Hug）',
-    '#sfw:1 Happy 1',
-    '#sfw:2 Happy 2',
-    '#sfw:3 Happy',
-    '#sfw:4 Still 1',
-    '#sfw:5 Sticky 1',
-    '#sfw:6 Same 1',
-    '#sfw:7 Same 1',
-    'nsfw（1 条；标签是中文，分类：Forest）',
-    '#nsfw:1 露奶勾引',
+    '未分类：7 张',
+    'Forest：1 张',
+    '要看某个分类下的具体表情，用 query 传分类名再查。',
   ])
+  expect(r.text).not.toContain('#sfw:')
+  expect(r.text).not.toContain('#nsfw:')
+  expect(r.text).not.toContain('表情包库，共')
   expect(r.text).not.toContain(HOME)
   for (const ext of ['.gif', '.jpg', '.webp']) expect(r.text).not.toContain(ext)
 })
@@ -112,7 +107,7 @@ test('list 带关键词：完全相等的排最前，其余同分按 id，只列
   expect(r.isError).toBe(false)
   expect(r.text.split('\n')).toEqual([
     '匹配「Happy」的 3 条：',
-    'sfw（3 条；标签是英文，如 Happy、Hug）',
+    'sfw（3 条；标签中英文都有，如 Happy、生气）',
     '#sfw:3 Happy',
     '#sfw:1 Happy 1',
     '#sfw:2 Happy 2',
@@ -124,38 +119,49 @@ test('list 关键词拆词：全部词都命中才列出（只命中一部分的
   expect(r.isError).toBe(false)
   expect(r.text.split('\n')).toEqual([
     '匹配「ppy 2」的 1 条：',
-    'sfw（1 条；标签是英文，如 Happy、Hug）',
+    'sfw（1 条；标签中英文都有，如 Happy、生气）',
     '#sfw:2 Happy 2',
   ])
 })
 
-test('list 限定 nsfw：只出现 nsfw 组，总数仍是全库条数', async () => {
+test('list 限定 nsfw：不带关键词时汇总只统计 nsfw 档', async () => {
   const r = await callSticker(tg, b, { action: 'list', tier: 'nsfw' })
   expect(r.isError).toBe(false)
   expect(r.text.split('\n')).toEqual([
-    '表情包库，共 8 条。发的时候按人设里的表情包规则选用：',
-    'nsfw（1 条；标签是中文，分类：Forest）',
-    '#nsfw:1 露奶勾引',
+    'Forest：1 张',
+    '要看某个分类下的具体表情，用 query 传分类名再查。',
+  ])
+  expect(r.text).not.toContain('未分类')
+  expect(r.text).not.toContain('#sfw:')
+  expect(r.text).not.toContain('#nsfw:')
+})
+
+test('list 的 tier 给非枚举值：不过滤，两档都计入汇总', async () => {
+  const r = await callSticker(tg, b, { action: 'list', tier: 'banana' })
+  expect(r.isError).toBe(false)
+  expect(r.text.split('\n')).toEqual([
+    '未分类：7 张',
+    'Forest：1 张',
+    '要看某个分类下的具体表情，用 query 传分类名再查。',
   ])
 })
 
-test('list 的 tier 给非枚举值：不过滤，两档照常列', async () => {
-  const r = await callSticker(tg, b, { action: 'list', tier: 'banana' })
-  expect(r.text).toContain('#sfw:1 Happy 1')
-  expect(r.text).toContain('#nsfw:1 露奶勾引')
-})
-
-test('list 关键词一条不沾边：说明标签语言、给出去掉关键词的办法，不算错误', async () => {
+test('list 关键词一条不沾边：说明标签语言、提示去掉关键词看分类汇总，不算错误', async () => {
   const r = await callSticker(tg, b, { action: 'list', query: 'zzzz' })
   expect(r.isError).toBe(false)
-  expect(r.text).toBe('「zzzz」在库里没有匹配的。sfw 的标签是英文（如 Happy、Hug、Kiss），nsfw 是中文；去掉关键词可以看全部。')
+  expect(r.text).toBe('「zzzz」在库里没有匹配的。标签有英文也有中文（如 Happy、生气）；去掉关键词可以看分类汇总。')
 })
 
-test('list 关键词是空串：当没给关键词，列出全部', async () => {
+test('list 关键词是空串：当没给关键词，输出分类汇总', async () => {
   const r = await callSticker(tg, b, { action: 'list', query: '' })
   expect(r.isError).toBe(false)
-  expect(r.text.split('\n')[0]).toBe('表情包库，共 8 条。发的时候按人设里的表情包规则选用：')
+  expect(r.text.split('\n')).toEqual([
+    '未分类：7 张',
+    'Forest：1 张',
+    '要看某个分类下的具体表情，用 query 传分类名再查。',
+  ])
   expect(r.text).not.toContain('匹配「')
+  expect(r.text).not.toContain('#sfw:')
 })
 
 // ───────────────────────── send 主路径 ─────────────────────────
@@ -218,7 +224,7 @@ test('send 的 id 不在库里：报错、不给候选、不回退 label、不�
   const before = fileSends(tg).length
   const r = await callSticker(tg, b, { action: 'send', id: 'sfw:99', label: 'Happy 1' })
   expect(r.isError).toBe(true)
-  expect(r.text).toBe('id sfw:99 不在库里（tier 只能是 sfw / nsfw）。可以不带关键词 list 看全部。')
+  expect(r.text).toBe('id sfw:99 不在库里（tier 只能是 sfw / nsfw）。可以不带关键词 list 看分类汇总，再用 query 查具体分类。')
   expect(r.text).not.toContain('#')
   await sleep(200)
   expect(fileSends(tg).length).toBe(before)
@@ -229,7 +235,7 @@ test('send 的 label 无确切、有沾边：列候选（#id label）、不发�
   const r = await callSticker(tg, b, { action: 'send', label: 'happ' })
   expect(r.isError).toBe(true)
   expect(r.text.split('\n')).toEqual([
-    '「happ」在库里没有确切的一条。sfw 的标签是英文（如 Happy、Hug），nsfw 是中文。有几条沾边的，用 id 再发一次：',
+    '「happ」在库里没有确切的一条。标签有英文也有中文（如 Happy、生气）。有几条沾边的，用 id 再发一次：',
     '#sfw:1 Happy 1',
     '#sfw:2 Happy 2',
     '#sfw:3 Happy',
@@ -242,7 +248,7 @@ test('send 的 label 既无确切也无沾边：报错、不发出', async () =>
   const before = fileSends(tg).length
   const r = await callSticker(tg, b, { action: 'send', label: 'zzzz' })
   expect(r.isError).toBe(true)
-  expect(r.text).toBe('「zzzz」在库里没有确切的一条。sfw 的标签是英文（如 Happy、Hug），nsfw 是中文。可以不带关键词 list 看全部。')
+  expect(r.text).toBe('「zzzz」在库里没有确切的一条。标签有英文也有中文（如 Happy、生气）。可以不带关键词 list 看分类汇总，再用 query 查具体分类。')
   await sleep(200)
   expect(fileSends(tg).length).toBe(before)
 })
@@ -271,7 +277,11 @@ test('参数缺省或类型不对：action 缺省/空串/数字/布尔都按 lis
   await until(() => stickerCalls(b).length >= n + 5, '5 sticker results')
   for (const r of stickerCalls(b).slice(n, n + 5)) {
     expect(r.isError).toBe(false)
-    expect(r.text).toContain('表情包库，共 8 条。')
+    expect(r.text.split('\n')).toEqual([
+      '未分类：7 张',
+      'Forest：1 张',
+      '要看某个分类下的具体表情，用 query 传分类名再查。',
+    ])
   }
 })
 

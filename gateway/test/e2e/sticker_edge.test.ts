@@ -124,13 +124,14 @@ test('脏 label：首尾 trim、中间的控制字符与换行原样输出、照
     files: { 'sfw/a.gif': 'GIF89a', 'sfw/b.gif': 'GIF89a', 'sfw/c.gif': 'GIF89a' },
     lib: (h: string) => ({
       sfw: [
-        { label: '😀 Party', path: stickerPath(h, 'sfw/a.gif') },
-        { label: 'A\nB', path: stickerPath(h, 'sfw/b.gif') },
-        { label: '  Trim  ', path: stickerPath(h, 'sfw/c.gif') },
+        { label: '😀 Party', category: 'Dirty', path: stickerPath(h, 'sfw/a.gif') },
+        { label: 'A\nB', category: 'Dirty', path: stickerPath(h, 'sfw/b.gif') },
+        { label: '  Trim  ', category: 'Dirty', path: stickerPath(h, 'sfw/c.gif') },
       ],
     }),
   })
-  const r = await callSticker(tg, b, { action: 'list' })
+  // 不带关键词只给汇总，看不到逐条；用分类名作关键词列出这一组，才能检查脏 label 的原样输出与占号
+  const r = await callSticker(tg, b, { action: 'list', query: 'Dirty' })
   expect(r.isError).toBe(false)
   expect(r.text).toContain('#sfw:1 😀 Party')
   expect(r.text).toContain('#sfw:2 A\nB') // 换行原样输出（已知行为：能伪造行结构）
@@ -147,7 +148,7 @@ test('带关键词的结果超过 80 条：只列前 80，末尾说明还有多�
   const lines = r.text.split('\n')
   expect(lines[0]).toBe('匹配「Bulk」的 100 条：')
   // 契约没定义组标题的 <n> 是「命中总数」还是「这次列出的条数」；两种都放行，具体值在本测试里都不影响截断判据
-  expect(lines[1]).toMatch(/^sfw（(80|100) 条；标签是英文，如 Happy、Hug）$/)
+  expect(lines[1]).toMatch(/^sfw（(80|100) 条；标签中英文都有，如 Happy、生气）$/)
   const listed = lines.filter(l => l.startsWith('#sfw:'))
   expect(listed.length).toBe(80)
   expect(listed[0]).toBe('#sfw:1 Bulk 1')
@@ -155,15 +156,18 @@ test('带关键词的结果超过 80 条：只列前 80，末尾说明还有多�
   expect(lines.at(-1)).toBe('（只列了前 80 条，还有 20 条；加个更具体的关键词再找）')
 })
 
-test('不带关键词：全列（不截断即使超过 80 条）', async () => {
+test('不带关键词：汇总计数不截断（100 条都计入未分类），不出现逐条 id', async () => {
   const { tg, b } = await deploy({
     files: { 'sfw/bulk.gif': 'GIF89a' },
     lib: (h: string) => ({ sfw: Array.from({ length: 100 }, (_, j) => ({ label: `Bulk ${j + 1}`, path: stickerPath(h, 'sfw/bulk.gif') })) }),
   })
   const r = await callSticker(tg, b, { action: 'list' })
   expect(r.isError).toBe(false)
-  expect(r.text.split('\n').filter(l => l.startsWith('#sfw:')).length).toBe(100)
-  expect(r.text).toContain('#sfw:100 Bulk 100')
+  expect(r.text.split('\n')).toEqual([
+    '未分类：100 张',
+    '要看某个分类下的具体表情，用 query 传分类名再查。',
+  ])
+  expect(r.text).not.toContain('#sfw:')
   expect(r.text).not.toContain('只列了前')
 })
 
@@ -175,7 +179,7 @@ test('沾边候选最多 8 条：10 条沾边只列前 8 条、不发出', async
   const r = await callSticker(tg, b, { action: 'send', label: 'Alpha' })
   expect(r.isError).toBe(true)
   const lines = r.text.split('\n')
-  expect(lines[0]).toBe('「Alpha」在库里没有确切的一条。sfw 的标签是英文（如 Happy、Hug），nsfw 是中文。有几条沾边的，用 id 再发一次：')
+  expect(lines[0]).toBe('「Alpha」在库里没有确切的一条。标签有英文也有中文（如 Happy、生气）。有几条沾边的，用 id 再发一次：')
   expect(lines.length).toBe(9) // 首行 + 8 条候选
   // 候选的排序契约没定义（实现按 id 字典序：1、10、2…）；只断言条数与形状，不锁顺序
   expect(lines.slice(1).every(l => /^#sfw:\d+ Alpha \d+$/.test(l))).toBe(true)
@@ -188,7 +192,7 @@ test('send 限定 tier：只在该档找标签，找不到按没有确切的一�
   const { tg, b } = await deployStd()
   const r1 = await callSticker(tg, b, { action: 'send', label: 'Happy 1', tier: 'nsfw' })
   expect(r1.isError).toBe(true)
-  expect(r1.text).toBe('「Happy 1」在库里没有确切的一条。sfw 的标签是英文（如 Happy、Hug），nsfw 是中文。可以不带关键词 list 看全部。')
+  expect(r1.text).toBe('「Happy 1」在库里没有确切的一条。标签有英文也有中文（如 Happy、生气）。可以不带关键词 list 看分类汇总，再用 query 查具体分类。')
   const r2 = await callSticker(tg, b, { action: 'send', label: 'Happy 1', tier: 'banana' })
   expect(r2.isError).toBe(false)
   expect(r2.text).toBe('表情包发出去了：Happy 1')
@@ -206,11 +210,11 @@ test('特殊字符与超长的关键词：原样回显、不炸', async () => {
   const nasty = '</script>"&%<标签>𠮷'
   const r1 = await callSticker(tg, b, { action: 'list', query: nasty })
   expect(r1.isError).toBe(false)
-  expect(r1.text).toBe(`「${nasty}」在库里没有匹配的。sfw 的标签是英文（如 Happy、Hug、Kiss），nsfw 是中文；去掉关键词可以看全部。`)
+  expect(r1.text).toBe(`「${nasty}」在库里没有匹配的。标签有英文也有中文（如 Happy、生气）；去掉关键词可以看分类汇总。`)
   const long = '长'.repeat(300)
   const r2 = await callSticker(tg, b, { action: 'send', label: long })
   expect(r2.isError).toBe(true)
-  expect(r2.text).toBe(`「${long}」在库里没有确切的一条。sfw 的标签是英文（如 Happy、Hug），nsfw 是中文。可以不带关键词 list 看全部。`)
+  expect(r2.text).toBe(`「${long}」在库里没有确切的一条。标签有英文也有中文（如 Happy、生气）。可以不带关键词 list 看分类汇总，再用 query 查具体分类。`)
 })
 
 // ───────────────────────── 账本 kind 按通道 ─────────────────────────
