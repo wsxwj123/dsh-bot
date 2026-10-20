@@ -71,6 +71,10 @@ def call_json(*args, **kwargs):
     if mode == "dict":
         return {"cards": _five()}
     return _five()
+
+
+def call_text(*args, **kwargs):
+    return json.dumps(call_json(*args, **kwargs), ensure_ascii=False)
 '''
 
 
