@@ -530,6 +530,19 @@ function drawPanel(body, p) {
     row.style.marginTop = '6px';
     row.appendChild(el('span', m.id, 'mono'));
     row.appendChild(el('span', '上下文 ' + (m.contextWindow != null ? m.contextWindow : '?'), 'muted'));
+    // 可识图开关：勾上＝input 含 image（同时保留 text），取消＝清掉 input、回到只看文字。
+    // 走既有的 modelAction：失败时它会重拉列表（勾选回到服务端状态）并把错误写进面板提示。
+    const lbImage = document.createElement('label');
+    lbImage.className = 'muted';
+    const cbImage = document.createElement('input');
+    cbImage.type = 'checkbox';
+    cbImage.style.width = 'auto';
+    cbImage.checked = Array.isArray(m.input) && m.input.includes('image');
+    cbImage.onchange = () => modelAction(p, {action: 'set_input', id: m.id,
+                                             input: cbImage.checked ? ['text', 'image'] : []});
+    lbImage.appendChild(cbImage);
+    lbImage.appendChild(el('span', '可识图', 'muted'));
+    row.appendChild(lbImage);
     const bEdit = el('button', '改上下文', 'btn mini ghost');
     bEdit.type = 'button';
     bEdit.onclick = () => editContext(row, m, body, p);
