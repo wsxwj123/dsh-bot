@@ -32,6 +32,7 @@ if not os.environ.get("BOTLIFE_STATE_DB", "").strip():
     sys.exit(2)
 
 import argparse  # noqa: E402
+import json  # noqa: E402
 from datetime import datetime  # noqa: E402
 
 # deepseek_client 必须先于 generators.world 导入：后者导入时会把仓库根插到 sys.path 最前。
@@ -74,6 +75,28 @@ def _first_text(item: dict, keys) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _parse_cards_text(text) -> list[dict]:
+    """把 LLM 返回的文本解析成卡片。
+
+    先去掉可能的 ```json 代码块围栏，再对整段 json.loads；解析失败、不是数组
+    或空数组都返回空列表，由调用方按"该只失败"处理。
+    """
+    if not isinstance(text, str):
+        return []
+    raw = text.strip()
+    if "```" in raw:
+        parts = raw.split("```")
+        # 有配对围栏时取第一段围栏内容；只有开头围栏时取它后面的部分。
+        raw = (parts[1] if len(parts) >= 3 else raw[raw.index("```") + 3:]).strip()
+        if raw[:4].lower() == "json":
+            raw = raw[4:].lstrip()
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return _normalize_cards(data)
 
 
 def _normalize_cards(raw) -> list[dict]:
@@ -164,11 +187,12 @@ def generate_for_bot(cfg: dict, bot_id: str, date_str: str, now: datetime,
               file=sys.stderr)
         return 0
 
-    raw = deepseek_client.call_json(
+    text = deepseek_client.call_text(
         _build_prompt(cfg, now, bot_id), timeout=120, max_tokens=1200)
-    cards = _normalize_cards(raw)
+    cards = _parse_cards_text(text)
     if not cards:
-        print(f"[{bot_id}] LLM 返回空数组或非数组，跳过（不写库）", file=sys.stderr)
+        print(f"[{bot_id}] LLM 返回空数组、非数组或解析失败，跳过（不写库）",
+              file=sys.stderr)
         return 0
 
     if dry_run:
