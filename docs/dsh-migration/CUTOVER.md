@@ -52,6 +52,7 @@ Telegram 会把旧程序还没确认的消息投给新网关，账本负责去�
    - 电话（8766，常驻）。
    朋友圈库继续用旧的那一份。
 4. voice-bridge 和 provider-proxy 新系统也在用，照常留着。旧系统的每日事件、清理两个任务，脚本不在仓库里，没有接手；留着还是停掉由你定。
+5. 每日 wildcard 卡片：`scripts/daily_wildcards.py` 遍历启用中的 bot，按 person 在共用库 `daily_wildcards` 表里写当天 5-8 张卡；当天已有卡会跳过，重复跑不会覆盖。把它挂成每天 0:15 的 `com.dsh-bot.daily-wildcard`，plist 环境里必须带 `BOTLIFE_STATE_DB=<共用库路径>`（没设会退出 2，防止写进仓库本地库），并用 `HUB_CONFIGS_DIR` 指向要扫的配置目录（不设则读仓库 `configs/`）。排查时可加 `--dry-run` 只打印不写库，或 `--bot <id>` 只处理一只。
 
 ## 三、回滚
 
