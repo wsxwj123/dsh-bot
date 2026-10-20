@@ -7,7 +7,7 @@ import { safeError, type Logger } from '../log'
 import {
   apiKeyEnvFor, CredentialsUnsupported, DEFAULT_CONTEXT, hostOf, isProviderKeyEnv, normName, readCredentialRefs,
   readProviders, setCredentialRef, writeProviders, ProvidersLockTimeout, ProvidersUnreadable, withProvidersLock,
-  type ProviderApi, type ProviderEntry, type PendingKeyRemoval, type ProviderMeta, type ProviderModel, type ProviderRoute, type ProvidersSnapshot,
+  type ModelInput, type ProviderApi, type ProviderEntry, type PendingKeyRemoval, type ProviderMeta, type ProviderModel, type ProviderRoute, type ProvidersSnapshot,
 } from './store'
 import { isBareHost, type FetchedModel, type FetchFailReason, type FetchModelsFn, type FetchModelsResult, type ProbeModelFn } from './models'
 
@@ -578,6 +578,21 @@ export class ProviderService {
         guessedContext: e.meta.guessedContext.filter(x => x !== id),
       }
       return { entry: { route: { ...e.route, models }, meta }, result: { ok: true as const, ctx } }
+    })
+  }
+
+  /** 改模型能收的内容类型：空数组＝删掉 input 键（回到默认只看文字）；不动 meta（不算主人手填的上下文） */
+  async setInput(name: string, id: string, input: ModelInput[]): Promise<ModelEditResult> {
+    return this.edit(name, (e) => {
+      if (!e.route.models.some(m => m.id === id)) return { why: 'not_found' as const }
+      const models = e.route.models.map(m => {
+        if (m.id !== id) return m
+        const next: ProviderModel = { ...m }
+        if (input.length === 0) delete next.input
+        else next.input = [...input]
+        return next
+      })
+      return { entry: { route: { ...e.route, models }, meta: e.meta }, result: { ok: true as const } }
     })
   }
 
