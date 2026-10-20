@@ -4,7 +4,7 @@
 // - `/provider add` 的识别排在引导拦截与群聊"只记录"之前（poller.interceptBeforeGate）：任何聊天、任何人发来都先接走。
 import {
   checkBaseURL, checkProviderName, cleanModelId, cleanSecret, DEFAULT_CONTEXT, hostOf, isContextWindow, isProviderName,
-  NAME_FORMAT_WHY, normName, providersPath, readProviders, ProvidersUnreadable, RESERVED, type ProviderApi, type ProviderEntry, type ProvidersSnapshot,
+  NAME_FORMAT_WHY, normName, providersPath, readProviders, ProvidersUnreadable, RESERVED, type ModelInput, type ProviderApi, type ProviderEntry, type ProvidersSnapshot,
 } from './store'
 import { deleteMessageWithRetry, type TelegramApi, type TgMessage } from '../telegram/api'
 import { registerSecret, safeError, type Logger } from '../log'
@@ -418,8 +418,8 @@ export class ProviderCommands {
   }
 
   /**
-   * `POST /v1/provider/model`（3.4）：模型的加、删、改上下文。text 与 Telegram「管理模型」同源三条；
-   * add 不给上下文按 DEFAULT_CONTEXT 算（记入 guessed），set_context 必须给
+   * `POST /v1/provider/model`（3.4）：模型的加、删、改上下文、改输入类型。text 与 Telegram「管理模型」同源三条；
+   * add 不给上下文按 DEFAULT_CONTEXT 算（记入 guessed），set_context 必须给；set_input 只认 text/image，空数组＝清除。
    */
   async apiModelEdit(body: Record<string, unknown>): Promise<ApiResult> {
     const name = body.name
@@ -437,7 +437,7 @@ export class ProviderCommands {
       return apiErr(404, 'not_found', `没有 ${name} 这个供应商`)
     }
     const action = body.action
-    if (action !== 'add' && action !== 'remove' && action !== 'set_context') return apiErr(400, 'bad_action', 'action 只能是 add、remove、set_context')
+    if (action !== 'add' && action !== 'remove' && action !== 'set_context' && action !== 'set_input') return apiErr(400, 'bad_action', 'action 只能是 add、remove、set_context、set_input')
     const id = cleanModelId(body.id)
     if (!id) return apiErr(400, 'bad_id', '模型名要 1–200 个字符，中间的空格可以用，但不能有换行、制表符这类空白或控制字符，也不能有 ⟦ ⟧')
     const hasCtx = body.contextWindow !== undefined
@@ -453,6 +453,17 @@ export class ProviderCommands {
       const r = await this.d.service.setContext(found.name, id, ctx!)
       if (!r.ok) return this.modelEditFail(r.why, found.name, id)
       return { status: 200, body: { ok: true, text: `已把 ${id} 的上下文长度改成 ${ctx}。几秒后生效。` } }
+    }
+    if (action === 'set_input') {
+      const raw = body.input
+      if (!Array.isArray(raw)) return apiErr(400, 'bad_input', 'input 要是数组，元素只能是 text 或 image')
+      if (!raw.every(v => v === 'text' || v === 'image')) return apiErr(400, 'bad_input', 'input 只能包含 text 和 image')
+      const input = [...new Set(raw as ModelInput[])]
+      const r = await this.d.service.setInput(found.name, id, input)
+      if (!r.ok) return this.modelEditFail(r.why, found.name, id)
+      return { status: 200, body: { ok: true, text: input.length === 0
+        ? `已把 ${id} 的输入类型清掉了，回到只看文字。几秒后生效。`
+        : `已把 ${id} 的输入类型改成 ${input.join('、')}。几秒后生效。` } }
     }
     const manual = found.entry.meta.manualModels.includes(id)
     const before = this.d.engine?.current()
