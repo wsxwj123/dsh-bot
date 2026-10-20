@@ -189,7 +189,7 @@ def generate_for_bot(cfg: dict, bot_id: str, date_str: str, now: datetime,
         return 0
 
     text = deepseek_client.call_text(
-        _build_prompt(cfg, now, bot_id), timeout=120, max_tokens=1200)
+        _build_prompt(cfg, now, bot_id), timeout=120, max_tokens=4000)
     cards = _parse_cards_text(text)
     if not cards:
         print(f"[{bot_id}] LLM 返回空数组、非数组或解析失败，跳过（不写库）",
