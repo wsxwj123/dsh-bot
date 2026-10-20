@@ -1487,7 +1487,7 @@ _DM_PROVIDER_RE = _dm_re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}\Z")
 # 字段集与旧契约逐字相同（锁定测试按那七个字段逐一比对）。
 _DM_PROVIDER_FIELDS = ("name", "source", "api", "models", "key", "enabled", "note", "last_refresh")
 _DM_CUSTOM_FIELDS = ("name", "api", "models", "key", "enabled", "note", "last_refresh")
-_DM_MODEL_ACTIONS = ("add", "remove", "set_context")
+_DM_MODEL_ACTIONS = ("add", "remove", "set_context", "set_input")
 
 # 契约 2.2 的两种失败正文。写端点只有这两条与 no_gateway 是管理台自己拼的，
 # 其余一律原样透传网关的状态码与正文。
@@ -1860,9 +1860,9 @@ def dsh_model_provider_remove(name):
 @hub_bp.post("/hub/api/dsh-model/provider/<name>/models")
 @_api
 def dsh_model_provider_models(name):
-    """契约 2.4：模型增删改（add / remove / set_context），转发网关 /v1/provider/model。
+    """契约 2.4：模型增删改（add / remove / set_context / set_input），转发网关 /v1/provider/model。
 
-    只挑契约认识的三个字段转发，页面里混进来的别的东西不进网关请求。
+    只挑契约认识的字段转发，页面里混进来的别的东西不进网关请求；input 原样带上。
     """
     body = _require_json_object(request.get_json(silent=True))
     bad = _dm_provider_or_400(name)
@@ -1870,13 +1870,15 @@ def dsh_model_provider_models(name):
         return bad
     action = body.get("action")
     if action not in _DM_MODEL_ACTIONS:
-        return _dm_bad(400, "bad_action", "action 只能是 add、remove、set_context")
+        return _dm_bad(400, "bad_action", "action 只能是 add、remove、set_context、set_input")
     mid = body.get("id")
     if not isinstance(mid, str) or not mid:
         return _dm_bad(400, "bad_id", "模型名不合法")
     payload = {"name": name, "action": action, "id": mid}
     if "contextWindow" in body:
         payload["contextWindow"] = body["contextWindow"]
+    if "input" in body:
+        payload["input"] = body["input"]
     return _dm_forward(lambda ch: gateway_client.provider_model(ch, payload))
 
 
