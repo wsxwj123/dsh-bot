@@ -11,6 +11,18 @@
 >
 > 🆕 **这个仓库在原引擎之外多了一套新系统**：`gateway/`（每个 bot 一个网关进程）加 DeepSeek Harness（dsh）当大脑，这一套不依赖 Claude Code。新系统的装法与命令见 [`gateway/README.md`](gateway/README.md)，从原来那一套切过去的步骤见 [`docs/dsh-migration/CUTOVER.md`](docs/dsh-migration/CUTOVER.md)。下面「部署」各节讲的是原来那一套（Claude Code 当大脑），两套可以并存。
 
+### 如果只是想让别的管理台接管新系统的 bot
+
+`dsh` 是可选的外部依赖，不装它，原来的 Claude Code 那套照常能用；装它，管理台里才会出现「dsh 侧」这部分（建 bot、换供应商、看状态、启停）。接入分三步：
+
+1. **装 dsh 并起适配服务**：在本仓根目录运行 `python3 -m moments.adapter_service`，它只监听本机回环地址，默认 `127.0.0.1:17990`。常驻用启动项 `com.dsh-bot.console`。
+2. **生成令牌**：把一个随机串写进 `~/.config/claude-dsh-console/adapter.token`，权限 `0600`。适配服务启动时读这个文件，不存在或为空就拒绝启动；令牌只进请求头，不打印、不进日志。
+3. **在管理台里填地址**：管理台那边设 `CONSOLE_DSH_ADAPTER_URL=http://127.0.0.1:17990`，`CONSOLE_ADAPTER_TOKEN_FILE` 指向上面的令牌文件。
+
+验证：`curl -H "Authorization: Bearer $(cat ~/.config/claude-dsh-console/adapter.token)" http://127.0.0.1:17990/adapter/v1/meta`，返回 `{"backend":"dsh","adapter":"v1",...}` 就是通了。
+
+能做什么、每个接口的请求与响应，见 [`docs/console-adapter.md`](docs/console-adapter.md)。几条限制先说清：只提供本机接口，不接受远程连接，管理台和 dsh 必须在同一台机器；开机自启目前只做了 macOS，Linux 和 Windows 要自己用 tmux 或系统服务拉起；dsh 侧的 bot 还需要供应商清单 `~/.dsh-bot/providers.json` 和每只 bot 的 `~/.dsh-bot/configs/<名字>.yml`，这两份得先配好，管理台新建的 bot 才能真的跑起来。
+
 ---
 
 ## 先搞懂几个词（不然后面看不懂）

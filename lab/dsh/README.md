@@ -109,7 +109,7 @@ python3 lab/dsh/local/baseline_claude_usage.py --days 30 --out BASELINE.md
 - 两个脚本都只输出结构和数字，不输出任何内容、ID、密钥。bot 名默认换成 bot1、bot2……（`--keep-names` 才保留）。
 - 只依赖 Python 标准库。
 
-本机 AI 的完整任务书见 `docs/dsh-migration/LOCAL-AGENT-PROMPT.md`。
+本机 AI 的完整任务书不随公开树发布（只在本机留存）。
 
 ## 目录
 
