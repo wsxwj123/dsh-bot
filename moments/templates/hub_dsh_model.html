@@ -564,8 +564,11 @@ function drawPanel(body, p) {
   ctxIn.placeholder = '上下文长度（可留空）';
   ctxIn.style.maxWidth = '180px';
   ctxIn.autocomplete = 'off';
-  const bAdd = el('button', '保存', 'btn mini');
+  // 只管新增这一个模型；勾选可识图、改上下文是即点即存的，不用点这里。
+  const bAdd = el('button', '添加模型', 'btn mini');
   bAdd.type = 'button';
+  bAdd.disabled = true;                       // 名字空着就不让点，免得后端回一句看不懂的报错
+  nameIn.addEventListener('input', () => { bAdd.disabled = !nameIn.value.trim(); });
   bAdd.onclick = () => {
     const payload = {action: 'add', id: nameIn.value.trim()};
     const t = ctxIn.value.trim();
@@ -576,6 +579,9 @@ function drawPanel(body, p) {
   add.appendChild(ctxIn);
   add.appendChild(bAdd);
   body.appendChild(add);
+  const hint = el('div', '勾选「可识图」、改上下文保存后会立即生效，不需要再点「添加模型」。', 'muted');
+  hint.style.marginTop = '6px';
+  body.appendChild(hint);
 }
 function editContext(row, m, body, p) {
   row.textContent = '';
