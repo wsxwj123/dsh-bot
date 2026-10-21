@@ -142,8 +142,9 @@ def _aux_target() -> tuple:
     """解析 aux_llm 到 ``(entry, model, protocol, reason)``；不可用时 entry 为 None。
 
     现读 _global.yml。reason 为 no_config / provider_id_empty / provider_missing /
-    model_missing / protocol_missing 之一，几种情形分别可辨：无配置块、
-    provider_id 为空、供应商不存在/缺 base_url 或 api_key、模型不在列表、协议未定。
+    model_missing 之一，几种情形分别可辨：无配置块、provider_id 为空、
+    供应商不存在/缺 base_url 或 api_key、模型不在列表。协议总能判出（见函数体），
+    不再有 protocol_missing。
     provider_config 不可导入（接缝闸 fail-closed）或读清单失败同样按"不可用"回退，
     绝不绕过它的安全闸直读清单。
     """
@@ -178,31 +179,21 @@ def _aux_target() -> tuple:
         return None, "", "", "provider_missing"
     if model not in model_ids:
         return None, "", "", "model_missing"
-    # 协议按**具体模型**优先：混装供应商里只要有一个模型没标注，entry_protocol 就会
-    # 整体返回空串，而 aux 是按 model 精确选择的。模型自己的标注合法就用它，否则再
-    # 退回供应商级判定（现有行为）。
-    protocols = entry.get("protocols")
-    protocol = protocols.get(model) if isinstance(protocols, dict) else None
+    # 协议只看供应商级别：逐模型 protocols 标注不参与（模型只是请求体里的字段）。
+    # 顺序：显式 protocol 键 → base_url 路径段含 anthropic → 路径段含 v1 → 默认
+    # openai。只拆 path，不对整串 URL 做包含匹配，避免主机名或 query 里的词误判。
+    protocol = entry.get("protocol")
     if protocol not in ("anthropic", "openai"):
         try:
-            protocol = provider_config.entry_protocol(entry)
+            segments = urllib.parse.urlsplit(
+                entry.get("base_url") or "").path.lower().split("/")
         except Exception:
-            protocol = ""
-    if protocol not in ("anthropic", "openai"):
-        # 第三级兜底：从 base_url 的**路径段**取协议线索。只拆 path，不看 host/query，
-        # 避免主机名或参数里带这些词时误判。两个词都出现时按路径从左到右先出现的算：
-        # 路径有序，靠前的段更贴近实际路由；若固定 anthropic 优先，
-        # `/openai/anthropic` 这类地址会被判成 anthropic。
-        try:
-            path = urllib.parse.urlsplit(entry.get("base_url") or "").path.lower()
-        except Exception:
-            path = ""
-        for seg in path.split("/"):
-            if seg in ("anthropic", "openai"):
-                protocol = seg
-                break
-    if protocol not in ("anthropic", "openai"):
-        return None, "", "", "protocol_missing"
+            segments = []  # 解析失败按"无线索"处理，落到默认 openai
+        if "anthropic" in segments:
+            protocol = "anthropic"
+        else:
+            # 有 v1 或完全无线索都走 openai
+            protocol = "openai"
     return entry, model, protocol, ""
 
 
@@ -257,6 +248,12 @@ def _direct_call(entry: dict, model: str, protocol: str, prompt: str, timeout: i
         override = entry.get("openai_base_url")
         if isinstance(override, str) and override.strip():
             base_url = override.strip().rstrip("/")
+        else:
+            # 与 bot 直连同一口径：base_url 是给 Claude Code 用的，末尾 /anthropic
+            # 是 Anthropic 路由标记，走 openai 时须剥掉（否则会拼成
+            # …/anthropic/v1/chat/completions）。
+            from scripts.derive_endpoints import derive_openai_url
+            base_url = derive_openai_url(base_url)
         # base_url 末尾带不带 /v1 都发往同一个 …/v1/chat/completions，不重复拼
         url = base_url + ("/chat/completions" if base_url.endswith("/v1")
                           else "/v1/chat/completions")
