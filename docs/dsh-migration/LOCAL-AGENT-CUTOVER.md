@@ -1,5 +1,8 @@
 # 本机 AI 任务书：正式切换（人设里的旧技术说明、逐个迁移、开机自启、回滚）
 
+> 注意：文中“提交/推送本机报告”的步骤已作废。`docs/dsh-migration/local/` 是本机工作目录，只留本机，不提交、不推送。
+
+
 你在用户的 Mac 上工作，接着 M6 的活。M1–M6 已经全部合进 master，这份任务书在分支 `claude/nice-brahmagupta-dtjsma` 上，代码和 master 相同。
 
 这次是**正式切换**：把用户选定的 bot 一个一个从旧系统搬到新系统，设成开机自启，出问题能退回去。
@@ -223,6 +226,6 @@ bash ~/.claude/dispatcher/start-bot.sh <旧名>    # 会把所有旧 bot 重启�
    - 做过的回滚和原因；
    - 收尾时每个 bot 的 `setup.ts check`、`health.ts`、`report.ts --hours 24` 输出（按铁律 4 处理）；
    - 发现的问题：复现步骤、现象、事件名。
-2. 提交前，在 `git diff` 里搜一遍：`sk-`、令牌格式、用户的 Telegram 用户 id、群 id、系统用户名、bot 的旧名字、人设里的句子。确认都没有。
-3. 从 `claude/nice-brahmagupta-dtjsma` 拉出新分支 `local/cutover-report`，推到这个分支。
-4. 向用户汇报时用平实的中文，先说结论。最后一句写："切换报告已推到 local/cutover-report"。
+2. 提交前，在 `git diff HEAD` 里搜一遍：`sk-`、令牌格式、用户的 Telegram 用户 id、群 id、系统用户名、bot 的旧名字、人设里的句子。确认都没有。
+3. 报告只留本机，不需要新建分支，也不需要推送。
+4. 向用户汇报时用平实的中文，先说结论。最后一句写："已完成，报告在本机"。

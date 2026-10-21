@@ -1,6 +1,8 @@
 # 给本机 AI 的任务书：DeepSeek Harness 迁移的本机准备工作
 
-> 用法：把下面整份交给在作者本机运行的 AI。它读完后按步骤执行，做完推到 `local/setup` 分支，再由云端的 Claude 接手开发。
+> 用法：把下面整份交给在作者本机运行的 AI。它读完后按步骤执行，做完把报告留在本机（不推送），再由云端的 Claude 接手开发。
+>
+> 注意：`docs/dsh-migration/local/` 是本地工作目录，**不随公开树发布**。要按本文档执行时，先在本机自己创建这个目录。
 
 ---
 
@@ -26,7 +28,7 @@
 3. 在用户的系统上跑离线核对；
 4. 用用户的 DeepSeek 密钥跑真密钥验证；
 5. 对现有部署做脱敏盘点，统计旧系统的用量基线；
-6. 写交接说明，推到 `local/setup` 分支。
+6. 写交接说明，留在本机 `docs/dsh-migration/local/HANDOFF.md`。
 
 **你不写新系统的代码。** 新系统由云端 Claude 按方案开发。两边同时写，代码会分叉。
 
@@ -51,12 +53,13 @@
    - 用 `read -rs` 让用户输入，不回显，不进命令历史；
    - 不写进任何文件，不打印；
    - 做完就 `unset`。
-5. **提交前必做三件事**：
-   - 跑第 9 步的密钥扫描；
-   - 把要提交的文件清单和 `HANDOFF.md` 给用户看；
+5. **提交前必做三件事**（只在要提交验证脚本修复时适用）：
+   - 跑第 9 步的密钥扫描，扫描对象是**待提交的内容**（`git diff --cached`），本机报告目录另扫一遍但只是补充；
+   - 把要提交的文件清单给用户看；
    - 用户确认后再提交、推送。
-6. **推送范围**：
-   - 只推 `local/setup` 分支；
+6. **提交与推送范围**：
+   - `docs/dsh-migration/local/` 是本机工作目录，**一律不提交、不推送**（已在 `.gitignore` 里）；报告与交接说明只留本机；
+   - 只有验证脚本的修复可以单独提交，推到 `local/setup` 分支；
    - `master` 只在第 2 步、经用户同意后创建一次；
    - 不推其它分支，不开拉取请求；
    - 你的产出全部放在 `docs/dsh-migration/local/`，不改 `PLAN.md`、`VERIFIED.md`。
@@ -132,7 +135,7 @@ cp ~/dsh-lab/020/package-lock.json ~/dsh-bot-work/docs/dsh-migration/local/locks
 cp ~/dsh-lab/015/package-lock.json ~/dsh-bot-work/docs/dsh-migration/local/locks/dsh-0.1.5-rc.1.package-lock.json
 ```
 
-锁文件里只有包名、版本和校验值，可以提交。它让云端拿到和你这台机器完全相同的依赖树。
+锁文件里只有包名、版本和校验值，本身不含敏感信息；但按上面的约定仍只留本机，不要提交。
 
 ### 第 4 步：离线核对（不需要密钥）
 
@@ -151,7 +154,7 @@ DSH=~/dsh-lab/015/node_modules/.bin/dsh bun lab/dsh/offline/facts.ts
    ```bash
    read -rs DEEPSEEK_API_KEY && export DEEPSEEK_API_KEY
    ```
-2. **示例人设，0.2.0**（必做）。报告可以整份提交：
+2. **示例人设，0.2.0**（必做）。报告只留本机，不要提交：
    ```bash
    cd ~/dsh-bot-work
    export DSH=~/dsh-lab/020/node_modules/.bin/dsh
@@ -231,19 +234,19 @@ python3 lab/dsh/local/baseline_claude_usage.py --days 30 --out docs/dsh-migratio
 
 ```bash
 cd ~/dsh-bot-work
-git add docs/dsh-migration/local
-git diff --cached --name-only
-# 密钥扫描：有任何输出就停下来逐条确认
-git diff --cached | grep -nE 'sk-[A-Za-z0-9]{16,}|[0-9]{8,10}:[A-Za-z0-9_-]{30,}|Bearer [A-Za-z0-9._-]{20,}|api_key\s*[:=]\s*\S{8,}|BEGIN [A-Z ]*PRIVATE KEY' || echo "未发现疑似密钥"
+# 注意：docs/dsh-migration/local/ 是本机工作目录，**不要 git add、不要提交、不要推送**。
+# 密钥扫描分两步：先扫真正要提交的内容（脚本修复），再补扫本机报告目录。
+
+# 1）待提交内容：有任何输出就停下来逐条确认
+git diff HEAD | grep -nE 'sk-[A-Za-z0-9]{16,}|[0-9]{8,10}:[A-Za-z0-9_-]{30,}|Bearer [A-Za-z0-9._-]{20,}|api_key\s*[:=]\s*\S{8,}|BEGIN [A-Z ]*PRIVATE KEY' || echo "待提交内容未发现疑似密钥"
+
+# 2）本机报告目录（补充检查，这些文件不会进 git）
+grep -rnE 'sk-[A-Za-z0-9]{16,}|[0-9]{8,10}:[A-Za-z0-9_-]{30,}|Bearer [A-Za-z0-9._-]{20,}|api_key\s*[:=]\s*\S{8,}|BEGIN [A-Z ]*PRIVATE KEY' docs/dsh-migration/local || echo "本机报告未发现疑似密钥"
 ```
 
-1. 把文件清单和 `HANDOFF.md` 全文给用户看，等用户确认。
-2. 提交并推送：
-   ```bash
-   git commit -m "local(setup): 本机验证报告、用户决定、部署盘点与用量基线"
-   git push -u origin local/setup
-   ```
-3. 告诉用户：可以回到云端 Claude 的会话说"本机准备已推到 local/setup"。
+1. 把要提交的文件清单给用户看，等用户确认。
+2. 本机报告只留在本机。需要备份就用 `tar` 或 `rsync` 打包到家目录以外的地方，**不要用 git**（该目录已被 `.gitignore` 挡住，用 git 只能靠 `git add -f`，等于绕开保护）。
+3. 告诉用户：本机准备已完成，报告在 `docs/dsh-migration/local/`（只在本机）。
 
 ---
 
@@ -257,6 +260,6 @@ git diff --cached | grep -nE 'sk-[A-Za-z0-9]{16,}|[0-9]{8,10}:[A-Za-z0-9_-]{30,}
 - [ ] `INVENTORY.md`、`BASELINE.md`，已逐行检查。
 - [ ] `locks/` 下两个锁文件。
 - [ ] `HANDOFF.md`。
-- [ ] 密钥扫描通过，用户已过目，已推到 `local/setup`。
+- [ ] 密钥扫描通过，用户已过目；报告留在本机（`docs/dsh-migration/local/`），没有推到公开仓。
 
 预计耗时 30–60 分钟（不含等用户回答）。用 `deepseek-v4-flash` 时，所有真密钥脚本加起来只有几十万输入 token，而且大部分命中缓存。

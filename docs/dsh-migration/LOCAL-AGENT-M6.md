@@ -1,5 +1,8 @@
 # 本机 AI 任务书：M6 真机验收（开机自启、回滚演练、导入试算）
 
+> 注意：文中“提交/推送本机报告”的步骤已作废。`docs/dsh-migration/local/` 是本机工作目录，只留本机，不提交、不推送。
+
+
 你在用户的 Mac 上工作，接着 M5 的活。新代码在仓库 `wsxwj123/dsh-bot` 的分支 `claude/nice-brahmagupta-dtjsma` 上（M1–M5 已经合进 master）。
 
 ## 先读
@@ -96,6 +99,6 @@ ls ~/.dsh-bot/bots | grep -c '^trial$'
    - 第 3 步每一项的结果；
    - 第 4 步三条命令的输出；
    - 发现的问题：复现步骤、现象、事件名。
-2. 提交前，在 `git diff` 里搜一遍：`sk-`、令牌格式、用户的 Telegram 用户 id、系统用户名、bot 的旧名字。确认都没有。
-3. 从 `claude/nice-brahmagupta-dtjsma` 拉出新分支 `local/m6-check`，推到这个分支。
-4. 向用户汇报时用平实的中文，先说结论。最后一句写："M6 实测已推到 local/m6-check"。
+2. 提交前，在 `git diff HEAD` 里搜一遍：`sk-`、令牌格式、用户的 Telegram 用户 id、系统用户名、bot 的旧名字。确认都没有。
+3. 报告只留本机，不需要新建分支，也不需要推送。
+4. 向用户汇报时用平实的中文，先说结论。最后一句写："已完成，报告在本机"。

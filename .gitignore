@@ -74,3 +74,6 @@ lab/dsh/.runs/
 # 生活设定文件挪到了 ~/.dsh-bot/life/（2026-10-14），代码仓库里不再放
 configs/chenlulu.yml
 configs/wenya.yml
+
+# 迁移期的本机工作目录：含真实家目录路径与本机报告，只留本机，不进公开树
+docs/dsh-migration/local/

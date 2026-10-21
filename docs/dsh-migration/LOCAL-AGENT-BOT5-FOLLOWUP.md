@@ -208,10 +208,10 @@ bun gateway/scripts/autostart.ts status
    - 第 3 步做没做、结果；
    - 第 4 步的输出；
    - 发现的问题：复现步骤、现象、事件名。
-2. 提交前，在 `git diff` 里搜一遍：
+2. 提交前，在 `git diff HEAD` 里搜一遍：
    - `sk-`、令牌格式；
    - 用户的 Telegram 用户 id、系统用户名、bot 的旧名字；
    - 供应商的接口地址和端口。
    确认都没有。
-3. 从当前的 `claude/nice-brahmagupta-dtjsma` 拉出新分支 `local/bot5-followup`，提交并推到这个分支。
-4. 向用户汇报时用平实的中文，先说结论。最后一句写："bot5 后续验收已推到 local/bot5-followup"。
+3. 报告只留本机，不需要新建分支，也不需要推送。
+4. 向用户汇报时用平实的中文，先说结论。最后一句写："已完成，报告在本机"。

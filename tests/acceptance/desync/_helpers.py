@@ -6,7 +6,7 @@
   PATH 前置拒绝桩（tmux/launchctl/pkill/claude/schtasks → stderr "test_mode: real <名> called"，exit 97）；
   假服务只用 port 0；临时注册表每个 bot 显式写一个非生产端口（绝不落到默认 17801-17804）；
   TELEGRAM_DISPATCHER_URL/DISPATCHER_URL 指向本机无人监听的随机端口。
-- 绝不使用 ~、$USER、/Users/wsxwj、~/.claude/dispatcher；绝不 launchctl；绝不连 17801-17804。
+- 绝不使用 ~、$USER、任何绝对家目录路径、~/.claude/dispatcher；绝不 launchctl；绝不连 17801-17804。
 """
 import datetime
 import importlib
@@ -132,7 +132,7 @@ def switch_on(iso, chat_id):
 def gt_line(iso, chat_id, ts, text="hi", is_bot=False, username="u", mid=1):
     """追加一行群 transcript（§10.2 最小形状）；ts 为 epoch 秒。"""
     iso_ts = datetime.datetime.fromtimestamp(ts, datetime.timezone(datetime.timedelta(hours=8))).isoformat()
-    row = {"ts": iso_ts, "chat_id": str(chat_id), "message_id": mid, "from_id": "5331715732",
+    row = {"ts": iso_ts, "chat_id": str(chat_id), "message_id": mid, "from_id": "1000000001",
            "from_username": username, "is_bot": is_bot, "text": text, "observed_by": "bot1"}
     with open(os.path.join(iso["gt"], f"{chat_id}.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
