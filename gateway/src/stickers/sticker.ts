@@ -80,10 +80,11 @@ function shuffleInPlace<T>(xs: T[]): T[] {
 
 /**
  * list 用：按档和关键词过滤（不沾边的一条都不回）。
- * shuffleTies=true 时同分条目组内随机打散（让模型每次看到不同候选，避免总挑靠前那几张）；
- * 不同分数之间仍按分数从高到低，集合不变。默认 false：按分数降序、同分按 id 字典序，保持确定性。
+ * limit 先按原规则（分数降序、同分按 id 字典序）截断，保证每次截出的成员固定；不带关键词时不影响分类汇总。
+ * shuffleTies=true 时只对截断后的同分条目组内随机打散（让模型每次看到不同候选，避免总挑靠前那几张）；
+ * 不同分数之间仍按分数从高到低。默认 false 且不传 limit：完全确定，行为与旧版一致。
  */
-export function filterStickers(entries: StickerEntry[], o: { query?: string; tier?: string; shuffleTies?: boolean }): StickerEntry[] {
+export function filterStickers(entries: StickerEntry[], o: { query?: string; tier?: string; shuffleTies?: boolean; limit?: number }): StickerEntry[] {
   let list = entries
   if (o.tier === 'sfw' || o.tier === 'nsfw') {
     const t = o.tier
@@ -95,13 +96,17 @@ export function filterStickers(entries: StickerEntry[], o: { query?: string; tie
     .map(e => ({ e, s: stickerScore(e, q) }))
     .filter(x => x.s > 0)
     .sort((a, b) => b.s - a.s || a.e.id.localeCompare(b.e.id))
-  if (!o.shuffleTies) return scored.map(x => x.e)
-  // 先按分数切段（已排好序，同分连续），每段单独打散，再按原段序拼接
+  // 必须先截断再打散：否则每次进前 N 的成员都会变，违反"同样关键词集合不变"
+  const kept = o.limit !== undefined && Number.isFinite(o.limit)
+    ? scored.slice(0, Math.max(0, Math.floor(o.limit)))
+    : scored
+  if (!o.shuffleTies) return kept.map(x => x.e)
+  // 截断后按分数切段（已排好序，同分连续），每段单独打散，再按原段序拼接
   const out: StickerEntry[] = []
-  for (let i = 0; i < scored.length;) {
+  for (let i = 0; i < kept.length;) {
     let j = i + 1
-    while (j < scored.length && scored[j]!.s === scored[i]!.s) j++
-    out.push(...shuffleInPlace(scored.slice(i, j).map(x => x.e)))
+    while (j < kept.length && kept[j]!.s === kept[i]!.s) j++
+    out.push(...shuffleInPlace(kept.slice(i, j).map(x => x.e)))
     i = j
   }
   return out
@@ -156,7 +161,7 @@ export class StickerService {
   private tierHead(tier: StickerTier, part: StickerEntry[]): string {
     if (tier === 'sfw') return `sfw（${part.length} 条；标签中英文都有，如 Happy、生气）`
     const cats = [...new Set(part.filter(e => e.category).map(e => e.category!))]
-    return `nsfw（${part.length} 条；标签是中文${cats.length ? `，分类：${cats.join(' | ')}` : ''}）`
+    return `nsfw（${part.length} 条；标签中英文都有${cats.length ? `，分类：${cats.join(' | ')}` : ''}）`
   }
 
   /** 不带关键词时：按分类汇总（没有 category 的归「未分类」），不逐条列，免得库大撑爆上下文 */
@@ -179,26 +184,28 @@ export class StickerService {
     const all = r.list
     const query = s(args.query)
     const tier = s(args.tier)
-    const hits = filterStickers(all, { query, tier, shuffleTies: true })
+    // 总数取完整、确定性的匹配结果；打散和截断只作用于要展示的那批，提示里的条数不能跟着变
+    const matched = filterStickers(all, { query, tier })
+    const hits = query ? filterStickers(all, { query, tier, limit: LIST_LIMIT, shuffleTies: true }) : matched
     // 每次 list 都记一条（含 query 零命中、空档，hits=0）：真机验收主判据按日志归因，不能漏
-    this.d.log.info('tool.sticker_list', { query: query !== '', tier: tier || null, hits: hits.length })
-    if (hits.length === 0) {
+    this.d.log.info('tool.sticker_list', { query: query !== '', tier: tier || null, hits: matched.length })
+    if (matched.length === 0) {
       return {
         text: query
           ? `「${query}」在库里没有匹配的。标签有英文也有中文（如 Happy、生气）；去掉关键词可以看分类汇总。`
           : '这一档里没有表情包。',
       }
     }
-    if (!query) return { text: this.summarize(hits) }
-    const shown = hits.slice(0, LIST_LIMIT)
-    const lines: string[] = [`匹配「${query}」的 ${hits.length} 条：`]
+    if (!query) return { text: this.summarize(matched) }
+    const shown = hits
+    const lines: string[] = [`匹配「${query}」的 ${matched.length} 条：`]
     for (const tier of TIERS) {
       const part = shown.filter(e => e.tier === tier)
       if (part.length === 0) continue
       lines.push(this.tierHead(tier, part))
       for (const e of part) lines.push(`#${e.id} ${e.label}`)
     }
-    if (hits.length > shown.length) lines.push(`（只列了前 ${shown.length} 条，还有 ${hits.length - shown.length} 条；加个更具体的关键词再找）`)
+    if (matched.length > shown.length) lines.push(`（只列了前 ${shown.length} 条，还有 ${matched.length - shown.length} 条；加个更具体的关键词再找）`)
     return { text: lines.join('\n') }
   }
 
