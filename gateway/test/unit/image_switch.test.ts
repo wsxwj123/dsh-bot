@@ -70,7 +70,7 @@ test('配置：gateway.global_cfg、gateway.comfyui_skill_dir 读进来；不写
 type Call = { argv: string[]; extra: Record<string, string | undefined> }
 
 /** 假 py：记下每次调用；comfyui 脚本按 comfyFails 决定成败（成功就写 --out），novelai 脚本按真脚本约定写结果文件 */
-function fakePy(comfyFails: boolean) {
+function fakePy(comfyFails: boolean, novelBadInput = false) {
   const calls: Call[] = []
   const run: RunPy = async (argv, extra) => {
     calls.push({ argv, extra })
@@ -80,6 +80,8 @@ function fakePy(comfyFails: boolean) {
       writeFileSync(out, 'png')
       return { code: 0, out: `MEDIA: ${out}\n`, err: '' }
     }
+    // 真脚本约定：退出码 3 = intermediate 的角色字段写错，stderr 首行是原因，不写结果文件
+    if (novelBadInput) return { code: 3, out: '', err: '[novelai] characters 不合法：position_mode 为 manual 时第 1 个角色缺少 center；position_mode 为 manual 时第 2 个角色缺少 center\n' }
     const outPath = argv[argv.indexOf('--output-json') + 1]!
     writeFileSync(`${outPath}.png`, 'png')
     writeFileSync(outPath, JSON.stringify({ image_path: `${outPath}.png` }))
@@ -88,7 +90,7 @@ function fakePy(comfyFails: boolean) {
   return { calls, run }
 }
 
-function setup(engine: string, comfyFails = false) {
+function setup(engine: string, comfyFails = false, novelBadInput = false) {
   const root = mkdtempSync(join(tmpdir(), 'imgsw-act-'))
   const novel = join(root, 'novelai-skill')
   const comfy = join(root, 'comfyui-skill')
@@ -96,7 +98,7 @@ function setup(engine: string, comfyFails = false) {
   mkdirSync(comfy, { recursive: true })
   writeFileSync(join(novel, 'SKILL.md'), '# NovelAI 写法\n')
   writeFileSync(join(comfy, 'SKILL.md'), '# ComfyUI 写法\n')
-  const py = fakePy(comfyFails)
+  const py = fakePy(comfyFails, novelBadInput)
   const deps: ActionsDeps = {
     botId: 'chenlulu', imageAgent: 'bot5', configPath: join(root, 'b.yml'), log: new Logger({}), mediaDir: join(root, 'media'),
     imageProvider: () => engine,
@@ -171,5 +173,19 @@ test('朋友圈脚本的环境：带上开关所在的全局配置与共用 Comf
     expect(env.CLAUDEBOT_GLOBAL_CFG).toBe(join(s.root, '_global.yml'))
     expect(env.COMFYUI_SKILL_DIR).toBe(s.comfy)
     expect(readFileSync(join(s.novel, 'SKILL.md'), 'utf8')).toContain('NovelAI')
+  } finally { s.cleanup() }
+})
+
+test('NovelAI 退出码 3（intermediate 角色字段写错）：把报错首行和正确写法回给模型让它改了重跑，不再说"生图服务出错"；其他失败照旧', async () => {
+  const s = setup('novelai', false, true)
+  try {
+    const r = await s.actions.generateImage('42', { intermediate: { prompt: '2girls', position_mode: 'manual', characters: [{ positive: 'a' }, { positive: 'b' }] } })
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('第 1 个角色缺少 center')
+    expect(r.text).not.toContain('[novelai]')
+    expect(r.text).toContain('再调用一次 generate_image')
+    expect(r.text).toContain('"center": {"x": 0.3, "y": 0.55}')
+    expect(r.text).not.toContain('生图服务出错')
+    expect(s.py.calls).toHaveLength(1)
   } finally { s.cleanup() }
 })

@@ -16,7 +16,16 @@ const REPO_ROOT = resolve(import.meta.dir, '..', '..', '..')
 // 同一动作换视角的两张仍要串行 + reuse_seed，所以多张与 reuse_seed 互斥
 
 /** 单张生图的结果：idx 是这一批里的第几张（0 起） */
-type ImgResult = { idx: number; path: string | null; err: string }
+/** bad：脚本退出码 3（intermediate 的角色字段写错，没发请求）时的报错首行，要回给模型让它改了重跑 */
+type ImgResult = { idx: number; path: string | null; err: string; bad?: string }
+
+/** 退出码 3 专指 intermediate 的 position_mode / characters 写错（novelai-skill 规格 2.1）。其他退出码照旧只进日志 */
+const IM_BAD_INPUT_CODE = 3
+const IM_BAD_INPUT_HINT = [
+  '按上面说的改好 intermediate 再调用一次 generate_image（这次没有发出请求，不是生图服务的问题）。',
+  '写法：两人及以上要固定站位时写 "position_mode": "manual"，并给每个角色写 center（x、y 取 0 到 1，x 从左到右增大，y 从上到下增大）；不需要固定站位就不写 position_mode 和 center。例：',
+  '{"prompt": "...", "position_mode": "manual", "characters": [{"positive": "girl, long black hair, white blouse", "center": {"x": 0.3, "y": 0.55}}, {"positive": "boy, short brown hair, navy hoodie", "center": {"x": 0.7, "y": 0.55}}]}',
+].join('\n')
 
 /** 并发上限 4：旧系统同账号并发多张实测不撞锁；再高没有收益，还容易吃服务端 5xx */
 const IMAGE_CONCURRENCY = 4
@@ -212,7 +221,10 @@ export class LifeActions {
       const argv = [join(skill, 'scripts', 'generate_novelai_image.py'), '--intermediate', imPath, '--config', join(skill, 'assets', 'default_config.json'),
         '--ratio', ratio, '--agent-name', this.d.imageAgent, '--session-name', `telegram-${chatId}`, '--output-json', resPath, ...(it.reuse_seed === true ? ['--reuse-seed'] : [])]
       return this.py(argv, { NOVELAI_BEARER_TOKEN: this.d.credRef('NOVELAI_BEARER_TOKEN') ?? undefined, NOVELAI_SKILL_ROOT: skill }, 600_000).then(r => {
-        try { return { idx, path: String(JSON.parse(readFileSync(resPath, 'utf8')).image_path || '') || null, err: r.err } } catch { return { idx, path: null, err: r.err } }
+        // 退出码 3：输入写错，把 stderr 原文（去掉 [novelai] 前缀，限 600 字）回给模型；不算生图服务故障。
+        // 与 CBL 侧约定（2026-10-21）：正确示例以后只在共享脚本的报错里维护一份，脚本带上示例后把 IM_BAD_INPUT_HINT 删掉
+        const bad = r.code === IM_BAD_INPUT_CODE ? r.err.replace(/^\[novelai\]\s*/gm, '').trim().slice(0, 600) || 'intermediate 的 characters 写错了' : undefined
+        try { return { idx, path: String(JSON.parse(readFileSync(resPath, 'utf8')).image_path || '') || null, err: r.err, bad } } catch { return { idx, path: null, err: r.err, bad } }
       })
     }
 
@@ -225,11 +237,18 @@ export class LifeActions {
       const many = rs.length > 1
       this.d.log.info('tool.generate_image', { provider, ok: ok.length, total: rs.length })
       for (const f of fails) this.d.log.warn('tool.generate_image_failed', { provider, ...(many ? { index: f.idx + 1 } : {}), err: safeError(f.err.split('\n').filter(Boolean).slice(-2).join(' ')) })
+      // 有写错的：把报错首行和正确写法回给模型，让它改了重跑（以前一律说"生图服务出错"，模型看不到原因，连错几次也改不对）
+      const bads = fails.filter(f => f.bad)
+      const badLines = bads.map(f => `${many ? `第 ${f.idx + 1} 张：` : ''}${f.bad}`).join('\n')
       if (ok.length === 0) {
-        const text = '这次没生成出来（生图服务出错）。可以和对方说一声，或者稍后再试。'
+        const text = bads.length
+          ? `生图参数写错了：\n${badLines}\n${IM_BAD_INPUT_HINT}`
+          : '这次没生成出来（生图服务出错）。可以和对方说一声，或者稍后再试。'
         return { result: { text, isError: true }, late: `⟦系统·生图⟧ ${text}` }
       }
-      const failNote = fails.length ? `\n第 ${fails.map(f => f.idx + 1).join('、')} 张没生成出来（生图服务出错），其余照常发。` : ''
+      const failNote = fails.length
+        ? `\n第 ${fails.map(f => f.idx + 1).join('、')} 张没生成出来${bads.length ? `（参数写错：\n${badLines}\n${IM_BAD_INPUT_HINT}）` : '（生图服务出错）'}，其余照常发。`
+        : ''
       if (!many) {
         return {
           result: { text: `图片生成好了：${ok[0]!.path}\n用 reply 的 files 发给对方，或者用 moments 工具的 set_image 配到朋友圈。` },
