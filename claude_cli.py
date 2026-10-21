@@ -174,11 +174,20 @@ def _aux_target() -> tuple:
         return None, "", "", "provider_missing"
     try:
         model_ids = provider_config._model_ids(entry)
-        protocol = provider_config.entry_protocol(entry)
     except Exception:
         return None, "", "", "provider_missing"
     if model not in model_ids:
         return None, "", "", "model_missing"
+    # 协议按**具体模型**优先：混装供应商里只要有一个模型没标注，entry_protocol 就会
+    # 整体返回空串，而 aux 是按 model 精确选择的。模型自己的标注合法就用它，否则再
+    # 退回供应商级判定（现有行为）。
+    protocols = entry.get("protocols")
+    protocol = protocols.get(model) if isinstance(protocols, dict) else None
+    if protocol not in ("anthropic", "openai"):
+        try:
+            protocol = provider_config.entry_protocol(entry)
+        except Exception:
+            protocol = ""
     if protocol not in ("anthropic", "openai"):
         return None, "", "", "protocol_missing"
     return entry, model, protocol, ""
