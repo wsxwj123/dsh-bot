@@ -6,8 +6,9 @@
 两条自保约定（否则扫描会命中测试自己）：
 1. 家目录检查用通用模式匹配，不依赖运行机器的 HOME；
    测试文件里出现的假路径全部列入白名单。
-2. 数字串检查只匹配“连续 10 位及以上数字”，白名单只放明显的测试假值；
-   测试文件里不保存任何真实编号（包括拆分拼接）。
+2. 数字串检查只匹配身份字段（chat_id/from_id/user_id/peer_id/sender_id，
+   含 JSON 键与 Python/TS 赋值写法）位置上的连续 10 位及以上数字；
+   白名单只放明显的测试假值。测试文件里不保存任何真实编号（包括拆分拼接）。
 """
 
 import codecs
@@ -36,11 +37,21 @@ HOME_WHITELIST = frozenset({
     "/Users/u/",
 })
 
-# 行为 3：连续 10 位及以上数字串；白名单只放明显的测试假值。
-DIGIT_RUN = re.compile(r"\d{10,}")
-DIGIT_WHITELIST = frozenset({
+# 行为 3：身份字段位置上的连续 10 位及以上数字串。
+# 匹配 JSON 键/Python/TS 赋值两种写法，例如 `"chat_id": 123...`、`chat_id = "123..."`；
+# 时间戳、哈希常量、随机种子等不在这些位置上的数字不进入扫描范围。
+IDENTITY_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:chat_?id|from_?id|user_?id|peer_?id|sender_?id)"
+    r"[\"'\s]*[:=]\s*[\"']?-?(\d{10,})",
+    re.IGNORECASE,
+)
+# 白名单只放明显的测试假值（捕获组只取数字本身，负数前缀不参与比对）。
+IDENTITY_WHITELIST = frozenset({
     "1000000001",
-    "1234567890",
+    "1001234567890",
+    "1005550001112",
+    "1009876543210777",
+    "1009876543210888",
 })
 
 # 扫描时永远不进入的目录/文件
@@ -100,7 +111,11 @@ def _scan_tracked(regex, whitelist=()):
             continue
         if text is None:
             continue
-        found = sorted({m.group(0) for m in regex.finditer(text)} - whitelist)
+        # 有捕获组时只比对捕获到的值（例如身份字段后面的数字），否则比对整个匹配。
+        found = sorted(
+            {(m.group(1) if regex.groups else m.group(0)) for m in regex.finditer(text)}
+            - whitelist
+        )
         if found:
             hits.append("%s -> %r" % (rel, found))
     return hits, skipped
@@ -145,9 +160,11 @@ def test_清单2_跟踪文本文件内容不含通用家目录绝对路径():
 
 # ---------------------------------------------------------------- 行为 3
 
-def test_清单3_跟踪文本文件内容不含未白名单的连续10位以上数字串():
+def test_清单3_跟踪文本文件身份字段不含未白名单的真实编号():
     _assert_scan_clean(
-        "内容含未列入白名单的连续 10 位及以上数字串", DIGIT_RUN, DIGIT_WHITELIST
+        "身份字段位置含未列入白名单的 10 位及以上数字串",
+        IDENTITY_PATTERN,
+        IDENTITY_WHITELIST,
     )
 
 
@@ -232,7 +249,7 @@ def test_清单5_扫描器只读仓库不写盘():
     # 把扫描行为各跑一遍，确认它们不改变工作区
     assert isinstance(_tracked_files(), list)
     _scan_tracked(HOME_PATTERN, HOME_WHITELIST)
-    _scan_tracked(DIGIT_RUN, DIGIT_WHITELIST)
+    _scan_tracked(IDENTITY_PATTERN, IDENTITY_WHITELIST)
 
     after = _snapshot_repo()
     added = sorted(set(after) - set(before))
