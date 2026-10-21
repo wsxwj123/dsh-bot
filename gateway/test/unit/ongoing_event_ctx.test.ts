@@ -25,9 +25,8 @@ afterEach(async () => {
   tg = null; b = null; gw = null
 })
 
-const pad = (n: number) => String(n).padStart(2, '0')
-/** SQLite 里的时间统一写成 'YYYY-MM-DD HH:MM:SS'（本地时间，SQLite 的常规写法） */
-const fmt = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+// SQLite 里的 started_at / expires_at 都是 Unix epoch 秒的整数（与共用库现有数据一致）
+const epoch = (d: Date) => Math.floor(d.getTime() / 1000)
 const daysAgo = (n: number) => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - n); return d }
 const later = (ms: number) => new Date(Date.now() + ms)
 
@@ -43,7 +42,7 @@ function makeDb(events: Ev[] = []): string {
   for (const e of events) {
     db.run(
       `INSERT INTO ongoing_events (bot_id, event_name, effect, mood_delta, started_at, expires_at, last_mentioned_at) VALUES (?, ?, ?, ?, ?, ?, NULL)`,
-      ['chenlulu', e.name, e.effect ?? '有点不舒服', 0.5, fmt(daysAgo(e.startedDaysAgo)), fmt(e.expiresAt ?? later(3 * 86_400_000))],
+      ['chenlulu', e.name, e.effect ?? '有点不舒服', 0.5, epoch(daysAgo(e.startedDaysAgo)), epoch(e.expiresAt ?? later(3 * 86_400_000))],
     )
   }
   db.close()
