@@ -4,11 +4,13 @@
 不 import 任何产品内部模块，只通过对外接缝验证：`git ls-files` + 读取跟踪文件内容。
 
 两条自保约定（否则扫描会命中测试自己）：
-1. 家目录前缀在运行期用 `os.path.expanduser("~")` 取，测试文件里不写死。
-   必须是模块导入期取值：本目录的 autouse 夹具会把 HOME 改到 tmp。
-2. 真实 chat id 在运行期由两段拼接得到，测试文件里不存在连续完整字面量。
+1. 家目录检查用通用模式匹配，不依赖运行机器的 HOME；
+   测试文件里出现的假路径全部列入白名单。
+2. 数字串检查只匹配“连续 10 位及以上数字”，白名单只放明显的测试假值；
+   测试文件里不保存任何真实编号（包括拆分拼接）。
 """
 
+import codecs
 import os
 import re
 import shutil
@@ -16,17 +18,30 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 # 仓库根：tests/acceptance/bot_ops/ 往上三层
 REPO_ROOT = Path(__file__).resolve().parents[3]
-
-# 导入期（任何 autouse 夹具把 HOME 改到 tmp 之前）定住真实家目录
-IMPORT_TIME_HOME = os.path.expanduser("~")
 
 # 行为 1 的前缀
 LOCAL_DOC_PREFIX = "docs/dsh-migration/" + "local/"
 
-# 行为 3 的目标值：拆成两段，运行期拼接（测试文件内不出现完整数值串）
-REAL_CHAT_ID = "53317" + "15732"
+# 行为 2：通用家目录模式。源码里不出现完整模式字面量，避免扫描命中自身。
+HOME_PATTERN = re.compile("/Users/" + r"[^/\s]+/")
+# 白名单只放测试夹具里刻意使用的假路径。
+HOME_WHITELIST = frozenset({
+    "/Users/you/",
+    "/Users/someone/",
+    "/Users/x/",
+    "/Users/u/",
+})
+
+# 行为 3：连续 10 位及以上数字串；白名单只放明显的测试假值。
+DIGIT_RUN = re.compile(r"\d{10,}")
+DIGIT_WHITELIST = frozenset({
+    "1000000001",
+    "1234567890",
+})
 
 # 扫描时永远不进入的目录/文件
 _SKIP_DIRS = {".git", "__pycache__", ".pytest_cache"}
@@ -46,18 +61,32 @@ def _tracked_files():
 
 
 def _text_content(path):
-    """返回文本内容；二进制（前 8KB 含 NUL）返回 None。符号链接按链接目标算。"""
+    """返回文本内容；二进制返回 None。符号链接按链接目标算。
+
+    带 UTF-16/UTF-32 BOM 的文件按文本解码，不因为前 8KB 含 NUL 就被误判为二进制。
+    """
     if path.is_symlink():
         return os.readlink(path)
     data = path.read_bytes()
+    if data.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        return data.decode("utf-32", "replace")
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16", "replace")
     if b"\x00" in data[:8192]:
         return None
     return data.decode("utf-8", "replace")
 
 
-def _scan_tracked_contents(needle):
-    """返回所有内容包含 needle 的跟踪文件相对路径。只读，不写盘。"""
+def _scan_tracked(regex, whitelist=()):
+    """扫描跟踪文件内容。只读，不写盘。
+
+    返回 (hits, skipped)：
+    - hits：命中的文件及未白名单化的匹配值；
+    - skipped：读取失败（OSError）而无法扫描的文件，不能静默丢弃。
+    """
+    whitelist = frozenset(whitelist)
     hits = []
+    skipped = []
     for rel in _tracked_files():
         if rel.startswith(".git/") or rel == ".git":
             continue
@@ -66,11 +95,31 @@ def _scan_tracked_contents(needle):
             continue
         try:
             text = _text_content(path)
-        except OSError:
+        except OSError as exc:
+            skipped.append("%s (%s: %s)" % (rel, exc.__class__.__name__, exc))
             continue
-        if text is not None and needle in text:
-            hits.append(rel)
-    return hits
+        if text is None:
+            continue
+        found = sorted({m.group(0) for m in regex.finditer(text)} - whitelist)
+        if found:
+            hits.append("%s -> %r" % (rel, found))
+    return hits, skipped
+
+
+def _assert_scan_clean(description, regex, whitelist):
+    """命中或读取失败都算失败，两类信息一并列出。"""
+    hits, skipped = _scan_tracked(regex, whitelist)
+    problems = []
+    if hits:
+        problems.append(
+            "%d 个跟踪文本文件%s: %r" % (len(hits), description, hits[:10])
+        )
+    if skipped:
+        problems.append(
+            "%d 个跟踪文件读取失败、未能扫描（不排除漏报）: %r"
+            % (len(skipped), skipped[:10])
+        )
+    assert problems == [], "\n".join(problems)
 
 
 def _tail(text, limit=1500):
@@ -90,31 +139,33 @@ def test_清单1_跟踪文件里不存在_local目录下的文件():
 
 # ---------------------------------------------------------------- 行为 2
 
-def test_清单2_跟踪文本文件内容不含家目录前缀():
-    needle = IMPORT_TIME_HOME.rstrip("/")
-    assert needle.startswith("/") and len(needle) > 1, (
-        "运行期取到的家目录不像绝对路径: %r" % (needle,)
-    )
-    hits = _scan_tracked_contents(needle)
-    assert hits == [], (
-        "%d 个跟踪文本文件的内容含家目录前缀 %r，例如: %r"
-        % (len(hits), needle, hits[:10])
-    )
+def test_清单2_跟踪文本文件内容不含通用家目录绝对路径():
+    _assert_scan_clean("内容含通用家目录绝对路径模式", HOME_PATTERN, HOME_WHITELIST)
 
 
 # ---------------------------------------------------------------- 行为 3
 
-def test_清单3_跟踪文本文件内容不含真实chat_id():
-    assert len(REAL_CHAT_ID) == 10 and REAL_CHAT_ID.isdigit()
-    hits = _scan_tracked_contents(REAL_CHAT_ID)
-    assert hits == [], (
-        "%d 个跟踪文本文件的内容含真实 chat id，例如: %r" % (len(hits), hits[:10])
+def test_清单3_跟踪文本文件内容不含未白名单的连续10位以上数字串():
+    _assert_scan_clean(
+        "内容含未列入白名单的连续 10 位及以上数字串", DIGIT_RUN, DIGIT_WHITELIST
     )
 
 
 # ---------------------------------------------------------------- 行为 4
 
 def test_清单4_desync验收用例全部通过():
+    if sys.platform != "darwin":
+        pytest.skip(
+            "非 macOS 平台：无法用 sandbox-exec 封闭真实 ~/.claude/channels 写路径，"
+            "按接口要求显式跳过，不裸跑会写用户数据的用例"
+        )
+    sandbox_exec = shutil.which("sandbox-exec")
+    if not sandbox_exec:
+        pytest.skip(
+            "macOS 上找不到 sandbox-exec：拒绝静默裸跑（会真实写用户数据），"
+            "按接口要求显式跳过该条"
+        )
+
     desync_dir = REPO_ROOT / "tests" / "acceptance" / "desync"
     assert desync_dir.is_dir(), "desync 验收目录不存在: %s" % desync_dir
 
@@ -127,11 +178,13 @@ def test_清单4_desync验收用例全部通过():
     # 嵌套跑 desync 时，外层 bot_ops 夹具的反向断言要求真实 ~/.claude/channels 条目不变。
     # 实测该嵌套进程的个别旁路写入会落到真实 channels 目录；用 macOS 沙箱把这条写路径封死，
     # 既不碰用户数据，也不改变 desync 用例自己的断言（它们的 home 都在 tmp）。
-    sandbox_exec = shutil.which("sandbox-exec")
-    real_channels = os.path.join(os.path.realpath(IMPORT_TIME_HOME), ".claude", "channels")
-    if sandbox_exec and os.path.isdir(real_channels):
-        policy = '(version 1)(allow default)(deny file-write* (subpath "%s"))' % real_channels
-        command = [sandbox_exec, "-p", policy] + command
+    # 真实家目录用 passwd 取，不依赖可能被夹具改写的 HOME。
+    import pwd
+
+    real_home = pwd.getpwuid(os.getuid()).pw_dir
+    real_channels = os.path.join(os.path.realpath(real_home), ".claude", "channels")
+    policy = '(version 1)(allow default)(deny file-write* (subpath "%s"))' % real_channels
+    command = [sandbox_exec, "-p", policy] + command
 
     proc = subprocess.run(
         command,
@@ -153,28 +206,33 @@ def test_清单4_desync验收用例全部通过():
 # ---------------------------------------------------------------- 行为 5
 
 def _snapshot_repo():
-    """仓库工作区快照（路径 -> 大小 + mtime），跳过 .git 与缓存目录。"""
+    """仓库工作区快照（路径 -> 大小 + mtime），跳过 .git 与缓存目录。
+
+    同时跳过测试运行器自己的输出文件：harness 会在用例执行期间持续追加
+    `.devflow/test-output-*.txt`，它不是扫描器写的，排除以避免误报。
+    """
     snapshot = {}
     for root, dirs, files in os.walk(REPO_ROOT):
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
         for name in files:
-            if name in _SKIP_DIRS:
-                continue
             path = Path(root) / name
             rel = path.relative_to(REPO_ROOT).as_posix()
+            if name in _SKIP_DIRS or rel.startswith(".devflow/test-output-"):
+                continue
             stat = path.lstat()
             snapshot[rel] = (stat.st_size, stat.st_mtime_ns)
     return snapshot
 
 
-def test_清单5_扫描自身只读仓库不写盘():
+def test_清单5_扫描器只读仓库不写盘():
+    """接口第 5 条的全量回归由外层流程负责，本文件只验证扫描器只读、不写盘。"""
     before = _snapshot_repo()
     assert len(before) > 0, "仓库快照为空，扫描接缝可能已失效"
 
-    # 把三条扫描行为各跑一遍，确认它们不改变工作区
+    # 把扫描行为各跑一遍，确认它们不改变工作区
     assert isinstance(_tracked_files(), list)
-    _scan_tracked_contents(IMPORT_TIME_HOME.rstrip("/"))
-    _scan_tracked_contents(REAL_CHAT_ID)
+    _scan_tracked(HOME_PATTERN, HOME_WHITELIST)
+    _scan_tracked(DIGIT_RUN, DIGIT_WHITELIST)
 
     after = _snapshot_repo()
     added = sorted(set(after) - set(before))
