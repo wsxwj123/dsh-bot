@@ -12,6 +12,8 @@ import os
 import sys
 import json
 import re
+import urllib.error
+import urllib.parse
 import urllib.request
 
 import tempfile
@@ -139,95 +141,20 @@ def _aux_log(line: str) -> None:
     sys.stderr.write("[aux_llm] %s\n" % line)
 
 
-def read_aux_config() -> tuple[str, str]:
-    """现读 _global.yml 的 aux_llm，返回 (provider_id, model)；缺块/类型非法一律归一为空串。"""
+def _aux_target() -> tuple:
+    """解析 aux_llm 到 ``(entry, model, protocol, reason)``；不可用时 entry 为 None。
+
+    现读 _global.yml。reason ∈ AUX_FALLBACK_REASONS，几种情形分别可辨：无配置块、
+    provider_id 为空、供应商不存在/缺 base_url 或 api_key、模型不在列表、协议未定。
+    provider_config 不可导入（接缝闸 fail-closed）或读清单失败同样按"不可用"回退，
+    绝不绕过它的安全闸直读清单。
+    """
     try:
         import legacy_config_loader as config_loader
         g = config_loader.load_global()
     except Exception:
-        return "", ""
+        g = {}
     blk = g.get("aux_llm") if isinstance(g, dict) else None
-    if not isinstance(blk, dict):
-        return "", ""
-    pid = blk.get("provider_id")
-    model = blk.get("model")
-    return (pid if isinstance(pid, str) else ""), (model if isinstance(model, str) else "")
-
-
-def _aux_model_ids(entry: dict) -> list:
-    """条目模型 id 列表（对本地可手改的 JSON 容错：元素可能是 str 或 {"id": ...}）。
-
-    与 ``provider_config._model_ids`` 同语义；只在 provider_config 因接缝闸不可导入时兜底。
-    """
-    out = []
-    for m in entry.get("models") or []:
-        mid = m.get("id") if isinstance(m, dict) else (m if isinstance(m, str) else None)
-        if isinstance(mid, str) and mid:
-            out.append(mid)
-    return out
-
-
-def _aux_protocol(entry: dict) -> str:
-    """条目有效协议：显式 protocol 优先；否则全部模型判定一致才派生，否则空串（未选）。
-
-    与 ``provider_config.entry_protocol`` 同语义，仅作接缝不可导入时的兜底。
-    """
-    raw = entry.get("protocol")
-    if raw in ("anthropic", "openai"):
-        return raw
-    protocols = entry.get("protocols")
-    if not isinstance(protocols, dict):
-        return ""
-    seen = set()
-    for mid in _aux_model_ids(entry):
-        value = protocols.get(mid)
-        if value not in ("anthropic", "openai"):
-            return ""
-        seen.add(value)
-    return seen.pop() if len(seen) == 1 else ""
-
-
-def _aux_provider_snapshot():
-    """读 providers.json，返回 ``(data, model_ids_fn, protocol_fn)``。
-
-    生产路径优先复用 ``provider_config``（模型列表与协议判定的单一事实源）。
-    测试/运维把 ``CLAUDEBOT_PROVIDER_PATH`` 显式钉到临时清单时，provider_config 的接缝闸
-    会拒绝导入（新接缝不成组），此时**只在显式路径上**直读同一份 JSON；缺省路径绝不直读，
-    否则会绕过 provider_config 的安全闸去碰生产清单。
-    """
-    try:
-        import provider_config
-    except Exception:
-        provider_config = None
-    if provider_config is not None:
-        return (provider_config.load_providers(),
-                provider_config._model_ids, provider_config.entry_protocol)
-    path = os.environ.get("CLAUDEBOT_PROVIDER_PATH")
-    if not path:
-        raise RuntimeError("provider_config 不可用")
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        raise ValueError("providers.json 结构非法")
-    return data, _aux_model_ids, _aux_protocol
-
-
-def _aux_target(aux_llm: dict | None = None) -> tuple:
-    """解析 aux_llm 到 ``(entry, model, protocol, reason)``；不可用时 entry 为 None。
-
-    ``aux_llm`` 非 None 时用调用方已加载的块（与 _global.yml 同源），否则现读
-    _global.yml。reason ∈ AUX_FALLBACK_REASONS，几种情形分别可辨：无配置块、
-    provider_id 为空、供应商不存在/缺 base_url 或 api_key、模型不在列表、协议未定。
-    """
-    if isinstance(aux_llm, dict):
-        blk = aux_llm
-    else:
-        try:
-            import legacy_config_loader as config_loader
-            g = config_loader.load_global()
-        except Exception:
-            g = {}
-        blk = g.get("aux_llm") if isinstance(g, dict) else None
     if not isinstance(blk, dict) or not blk:
         return None, "", "", "no_config"
     pid = blk.get("provider_id")
@@ -236,7 +163,8 @@ def _aux_target(aux_llm: dict | None = None) -> tuple:
     model = blk.get("model")
     model = model.strip() if isinstance(model, str) else ""
     try:
-        data, model_ids, protocol_of = _aux_provider_snapshot()
+        import provider_config
+        data = provider_config.load_providers()
     except Exception:
         return None, "", "", "provider_missing"
     entry = next((p for p in (data.get("providers") or [])
@@ -246,9 +174,13 @@ def _aux_target(aux_llm: dict | None = None) -> tuple:
     if not (isinstance(entry.get("base_url"), str) and entry.get("base_url")
             and isinstance(entry.get("api_key"), str) and entry.get("api_key")):
         return None, "", "", "provider_missing"
-    if model not in model_ids(entry):
+    try:
+        model_ids = provider_config._model_ids(entry)
+        protocol = provider_config.entry_protocol(entry)
+    except Exception:
+        return None, "", "", "provider_missing"
+    if model not in model_ids:
         return None, "", "", "model_missing"
-    protocol = protocol_of(entry)
     if protocol not in ("anthropic", "openai"):
         return None, "", "", "protocol_missing"
     return entry, model, protocol, ""
@@ -273,6 +205,21 @@ def _extract_direct_text(resp, protocol: str) -> str:
     raise RuntimeError("上游 anthropic 回执无正文")
 
 
+class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """3xx 只跟随同 host 的重定向。
+
+    urllib 默认会把 Authorization / x-api-key 原样带给重定向目标；跨 host 跟随等于
+    把上游密钥转发给第三方，故直接拒绝（抛 HTTPError，由 call_aux 按失败回退）。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlsplit(req.full_url)
+        new = urllib.parse.urlsplit(newurl)
+        if old.hostname != new.hostname:
+            raise urllib.error.HTTPError(newurl, code, "拒绝跨 host 重定向", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _direct_call(entry: dict, model: str, protocol: str, prompt: str, timeout: int) -> str:
     """直连 providers.json 里的供应商（按协议选端点）。
 
@@ -295,7 +242,8 @@ def _direct_call(entry: dict, model: str, protocol: str, prompt: str, timeout: i
                 "messages": [{"role": "user", "content": prompt}]}
         headers = {"Content-Type": "application/json", "x-api-key": key,
                    "anthropic-version": "2023-06-01"}
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                         _SameHostRedirectHandler())
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
                                  headers=headers, method="POST")
     with opener.open(req, timeout=timeout) as r:
@@ -311,17 +259,15 @@ def _fallback(prompt: str, timeout: int, json_mode: bool, model: str | None):
 
 
 def call_aux(prompt: str, timeout: int = 60, json_mode: bool = False,
-             model: str | None = None, aux_llm: dict | None = None):
+             model: str | None = None):
     """朋友圈辅助生成调用：aux_llm 已配好则直连该供应商，否则/失败回退现有 call_claude*。
 
     - 未配、配置无效、协议未定 → 记 ``aux_llm_fallback`` 并回退。
-    - 直连失败（含回执无正文、JSON 解析失败）→ 记 ``aux_llm_failed`` 并回退，
-      **绝不让朋友圈生成因此中断**。
+    - 直连失败（含回执无正文、JSON 解析失败或 JSON 顶层不是对象）→ 记
+      ``aux_llm_failed`` 并回退，**绝不让朋友圈生成因此中断**。
     - ``model`` 只用于回退路径；直连时用 aux_llm 里配的 model。
-    - ``aux_llm`` 可由调用方传入其已加载的全局配置块（与 _global.yml 同源）；
-      不传则每次现读 _global.yml。
     """
-    entry, aux_model, protocol, reason = _aux_target(aux_llm)
+    entry, aux_model, protocol, reason = _aux_target()
     if entry is None:
         _aux_log("aux_llm_fallback reason=%s" % reason)
         return _fallback(prompt, timeout, json_mode, model)
@@ -329,6 +275,8 @@ def call_aux(prompt: str, timeout: int = 60, json_mode: bool = False,
         text = _direct_call(entry, aux_model, protocol, prompt, timeout)
         if json_mode:
             text = _parse_json_loose(text)
+            if not isinstance(text, dict):
+                raise ValueError("上游 JSON 回执不是对象")
     except Exception as e:
         _aux_log("aux_llm_failed provider_id=%s model=%s err=%s"
                  % (entry.get("id"), aux_model, type(e).__name__))

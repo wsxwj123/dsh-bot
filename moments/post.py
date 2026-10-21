@@ -284,8 +284,7 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
         )
         # 朋友圈用 sonnet：haiku 对 NSFW/隐性人设拒绝率高
         # 走 call_aux：aux_llm 配好则直连该供应商，否则等价于原 call_claude
-        raw = call_aux(prompt, timeout=60, model="sonnet",
-                       aux_llm=(global_cfg or {}).get("aux_llm")).strip()
+        raw = call_aux(prompt, timeout=60, model="sonnet").strip()
         quota.record_call("moment_text", quota.MOMENT_TEXT_WEIGHT)
         text, visibility = _parse_moment_output(raw)
         if not text or len(text) > 200:
