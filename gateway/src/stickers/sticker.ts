@@ -67,8 +67,23 @@ export function stickerScore(e: StickerEntry, query: string): number {
   return s
 }
 
-/** list 用：按档和关键词过滤（不沾边的一条都不回） */
-export function filterStickers(entries: StickerEntry[], o: { query?: string; tier?: string }): StickerEntry[] {
+/** Fisher-Yates 原地打散（只用于同分条目，不引依赖） */
+function shuffleInPlace<T>(xs: T[]): T[] {
+  for (let i = xs.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const tmp = xs[i]!
+    xs[i] = xs[j]!
+    xs[j] = tmp
+  }
+  return xs
+}
+
+/**
+ * list 用：按档和关键词过滤（不沾边的一条都不回）。
+ * shuffleTies=true 时同分条目组内随机打散（让模型每次看到不同候选，避免总挑靠前那几张）；
+ * 不同分数之间仍按分数从高到低，集合不变。默认 false：按分数降序、同分按 id 字典序，保持确定性。
+ */
+export function filterStickers(entries: StickerEntry[], o: { query?: string; tier?: string; shuffleTies?: boolean }): StickerEntry[] {
   let list = entries
   if (o.tier === 'sfw' || o.tier === 'nsfw') {
     const t = o.tier
@@ -76,11 +91,20 @@ export function filterStickers(entries: StickerEntry[], o: { query?: string; tie
   }
   const q = (o.query ?? '').trim()
   if (!q) return list
-  return list
+  const scored = list
     .map(e => ({ e, s: stickerScore(e, q) }))
     .filter(x => x.s > 0)
     .sort((a, b) => b.s - a.s || a.e.id.localeCompare(b.e.id))
-    .map(x => x.e)
+  if (!o.shuffleTies) return scored.map(x => x.e)
+  // 先按分数切段（已排好序，同分连续），每段单独打散，再按原段序拼接
+  const out: StickerEntry[] = []
+  for (let i = 0; i < scored.length;) {
+    let j = i + 1
+    while (j < scored.length && scored[j]!.s === scored[i]!.s) j++
+    out.push(...shuffleInPlace(scored.slice(i, j).map(x => x.e)))
+    i = j
+  }
+  return out
 }
 
 /**
@@ -155,7 +179,7 @@ export class StickerService {
     const all = r.list
     const query = s(args.query)
     const tier = s(args.tier)
-    const hits = filterStickers(all, { query, tier })
+    const hits = filterStickers(all, { query, tier, shuffleTies: true })
     // 每次 list 都记一条（含 query 零命中、空档，hits=0）：真机验收主判据按日志归因，不能漏
     this.d.log.info('tool.sticker_list', { query: query !== '', tier: tier || null, hits: hits.length })
     if (hits.length === 0) {
