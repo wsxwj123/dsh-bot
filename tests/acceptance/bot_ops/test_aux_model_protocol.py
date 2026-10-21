@@ -120,6 +120,11 @@ class FakeAux:
     def base(self):
         return "http://127.0.0.1:%d/v1" % self._srv.server_address[1]
 
+    @property
+    def root(self):
+        """不带 /v1 的假上游根地址，用于测 base_url 自带路径线索的推断。"""
+        return "http://127.0.0.1:%d" % self._srv.server_address[1]
+
 
 @pytest.fixture
 def aux():
@@ -355,3 +360,46 @@ def test_模型不在供应商模型列表_回退DeepSeek(aux, tmp_path):
         r["path"] for r in aux.requests]
     assert len(w.claude_calls()) == 1, \
         "回退时应调用原 DeepSeek 路径 1 次，实际 %d 次" % len(w.claude_calls())
+
+
+# ── 6. 两处都没有协议标注，但 base_url 路径含 /anthropic：按 anthropic 请求 ──
+
+def test_两处未标注但地址含anthropic_按anthropic端点请求(aux, tmp_path):
+    w = World(tmp_path)
+    # 模型在列表里但未标注，供应商也没有整体 protocol，仅 base_url 带 /anthropic
+    w.set_providers([w.provider(
+        aux.root + "/anthropic",
+        models=[AUX_MODEL, "unmarked-model-a"],
+        protocols={})])
+    w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
+    run = w.run()
+
+    result = _assert_moment_posted(run)
+    paths = [r["path"] for r in aux.requests]
+    assert len(paths) == 1, \
+        "地址含 /anthropic 时应向上游请求 1 次，实际请求 %r" % paths
+    assert paths[0].endswith("/v1/messages"), \
+        "地址含 /anthropic 时应请求 anthropic 端点 /v1/messages，实际 %r" % paths[0]
+    _assert_aux_text(result)
+    assert w.claude_calls() == [], "地址推断出 anthropic 时不该回退 DeepSeek"
+
+
+# ── 7. 两处都没有协议标注，但 base_url 路径含 /openai：按 openai 请求 ────
+
+def test_两处未标注但地址含openai_按openai端点请求(aux, tmp_path):
+    w = World(tmp_path)
+    w.set_providers([w.provider(
+        aux.root + "/openai",
+        models=[AUX_MODEL, "unmarked-model-a"],
+        protocols={})])
+    w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
+    run = w.run()
+
+    result = _assert_moment_posted(run)
+    paths = [r["path"] for r in aux.requests]
+    assert len(paths) == 1, \
+        "地址含 /openai 时应向上游请求 1 次，实际请求 %r" % paths
+    assert paths[0].endswith("/v1/chat/completions"), \
+        "地址含 /openai 时应请求 openai 端点 /v1/chat/completions，实际 %r" % paths[0]
+    _assert_aux_text(result)
+    assert w.claude_calls() == [], "地址推断出 openai 时不该回退 DeepSeek"
