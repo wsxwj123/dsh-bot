@@ -183,6 +183,10 @@ def _aux_target() -> tuple:
     # 顺序：显式 protocol 键 → base_url 路径段含 anthropic → 路径段含 v1 → 默认
     # openai。只拆 path，不对整串 URL 做包含匹配，避免主机名或 query 里的词误判。
     protocol = entry.get("protocol")
+    # 大小写与首尾空白不算数：手改过配置文件写成 "OpenAI " 也要按 openai 用，
+    # 否则会落到地址推断，显式选定的协议被地址推翻。
+    if isinstance(protocol, str):
+        protocol = protocol.strip().lower()
     if protocol not in ("anthropic", "openai"):
         try:
             segments = urllib.parse.urlsplit(
