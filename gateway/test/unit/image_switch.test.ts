@@ -81,7 +81,8 @@ function fakePy(comfyFails: boolean, novelBadInput = false) {
       return { code: 0, out: `MEDIA: ${out}\n`, err: '' }
     }
     // 真脚本约定：退出码 3 = intermediate 的角色字段写错，stderr 首行是原因，不写结果文件
-    if (novelBadInput) return { code: 3, out: '', err: '[novelai] characters 不合法：position_mode 为 manual 时第 1 个角色缺少 center；position_mode 为 manual 时第 2 个角色缺少 center\n' }
+    // 真脚本 2026-10-21 起 stderr 两行：原因 + 正确写法示例（示例只在脚本里维护，网关只转发）
+    if (novelBadInput) return { code: 3, out: '', err: '[novelai] characters 不合法：position_mode 为 manual 时第 1 个角色缺少 center；position_mode 为 manual 时第 2 个角色缺少 center\n[novelai] 正确写法示例：{"position_mode": "manual", "characters": [{"positive": "girl, long hair, red dress", "center": {"x": 0.3, "y": 0.5}}]}。manual 时每个角色都要有 center。\n' }
     const outPath = argv[argv.indexOf('--output-json') + 1]!
     writeFileSync(`${outPath}.png`, 'png')
     writeFileSync(outPath, JSON.stringify({ image_path: `${outPath}.png` }))
@@ -184,7 +185,9 @@ test('NovelAI 退出码 3（intermediate 角色字段写错）：把报错首行
     expect(r.text).toContain('第 1 个角色缺少 center')
     expect(r.text).not.toContain('[novelai]')
     expect(r.text).toContain('再调用一次 generate_image')
-    expect(r.text).toContain('"center": {"x": 0.3, "y": 0.55}')
+    // 示例来自脚本 stderr 第二行，网关原样转发、不另写一份
+    expect(r.text).toContain('正确写法示例：{"position_mode": "manual"')
+    expect(r.text).toContain('"center": {"x": 0.3, "y": 0.5}')
     expect(r.text).not.toContain('生图服务出错')
     expect(s.py.calls).toHaveLength(1)
   } finally { s.cleanup() }
