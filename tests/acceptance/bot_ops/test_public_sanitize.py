@@ -27,31 +27,63 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 # 行为 1 的前缀
 LOCAL_DOC_PREFIX = "docs/dsh-migration/" + "local/"
 
-# 行为 2：通用家目录模式。源码里不出现完整模式字面量，避免扫描命中自身。
-HOME_PATTERN = re.compile("/Users/" + r"[^/\s]+/")
-# 白名单只放测试夹具里刻意使用的假路径。
+# 行为 2：通用家目录模式，带不带结尾斜杠都命中。
+# 用户名段只取路径字符（遇到空白/引号/括号即停），避免把后面的散文一起吞进来；
+# `\b` 保留词边界语义。源码里不出现完整模式字面量。
+HOME_PATTERN = re.compile("/Users/" + r"""[^/\s"'`<>()]+\b""")
+# 白名单只放测试夹具里刻意使用的假路径（按实际匹配串，不含结尾斜杠）。
 HOME_WHITELIST = frozenset({
-    "/Users/you/",
-    "/Users/someone/",
-    "/Users/x/",
-    "/Users/u/",
+    "/Users/you",
+    "/Users/someone",
+    "/Users/x",
+    "/Users/u",
+    "/Users/john",  # test_install_compact_hook_quote.py 里假路径 "john smith" 的首段
 })
 
-# 行为 3：身份字段位置上的连续 10 位及以上数字串。
-# 匹配 JSON 键/Python/TS 赋值两种写法，例如 `"chat_id": 123...`、`chat_id = "123..."`；
+# 行为 3：身份字段位置上的 9 位及以上数字串。
+# 身份字段覆盖 JSON/字典键、变量赋值、类型注解、嵌套对象、函数默认值与环境变量兜底；
 # 时间戳、哈希常量、随机种子等不在这些位置上的数字不进入扫描范围。
-IDENTITY_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])(?:chat_?id|from_?id|user_?id|peer_?id|sender_?id)"
-    r"[\"'\s]*[:=]\s*[\"']?-?(\d{10,})",
-    re.IGNORECASE,
+_ID_WORDS = r"(?:chat_?id|from_?id|user_?id|peer_?id|sender_?id|group_?id)"
+_ID_VAR_WORD = r"(?:CHAT|FROM_ID|USER_ID|PEER_ID|SENDER_ID|GROUP)"
+_VALUE = r"[\"']?-?(\d{9,})"
+
+IDENTITY_PATTERNS = (
+    # JSON / 字典键、普通赋值、带类型注解的赋值、函数默认值
+    re.compile(
+        r"(?<![A-Za-z0-9_])" + _ID_WORDS + r"[\"']?\s*[:=]\s*"
+        r"(?:[A-Za-z_][\w\[\]|., ]*\s*=\s*)?" + _VALUE,
+        re.IGNORECASE,
+    ),
+    # 变量名包含身份词：CHAT / NEW_CHAT / GROUP_ID / SENDER_ID / OTHER_CHAT_ID 等
+    re.compile(
+        r"(?<![A-Za-z0-9])\w*(?:" + _ID_VAR_WORD + r")\w*"
+        r"\s*(?::\s*[\w\[\]|., ]+\s*)?=\s*" + _VALUE,
+        re.IGNORECASE,
+    ),
+    # 嵌套形态："chat": {"id": ...} / "from": {"id": ...}
+    re.compile(
+        r"[\"']?(?:chat|from)[\"']?\s*:\s*\{[^{}]*?[\"']?id[\"']?\s*:\s*" + _VALUE,
+        re.IGNORECASE,
+    ),
+    # 环境变量兜底：os.getenv("CHAT_ID", "...") / os.environ.get(...)
+    re.compile(
+        r"\b(?:getenv|get)\(\s*[\"'][^\"']*(?:" + _ID_VAR_WORD + r")[^\"']*[\"']"
+        r"\s*,\s*" + _VALUE,
+        re.IGNORECASE,
+    ),
 )
-# 白名单只放明显的测试假值（捕获组只取数字本身，负数前缀不参与比对）。
+# 白名单只放仓库里确实存在的测试假值（捕获组只取数字本身，负号不参与比对）。
 IDENTITY_WHITELIST = frozenset({
     "1000000001",
     "1001234567890",
     "1005550001112",
     "1009876543210777",
     "1009876543210888",
+    "1009876543",       # adapter_util.py NEW_CHAT
+    "1009998887776",    # group-turn 测试的 OTHER_GROUP / GROUP_B
+    "123456789",        # create bot 系列测试的占位 id
+    "987654321",        # hub2 addbot 测试的占位 id
+    "5550001777",       # adapter internals 测试的 CHAT 常量
 })
 
 # 扫描时永远不进入的目录/文件
@@ -121,9 +153,22 @@ def _scan_tracked(regex, whitelist=()):
     return hits, skipped
 
 
-def _assert_scan_clean(description, regex, whitelist):
+def _scan_tracked_many(regexes, whitelist=()):
+    """对同一批文件依次跑多个正则，合并命中与读取失败列表。"""
+    hits = set()
+    skipped = set()
+    for regex in regexes:
+        part_hits, part_skipped = _scan_tracked(regex, whitelist)
+        hits.update(part_hits)
+        skipped.update(part_skipped)
+    return sorted(hits), sorted(skipped)
+
+
+def _assert_scan_clean(description, regexes, whitelist):
     """命中或读取失败都算失败，两类信息一并列出。"""
-    hits, skipped = _scan_tracked(regex, whitelist)
+    if not isinstance(regexes, (list, tuple)):
+        regexes = [regexes]
+    hits, skipped = _scan_tracked_many(regexes, whitelist)
     problems = []
     if hits:
         problems.append(
@@ -162,8 +207,8 @@ def test_清单2_跟踪文本文件内容不含通用家目录绝对路径():
 
 def test_清单3_跟踪文本文件身份字段不含未白名单的真实编号():
     _assert_scan_clean(
-        "身份字段位置含未列入白名单的 10 位及以上数字串",
-        IDENTITY_PATTERN,
+        "身份字段位置含未列入白名单的 9 位及以上数字串",
+        IDENTITY_PATTERNS,
         IDENTITY_WHITELIST,
     )
 
@@ -249,7 +294,7 @@ def test_清单5_扫描器只读仓库不写盘():
     # 把扫描行为各跑一遍，确认它们不改变工作区
     assert isinstance(_tracked_files(), list)
     _scan_tracked(HOME_PATTERN, HOME_WHITELIST)
-    _scan_tracked(IDENTITY_PATTERN, IDENTITY_WHITELIST)
+    _scan_tracked_many(IDENTITY_PATTERNS, IDENTITY_WHITELIST)
 
     after = _snapshot_repo()
     added = sorted(set(after) - set(before))
