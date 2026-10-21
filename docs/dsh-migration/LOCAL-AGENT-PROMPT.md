@@ -233,19 +233,18 @@ python3 lab/dsh/local/baseline_claude_usage.py --days 30 --out docs/dsh-migratio
 
 ```bash
 cd ~/dsh-bot-work
-git add docs/dsh-migration/local
-git diff --cached --name-only
+# 注意：docs/dsh-migration/local/ 是本机工作目录，**不要 git add、不要提交、不要推送**。
+# 里面有真实家目录路径和本机报告，只在本机留存。下面的密钥扫描直接扫目录，不经过 git。
 # 密钥扫描：有任何输出就停下来逐条确认
-git diff --cached | grep -nE 'sk-[A-Za-z0-9]{16,}|[0-9]{8,10}:[A-Za-z0-9_-]{30,}|Bearer [A-Za-z0-9._-]{20,}|api_key\s*[:=]\s*\S{8,}|BEGIN [A-Z ]*PRIVATE KEY' || echo "未发现疑似密钥"
+grep -rnE 'sk-[A-Za-z0-9]{16,}|[0-9]{8,10}:[A-Za-z0-9_-]{30,}|Bearer [A-Za-z0-9._-]{20,}|api_key\s*[:=]\s*\S{8,}|BEGIN [A-Z ]*PRIVATE KEY' docs/dsh-migration/local || echo "未发现疑似密钥"
 ```
 
 1. 把文件清单和 `HANDOFF.md` 全文给用户看，等用户确认。
-2. 提交并推送：
+2. 本机报告只留在本机。如果确实要备份到远端，推到**私有**仓库，不要推到 `wsxwj123/dsh-bot`。
    ```bash
-   git commit -m "local(setup): 本机验证报告、用户决定、部署盘点与用量基线"
-   git push -u origin local/setup
+   # 不要执行 git add docs/dsh-migration/local
    ```
-3. 告诉用户：可以回到云端 Claude 的会话说"本机准备已推到 local/setup"。
+3. 告诉用户：本机准备已完成，报告在 `docs/dsh-migration/local/`（只在本机）。
 
 ---
 
