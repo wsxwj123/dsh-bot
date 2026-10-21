@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""aux-model-protocol 验收测试（黑盒）。
+"""aux-model-protocol 验收测试（黑盒，按供应商级别判定协议）。
 
 依据：`.devflow/aux-model-protocol-接口.md` 的行为清单，一条行为一个用例。
 
@@ -10,8 +10,15 @@
   * 上游用本机回环假 HTTP 服务，只记录请求路径；原 DeepSeek 路径用假 CLI 记录调用。
   * HOME 等全部钉在 pytest 临时目录，不连外网、不碰真实配置。
 
-断言口径：假上游收到的请求路径（openai 应为 /v1/chat/completions，
-anthropic 应为 /v1/messages）、假 CLI 调用次数、落库的朋友圈正文。
+判定口径（新）：协议只看供应商级别。
+  1. 供应商 `protocol` 字段；
+  2. 未写则看 `base_url` 路径里有没有 `anthropic` 段；
+  3. 再看有没有 `v1` 段 → openai；
+  4. 都没有 → 默认 openai。
+逐模型的 `protocols` 标注不参与判定。
+
+断言口径：假上游实际收到的请求路径（openai 为 /v1/chat/completions，
+anthropic 为 /v1/messages）、假 CLI 调用次数、落库的朋友圈正文。
 """
 import json
 import os
@@ -30,10 +37,14 @@ ROOT = HERE.parents[2]
 
 AUX_PROVIDER_ID = "aux-provider-8f2"
 AUX_MODEL = "aux-model-8f2"
+AUX_MODEL_B = "aux-model-8f2-b"
 AUX_API_KEY = "sk-SECRET-LEAK-CANARY-8f2"
 AUX_TEXT_MARKER = "AUX_TEXT_MARKER"
 DEEPSEEK_TEXT_MARKER = "DEEPSEEK_TEXT_MARKER"
 NOW = "2026-10-21T14:00:00"
+
+OPENAI_PATH = "/v1/chat/completions"
+ANTHROPIC_PATH = "/v1/messages"
 
 AUX_BODY = json.dumps({"prompt": "AUX_IMG_MARKER", "text": AUX_TEXT_MARKER},
                       ensure_ascii=False)
@@ -70,7 +81,7 @@ print("RESULT_JSON=" + json.dumps(out, ensure_ascii=False))
 
 
 class FakeAux:
-    """本机回环假上游，只记录请求方法/路径，不记录请求头（避免 api_key 进测试输出）。"""
+    """本机回环假上游，只记录请求方法/路径/请求体，不记录请求头（避免 api_key 进测试输出）。"""
 
     def __init__(self):
         self.requests = []
@@ -117,13 +128,14 @@ class FakeAux:
             self._srv = None
 
     @property
-    def base(self):
-        return "http://127.0.0.1:%d/v1" % self._srv.server_address[1]
+    def root(self):
+        """假上游根地址（无路径）。"""
+        return "http://127.0.0.1:%d" % self._srv.server_address[1]
 
     @property
-    def root(self):
-        """不带 /v1 的假上游根地址，用于测 base_url 自带路径线索的推断。"""
-        return "http://127.0.0.1:%d" % self._srv.server_address[1]
+    def base(self):
+        """带 /v1 的假上游地址。"""
+        return self.root + "/v1"
 
 
 @pytest.fixture
@@ -260,146 +272,135 @@ def _assert_aux_text(result):
     assert DEEPSEEK_TEXT_MARKER not in text, "正文混进了原 DeepSeek 路径的输出：%r" % text
 
 
-# ── 1. 该模型在 protocols 里标了 openai：按 openai 端点请求 ─────────────
+def _paths(aux):
+    return [r["path"] for r in aux.requests]
 
-def test_模型单独标openai_按openai端点请求不回退(aux, tmp_path):
+
+def _assert_one_request_ends_with(aux, suffix):
+    paths = _paths(aux)
+    assert len(paths) == 1, "aux 上游应收到 1 次请求，实际 %r" % paths
+    assert paths[0].endswith(suffix), \
+        "上游请求路径应以 %s 结尾，实际 %r" % (suffix, paths[0])
+    return paths[0]
+
+
+# ── 1. 供应商写了 protocol: openai：请求 /v1/chat/completions ─────────────
+
+def test_供应商标openai_请求chat_completions端点(aux, tmp_path):
     w = World(tmp_path)
-    # 其它模型故意不标注，目标模型单独标 openai
-    w.set_providers([w.provider(
-        aux.base,
-        models=["unmarked-model-a", "unmarked-model-b", AUX_MODEL],
-        protocols={AUX_MODEL: "openai"})])
+    w.set_providers([w.provider(aux.base, models=[AUX_MODEL], protocol="openai")])
     w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
     run = w.run()
 
     result = _assert_moment_posted(run)
     _assert_aux_text(result)
-    paths = [r["path"] for r in aux.requests]
-    assert paths == ["/v1/chat/completions"], \
-        "目标模型标了 openai，上游应收到 /v1/chat/completions，实际 %r" % paths
-    assert w.claude_calls() == [], "模型自带 openai 协议时不该回退 DeepSeek"
+    assert _paths(aux) == [OPENAI_PATH], \
+        "供应商标 openai，上游应收到 %s，实际 %r" % (OPENAI_PATH, _paths(aux))
+    assert w.claude_calls() == [], "供应商协议可用时不该回退 DeepSeek"
 
 
-# ── 2. 该模型在 protocols 里标了 anthropic：按 anthropic 端点请求 ────────
+# ── 2. 供应商写了 protocol: anthropic：请求 /v1/messages ──────────────────
 
-def test_模型单独标anthropic_按anthropic端点请求(aux, tmp_path):
+def test_供应商标anthropic_请求messages端点(aux, tmp_path):
     w = World(tmp_path)
-    w.set_providers([w.provider(
-        aux.base,
-        models=["unmarked-model-a", "unmarked-model-b", AUX_MODEL],
-        protocols={AUX_MODEL: "anthropic"})])
+    w.set_providers([w.provider(aux.base, models=[AUX_MODEL], protocol="anthropic")])
     w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
     run = w.run()
 
     result = _assert_moment_posted(run)
     _assert_aux_text(result)
-    paths = [r["path"] for r in aux.requests]
-    assert paths == ["/v1/messages"], \
-        "目标模型标了 anthropic，上游应收到 /v1/messages，实际 %r" % paths
-    assert w.claude_calls() == [], "模型自带 anthropic 协议时不该回退 DeepSeek"
+    assert _paths(aux) == [ANTHROPIC_PATH], \
+        "供应商标 anthropic，上游应收到 %s，实际 %r" % (ANTHROPIC_PATH, _paths(aux))
+    assert w.claude_calls() == [], "供应商协议可用时不该回退 DeepSeek"
 
 
-# ── 3. 模型未单独标注，整供应商判定一致：沿用供应商整体判定 ──────────────
+# ── 3. 没写协议、base_url 路径含 anthropic 段：请求 /v1/messages ──────────
 
-def test_模型未单独标注_沿用供应商整体openai判定(aux, tmp_path):
+def test_未标协议且地址含anthropic段_请求messages端点(aux, tmp_path):
     w = World(tmp_path)
-    w.set_providers([w.provider(
-        aux.base,
-        models=["unmarked-model-a", AUX_MODEL],
-        protocols={},
-        protocol="openai")])
+    w.set_providers([w.provider(aux.root + "/anthropic", models=[AUX_MODEL])])
     w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
     run = w.run()
 
     result = _assert_moment_posted(run)
     _assert_aux_text(result)
-    paths = [r["path"] for r in aux.requests]
-    assert paths == ["/v1/chat/completions"], \
-        "模型未标注时应沿用供应商整体 openai 判定，实际请求路径 %r" % paths
-    assert w.claude_calls() == [], "供应商整体判定可用时不该回退 DeepSeek"
+    _assert_one_request_ends_with(aux, ANTHROPIC_PATH)
+    assert w.claude_calls() == [], "由地址推断出 anthropic 时不该回退 DeepSeek"
 
 
-# ── 4. 两处都判不出：回退 DeepSeek，不抛异常 ────────────────────────────
+# ── 4. 没写协议、base_url 路径含 v1 段：请求 /v1/chat/completions ─────────
 
-def test_模型与供应商都判不出协议_回退DeepSeek且不抛异常(aux, tmp_path):
+def test_未标协议且地址含v1段_请求chat_completions端点(aux, tmp_path):
     w = World(tmp_path)
-    # 模型在列表里，但没有 protocols 记录，也没有供应商整体 protocol
-    w.set_providers([w.provider(
-        aux.base,
-        models=[AUX_MODEL, "unmarked-model-a"],
-        protocols={})])
+    # 路径只有 /v1，没有 anthropic 段
+    w.set_providers([w.provider(aux.base, models=[AUX_MODEL])])
     w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
     run = w.run()
 
     result = _assert_moment_posted(run)
-    text = result.get("text") or ""
-    assert DEEPSEEK_TEXT_MARKER in text, "两处都判不出协议时没有回退 DeepSeek：%r" % text
-    assert aux.requests == [], "判不出协议时不该向上游发任何请求，实际 %r" % [
-        r["path"] for r in aux.requests]
-    assert len(w.claude_calls()) == 1, \
-        "回退时应调用原 DeepSeek 路径 1 次，实际 %d 次" % len(w.claude_calls())
-
-
-# ── 5. 模型不在供应商模型列表：回退（model_missing）─────────────────────
-
-def test_模型不在供应商模型列表_回退DeepSeek(aux, tmp_path):
-    w = World(tmp_path)
-    # 供应商整体可用（protocol: openai），但 aux 指向的模型不在 models 列表里
-    w.set_providers([w.provider(
-        aux.base,
-        models=["some-other-model"],
-        protocols={"some-other-model": "openai"},
-        protocol="openai")])
-    w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
-    run = w.run()
-
-    result = _assert_moment_posted(run)
-    text = result.get("text") or ""
-    assert DEEPSEEK_TEXT_MARKER in text, "模型不在供应商列表时没有回退 DeepSeek：%r" % text
-    assert aux.requests == [], "模型不存在时不该访问 aux 上游，实际请求 %r" % [
-        r["path"] for r in aux.requests]
-    assert len(w.claude_calls()) == 1, \
-        "回退时应调用原 DeepSeek 路径 1 次，实际 %d 次" % len(w.claude_calls())
-
-
-# ── 6. 两处都没有协议标注，但 base_url 路径含 /anthropic：按 anthropic 请求 ──
-
-def test_两处未标注但地址含anthropic_按anthropic端点请求(aux, tmp_path):
-    w = World(tmp_path)
-    # 模型在列表里但未标注，供应商也没有整体 protocol，仅 base_url 带 /anthropic
-    w.set_providers([w.provider(
-        aux.root + "/anthropic",
-        models=[AUX_MODEL, "unmarked-model-a"],
-        protocols={})])
-    w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
-    run = w.run()
-
-    result = _assert_moment_posted(run)
-    paths = [r["path"] for r in aux.requests]
-    assert len(paths) == 1, \
-        "地址含 /anthropic 时应向上游请求 1 次，实际请求 %r" % paths
-    assert paths[0].endswith("/v1/messages"), \
-        "地址含 /anthropic 时应请求 anthropic 端点 /v1/messages，实际 %r" % paths[0]
     _assert_aux_text(result)
-    assert w.claude_calls() == [], "地址推断出 anthropic 时不该回退 DeepSeek"
+    assert _paths(aux) == [OPENAI_PATH], \
+        "地址含 v1 段应按 OpenAI 请求 %s，实际 %r" % (OPENAI_PATH, _paths(aux))
+    assert w.claude_calls() == [], "由地址推断出 openai 时不该回退 DeepSeek"
 
 
-# ── 7. 两处都没有协议标注，但 base_url 路径含 /openai：按 openai 请求 ────
+# ── 5. 没写协议、地址也没有线索：默认 OpenAI 请求 ────────────────────────
 
-def test_两处未标注但地址含openai_按openai端点请求(aux, tmp_path):
+def test_未标协议且地址无线索_默认请求chat_completions端点(aux, tmp_path):
     w = World(tmp_path)
-    w.set_providers([w.provider(
-        aux.root + "/openai",
-        models=[AUX_MODEL, "unmarked-model-a"],
-        protocols={})])
+    # 地址无路径，既无 anthropic 也无 v1 段
+    w.set_providers([w.provider(aux.root, models=[AUX_MODEL])])
     w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
     run = w.run()
 
     result = _assert_moment_posted(run)
-    paths = [r["path"] for r in aux.requests]
-    assert len(paths) == 1, \
-        "地址含 /openai 时应向上游请求 1 次，实际请求 %r" % paths
-    assert paths[0].endswith("/v1/chat/completions"), \
-        "地址含 /openai 时应请求 openai 端点 /v1/chat/completions，实际 %r" % paths[0]
     _assert_aux_text(result)
-    assert w.claude_calls() == [], "地址推断出 openai 时不该回退 DeepSeek"
+    _assert_one_request_ends_with(aux, OPENAI_PATH)
+    assert w.claude_calls() == [], "默认 OpenAI 时不该回退 DeepSeek"
+
+
+# ── 6. 同一供应商下两个模型都按供应商协议走（逐模型标注不参与）────────────
+
+def test_同一供应商下两个模型_都按供应商协议请求(aux, tmp_path):
+    w_a = World(tmp_path / "model-a")
+    w_b = World(tmp_path / "model-b")
+    for w, model in ((w_a, AUX_MODEL), (w_b, AUX_MODEL_B)):
+        # 供应商整体标 anthropic；模型列表含两个模型，均无逐模型标注
+        w.set_providers([w.provider(aux.base,
+                                    models=[AUX_MODEL, AUX_MODEL_B],
+                                    protocol="anthropic")])
+        w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": model})
+
+    result_a = _assert_moment_posted(w_a.run())
+    result_b = _assert_moment_posted(w_b.run())
+    _assert_aux_text(result_a)
+    _assert_aux_text(result_b)
+
+    assert _paths(aux) == [ANTHROPIC_PATH, ANTHROPIC_PATH], \
+        "两个不同模型都应跟随供应商协议请求 %s，实际 %r" % (ANTHROPIC_PATH, _paths(aux))
+    # 模型只是请求体里的字段，不影响协议判定
+    assert json.loads(aux.requests[0]["body"]).get("model") == AUX_MODEL
+    assert json.loads(aux.requests[1]["body"]).get("model") == AUX_MODEL_B
+    assert w_a.claude_calls() == [] and w_b.claude_calls() == [], \
+        "供应商协议可用时都不该回退 DeepSeek"
+
+
+# ── 7. 回归：供应商条目残留相反的逐模型标注，仍以供应商为准 ──────────────
+
+def test_供应商协议优先于残留的逐模型标注(aux, tmp_path):
+    w = World(tmp_path)
+    # 供应商标 openai；base_url 路径含 anthropic；逐模型残留标注 anthropic。
+    # 按新口径：供应商 protocol 最优先，应请求 OpenAI 端点。
+    w.set_providers([w.provider(aux.root + "/anthropic",
+                                models=[AUX_MODEL],
+                                protocol="openai",
+                                protocols={AUX_MODEL: "anthropic"})])
+    w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
+    run = w.run()
+
+    result = _assert_moment_posted(run)
+    _assert_aux_text(result)
+    assert _paths(aux) == [OPENAI_PATH], \
+        "供应商 protocol 应压过逐模型标注与地址线索，预期 %s，实际 %r" % (
+            OPENAI_PATH, _paths(aux))
+    assert w.claude_calls() == [], "供应商协议可用时不该回退 DeepSeek"
