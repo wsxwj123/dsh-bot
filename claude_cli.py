@@ -189,6 +189,19 @@ def _aux_target() -> tuple:
         except Exception:
             protocol = ""
     if protocol not in ("anthropic", "openai"):
+        # 第三级兜底：从 base_url 的**路径段**取协议线索。只拆 path，不看 host/query，
+        # 避免主机名或参数里带这些词时误判。两个词都出现时按路径从左到右先出现的算：
+        # 路径有序，靠前的段更贴近实际路由；若固定 anthropic 优先，
+        # `/openai/anthropic` 这类地址会被判成 anthropic。
+        try:
+            path = urllib.parse.urlsplit(entry.get("base_url") or "").path.lower()
+        except Exception:
+            path = ""
+        for seg in path.split("/"):
+            if seg in ("anthropic", "openai"):
+                protocol = seg
+                break
+    if protocol not in ("anthropic", "openai"):
         return None, "", "", "protocol_missing"
     return entry, model, protocol, ""
 
