@@ -169,9 +169,9 @@ def _aux_models_of(data: dict, provider_id: str) -> list:
 def _read_aux_config() -> tuple:
     """现读**旧仓** ``_global.yml`` 的 aux_llm，返回 ``(provider_id, model)``；缺块/类型非法归一为空串。
 
-    旧仓这个读取口在 ``claude_cli.read_aux_config()``；本仓 ``claude_cli.py`` 是新系统那份、
-    没有 aux 口，而这里必须读旧仓那份全局配置（legacy_config_loader 的默认路径），
-    故就地实现同款语义（缺块/类型非法一律空串，见旧仓 claude_cli.py:134）。
+    面板 GET 的回显口；朋友圈生成侧由 ``claude_cli.call_aux`` 每次现读同一份
+    ``_global.yml``。这里必须读旧仓那份全局配置（legacy_config_loader 的默认路径），
+    故就地实现同款语义（缺块/类型非法一律空串）。
     """
     try:
         import legacy_config_loader as config_loader

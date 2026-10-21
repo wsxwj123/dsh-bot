@@ -132,9 +132,6 @@ def _parse_json_loose(raw: str) -> dict:
 # 故这里也读 legacy_config_loader（它认 CLAUDEBOT_GLOBAL_CFG 接缝；新系统 config_loader
 # 读的是本仓 configs/，不是 aux_llm 的落点）。
 
-AUX_FALLBACK_REASONS = ("no_config", "provider_id_empty", "provider_missing",
-                        "model_missing", "protocol_missing")
-
 
 def _aux_log(line: str) -> None:
     """aux 通道的一行诊断日志。只记 provider_id / model 等元信息，**绝不记密钥**。"""
@@ -144,7 +141,8 @@ def _aux_log(line: str) -> None:
 def _aux_target() -> tuple:
     """解析 aux_llm 到 ``(entry, model, protocol, reason)``；不可用时 entry 为 None。
 
-    现读 _global.yml。reason ∈ AUX_FALLBACK_REASONS，几种情形分别可辨：无配置块、
+    现读 _global.yml。reason 为 no_config / provider_id_empty / provider_missing /
+    model_missing / protocol_missing 之一，几种情形分别可辨：无配置块、
     provider_id 为空、供应商不存在/缺 base_url 或 api_key、模型不在列表、协议未定。
     provider_config 不可导入（接缝闸 fail-closed）或读清单失败同样按"不可用"回退，
     绝不绕过它的安全闸直读清单。
@@ -205,18 +203,22 @@ def _extract_direct_text(resp, protocol: str) -> str:
     raise RuntimeError("上游 anthropic 回执无正文")
 
 
-class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """3xx 只跟随同 host 的重定向。
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """3xx 只跟随同 origin（scheme + host + port）的重定向，且拒绝 https 降级。
 
-    urllib 默认会把 Authorization / x-api-key 原样带给重定向目标；跨 host 跟随等于
+    urllib 默认会把 Authorization / x-api-key 原样带给重定向目标；跨 origin 跟随等于
     把上游密钥转发给第三方，故直接拒绝（抛 HTTPError，由 call_aux 按失败回退）。
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         old = urllib.parse.urlsplit(req.full_url)
         new = urllib.parse.urlsplit(newurl)
-        if old.hostname != new.hostname:
-            raise urllib.error.HTTPError(newurl, code, "拒绝跨 host 重定向", headers, fp)
+        old_origin = (old.scheme, old.hostname, old.port)
+        new_origin = (new.scheme, new.hostname, new.port)
+        if old.scheme == "https" and new.scheme != "https":
+            raise urllib.error.HTTPError(newurl, code, "拒绝 https 降级重定向", headers, fp)
+        if old_origin != new_origin:
+            raise urllib.error.HTTPError(newurl, code, "拒绝跨 origin 重定向", headers, fp)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -229,6 +231,10 @@ def _direct_call(entry: dict, model: str, protocol: str, prompt: str, timeout: i
     base_url = str(entry.get("base_url") or "").rstrip("/")
     key = entry.get("api_key") or ""
     if protocol == "openai":
+        # 面板的显式覆盖优先；没有覆盖时维持原推导，逐字不变
+        override = entry.get("openai_base_url")
+        if isinstance(override, str) and override.strip():
+            base_url = override.strip().rstrip("/")
         # base_url 末尾带不带 /v1 都发往同一个 …/v1/chat/completions，不重复拼
         url = base_url + ("/chat/completions" if base_url.endswith("/v1")
                           else "/v1/chat/completions")
@@ -236,14 +242,17 @@ def _direct_call(entry: dict, model: str, protocol: str, prompt: str, timeout: i
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + key}
     else:
         # 与 bot 直连同一口径：地址带不带结尾的 /v1 都发往同一个 …/v1/messages
+        override = entry.get("anthropic_base_url")
+        if isinstance(override, str) and override.strip():
+            base_url = override.strip()
         from scripts.derive_endpoints import derive_anthropic_url
-        url = derive_anthropic_url(str(entry.get("base_url") or "")).rstrip("/") + "/v1/messages"
+        url = derive_anthropic_url(base_url).rstrip("/") + "/v1/messages"
         body = {"model": model, "max_tokens": 4000,
                 "messages": [{"role": "user", "content": prompt}]}
         headers = {"Content-Type": "application/json", "x-api-key": key,
                    "anthropic-version": "2023-06-01"}
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
-                                         _SameHostRedirectHandler())
+                                         _SameOriginRedirectHandler())
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
                                  headers=headers, method="POST")
     with opener.open(req, timeout=timeout) as r:
