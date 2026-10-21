@@ -95,6 +95,7 @@ class FakeAux:
     def __init__(self):
         self.requests = []
         self.mode = "ok"
+        self.body = None  # None 表示用默认 AUX_BODY；用例可替换
         self._srv = None
         self._thread = None
 
@@ -111,6 +112,7 @@ class FakeAux:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
                 stub.requests.append({"method": self.command, "path": self.path, "body": body})
+                reply_text = stub.body if stub.body is not None else AUX_BODY
                 if stub.mode == "error":
                     raw = json.dumps({"error": "upstream boom"}).encode("utf-8")
                     self.send_response(500)
@@ -121,8 +123,8 @@ class FakeAux:
                 else:
                     raw = json.dumps({
                         "choices": [{"index": 0, "finish_reason": "stop",
-                                     "message": {"role": "assistant", "content": AUX_BODY}}],
-                        "content": [{"type": "text", "text": AUX_BODY}],
+                                     "message": {"role": "assistant", "content": reply_text}}],
+                        "content": [{"type": "text", "text": reply_text}],
                     }, ensure_ascii=False).encode("utf-8")
                     self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -189,6 +191,20 @@ class World:
         self.state_db = self.base / "state.db"
         self.fake_log = self.base / "fake-claude.log"
         self.fake_claude = self.base / "fake-claude"
+        # 假 comfyui 技能目录：只放最小结构，让生图翻译步骤能走到；出图本身不在本次范围。
+        self.comfy_skill = self.base / "comfyui-skill"
+        (self.comfy_skill / "scripts").mkdir(parents=True, exist_ok=True)
+        (self.comfy_skill / "SKILL.md").write_text(
+            "---\nname: comfyui-skill\n---\n# 假技能\n", encoding="utf-8")
+        fake_comfy = self.comfy_skill / "scripts" / "comfyui_gen.py"
+        fake_comfy.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "p = pathlib.Path(sys.argv[0]).with_name('fake-output.png')\n"
+            "p.write_bytes(b'\\x89PNG\\r\\n\\x1a\\n')\n"
+            "print('MEDIA: %s' % p)\n",
+            encoding="utf-8")
+        fake_comfy.chmod(0o755)
         self.fake_claude.write_text(
             "#!/bin/sh\n"
             'echo "$@" >> "' + str(self.fake_log) + '"\n'
@@ -208,9 +224,29 @@ class World:
         (self.home / "claudebotlife" / "configs" / "providers.json").write_text(
             raw, encoding="utf-8")
 
-    def set_global_yml(self, aux_llm=None, image_enabled=False):
-        lines = ["moments:", "  enabled: true", "  image_generation:",
-                 "    enabled: %s" % ("true" if image_enabled else "false")]
+    def set_global_yml(self, aux_llm=None, image_enabled=False,
+                       image_provider_moment=None):
+        lines = ["moments:", "  enabled: true"]
+        if image_enabled:
+            engine = image_provider_moment or "comfyui"
+            lines += ["  image_generation:", "    enabled: true",
+                      "    provider: %s" % engine,
+                      "    provider_moment: %s" % engine,
+                      "    image_when:", "    - selfie_keyword",
+                      "    - mood_extreme", "    - sporadic_positive",
+                      "    - special_date", "    - hobby_visual",
+                      "    - private_intimate",
+                      "    comfyui:",
+                      "      url: http://127.0.0.1:%d" % _closed_port(),
+                      "      workflow: /nonexistent-workflow.json",
+                      "      workflow_img2img: /nonexistent-workflow.json",
+                      "      output_dir: %s" % (self.base / "img-out"),
+                      "      prompt_placeholder: '%prompt%'",
+                      "      negative_placeholder: '%negative_prompt%'",
+                      "image:", "  enabled: true",
+                      "  provider_moment: %s" % engine]
+        else:
+            lines += ["  image_generation:", "    enabled: false"]
         if aux_llm:
             lines += ["aux_llm:", "  provider_id: %s" % aux_llm["provider_id"],
                       "  model: %s" % aux_llm["model"]]
@@ -236,6 +272,7 @@ class World:
             "CLAUDEBOT_GLOBAL_CFG": str(self.global_yml),
             "BOTLIFE_STATE_DB": str(self.state_db),
             "CLAUDE_BIN": str(self.fake_claude),
+            "COMFYUI_SKILL_DIR": str(self.comfy_skill),
             "CLAUDEBOTLIFE_FORCE_CLAUDE": "1",
             "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
             "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8",
@@ -412,16 +449,27 @@ def test_aux回执无正文_回退DeepSeek(aux, tmp_path):
 def test_生图提示词翻译走aux通道(aux, tmp_path):
     w = World(tmp_path)
     w.set_providers([w.provider(aux.base)])
+    # 朋友圈配图只在命中 image_when（selfie_keyword）时触发；让文案带自拍关键词，
+    # 从而真的走到 comfyui 分支的生图提示词翻译。
+    aux.body = json.dumps({"prompt": AUX_IMG_MARKER,
+                           "text": AUX_TEXT_MARKER + " 自拍"},
+                          ensure_ascii=False)
     w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL},
-                     image_enabled=True)
+                     image_enabled=True, image_provider_moment="comfyui")
     run = w.run("translation", aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL},
                 card="今天想来自拍", image_enabled=True)
 
     result = _assert_moment_posted(run)
+    translation_requests = [
+        r for r in aux.requests
+        if "ComfyUI" in r["body"] and "JSON" in r["body"]]
+    assert translation_requests, \
+        "aux 上游没有收到生图提示词翻译请求；实际收到 %d 次请求：%r" % (
+            len(aux.requests), [r["body"][:200] for r in aux.requests])
     assert len(aux.requests) >= 2, \
         "文案生成与生图提示词翻译都应走 aux，aux 上游实际只收到 %d 次请求" % len(aux.requests)
     assert w.claude_calls() == [], "生图翻译走 aux 时不该再调用原 DeepSeek 路径"
-    assert AUX_TEXT_MARKER in (result.get("text") or "") or AUX_IMG_MARKER in (result.get("text") or ""), \
+    assert AUX_TEXT_MARKER in (result.get("text") or ""), \
         "朋友圈正文不是 aux 返回的内容"
 
 
