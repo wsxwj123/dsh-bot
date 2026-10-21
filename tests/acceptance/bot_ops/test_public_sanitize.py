@@ -6,9 +6,10 @@
 两条自保约定（否则扫描会命中测试自己）：
 1. 家目录检查用通用模式匹配，不依赖运行机器的 HOME；
    测试文件里出现的假路径全部列入白名单。
-2. 数字串检查只匹配身份字段（chat_id/from_id/user_id/peer_id/sender_id，
-   含 JSON 键与 Python/TS 赋值写法）位置上的连续 10 位及以上数字；
-   白名单只放明显的测试假值。测试文件里不保存任何真实编号（包括拆分拼接）。
+2. 数字串检查只匹配身份字段（chat_id/from_id/user_id/peer_id/sender_id/group_id，
+   含 JSON 键、嵌套 id、变量赋值、类型注解、getenv 兜底等写法）位置上的连续
+   9 位及以上数字；白名单只放明显的测试假值。测试文件里不保存任何真实编号
+   （包括拆分拼接）。
 """
 
 import codecs
@@ -142,6 +143,8 @@ def _scan_tracked(regex, whitelist=()):
             skipped.append("%s (%s: %s)" % (rel, exc.__class__.__name__, exc))
             continue
         if text is None:
+            # 二进制文件无法按文本扫描：不计为失败，但打印出来，避免"没扫到"被当成"没问题"。
+            print("[scan] 跳过二进制文件: %s" % rel, file=sys.stderr)
             continue
         # 有捕获组时只比对捕获到的值（例如身份字段后面的数字），否则比对整个匹配。
         found = sorted(
