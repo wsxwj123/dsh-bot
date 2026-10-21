@@ -267,6 +267,9 @@ class World:
             "USERPROFILE": str(self.home),
             "HUB_CONFIGS_DIR": str(self.configs),
             "DSH_BOT_HOME": str(self.home / ".dsh-bot"),
+            # 三个接缝变量必须同时设置，落在同一个临时目录下，走真实 provider_config 读取路径
+            "CLAUDEBOT_CONFIG_DIR": str(self.configs),
+            "CLAUDEBOT_CHANNELS_ROOT": str(self.channel),
             "CLAUDEBOT_PROVIDER_PATH": str(self.providers_path),
             "CLAUDEBOT_LEGACY_ROOT": str(self.legacy),
             "CLAUDEBOT_GLOBAL_CFG": str(self.global_yml),
@@ -279,8 +282,9 @@ class World:
         })
         return env
 
-    def run(self, scenario, *, aux_llm=None, card="今天心情很好",
+    def run(self, scenario, *, card="今天心情很好",
             image_enabled=False, timeout=90):
+        # 注意：aux_llm 不进内存配置块，一律由夹具写进磁盘 _global.yml（接口「测试接缝」要求）。
         global_cfg = {"user_display_name": "我", "user_bio": "签名",
                       "moments": {"enabled": True, "daily_post_limit_per_bot": 5,
                                   "image_generation": {"enabled": False}}}
@@ -289,8 +293,6 @@ class World:
                    "moments": {"enabled": True, "daily_post_limit_per_bot": 5,
                                "image_generation": {"enabled": False}},
                    "moments_daily_limit": 5}
-        if aux_llm:
-            global_cfg["aux_llm"] = dict(aux_llm)
         if image_enabled:
             img = {"enabled": True, "provider": "comfyui", "provider_moment": "comfyui",
                    "image_when": ["selfie_keyword"],
@@ -352,7 +354,8 @@ def _assert_moment_posted(run):
 def test_aux配置有效_朋友圈文案由aux供应商生成且不调DeepSeek(aux, tmp_path):
     w = World(tmp_path)
     w.set_providers([w.provider(aux.base)])
-    run = w.run("moment", aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
+    w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
+    run = w.run("moment")
 
     result = _assert_moment_posted(run)
     text = result.get("text") or ""
@@ -368,7 +371,7 @@ def test_aux配置有效_朋友圈文案由aux供应商生成且不调DeepSeek(a
 def test_未配置aux_llm_朋友圈文案仍走DeepSeek(aux, tmp_path):
     w = World(tmp_path)
     w.set_providers([w.provider(aux.base)])
-    run = w.run("moment", aux_llm=None)
+    run = w.run("moment")
 
     result = _assert_moment_posted(run)
     assert DEEPSEEK_TEXT_MARKER in (result.get("text") or ""), \
@@ -382,7 +385,8 @@ def test_未配置aux_llm_朋友圈文案仍走DeepSeek(aux, tmp_path):
 def test_aux供应商不存在_回退DeepSeek且朋友圈照常生成(aux, tmp_path):
     w = World(tmp_path)
     w.set_providers([w.provider(aux.base)])
-    run = w.run("moment", aux_llm={"provider_id": "no-such-provider", "model": AUX_MODEL})
+    w.set_global_yml(aux_llm={"provider_id": "no-such-provider", "model": AUX_MODEL})
+    run = w.run("moment")
 
     result = _assert_moment_posted(run)
     assert DEEPSEEK_TEXT_MARKER in (result.get("text") or ""), "供应商不存在时没有回退 DeepSeek"
@@ -395,7 +399,8 @@ def test_aux供应商不存在_回退DeepSeek且朋友圈照常生成(aux, tmp_p
 def test_aux模型不在供应商列表_回退DeepSeek(aux, tmp_path):
     w = World(tmp_path)
     w.set_providers([w.provider(aux.base, models=["some-other-model"])])
-    run = w.run("moment", aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
+    w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
+    run = w.run("moment")
 
     result = _assert_moment_posted(run)
     assert DEEPSEEK_TEXT_MARKER in (result.get("text") or ""), "模型不在列表里时没有回退 DeepSeek"
@@ -412,7 +417,8 @@ def test_aux上游错误或连接失败_回退DeepSeek且朋友圈不中断(aux,
     aux.mode = "error"
     w = World(tmp_path / "http-error")
     w.set_providers([w.provider(aux.base)])
-    run = w.run("moment", aux_llm=aux_llm)
+    w.set_global_yml(aux_llm=aux_llm)
+    run = w.run("moment")
     result = _assert_moment_posted(run)
     assert DEEPSEEK_TEXT_MARKER in (result.get("text") or ""), "上游 500 时没有回退 DeepSeek"
     assert len(aux.requests) == 1, "应尝试过 aux 上游一次"
@@ -423,7 +429,8 @@ def test_aux上游错误或连接失败_回退DeepSeek且朋友圈不中断(aux,
     before = len(aux.requests)
     w = World(tmp_path / "conn-refused")
     w.set_providers([w.provider("http://127.0.0.1:%d/v1" % _closed_port())])
-    run = w.run("moment", aux_llm=aux_llm)
+    w.set_global_yml(aux_llm=aux_llm)
+    run = w.run("moment")
     result = _assert_moment_posted(run)
     assert DEEPSEEK_TEXT_MARKER in (result.get("text") or ""), "连接失败时没有回退 DeepSeek"
     assert len(w.claude_calls()) == 1, "连接失败后应调用原 DeepSeek 路径 1 次"
@@ -436,7 +443,8 @@ def test_aux回执无正文_回退DeepSeek(aux, tmp_path):
     w = World(tmp_path)
     aux.mode = "empty"
     w.set_providers([w.provider(aux.base)])
-    run = w.run("moment", aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
+    w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
+    run = w.run("moment")
 
     result = _assert_moment_posted(run)
     assert DEEPSEEK_TEXT_MARKER in (result.get("text") or ""), "回执无正文时没有回退 DeepSeek"
@@ -456,7 +464,7 @@ def test_生图提示词翻译走aux通道(aux, tmp_path):
                           ensure_ascii=False)
     w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL},
                      image_enabled=True, image_provider_moment="comfyui")
-    run = w.run("translation", aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL},
+    run = w.run("translation",
                 card="今天想来自拍", image_enabled=True)
 
     result = _assert_moment_posted(run)
@@ -480,13 +488,15 @@ def test_诊断日志含供应商id与模型名但不含api_key(aux, tmp_path):
     # 两次运行各用独立世界/库：同库第二次发会被「同 kind 4h 不重发」挡住
     w_ok = World(tmp_path / "ok")
     w_ok.set_providers([w_ok.provider(aux.base)])
-    ok_run = w_ok.run("moment", aux_llm=aux_llm)
+    w_ok.set_global_yml(aux_llm=aux_llm)
+    ok_run = w_ok.run("moment")
     _assert_moment_posted(ok_run)
 
     aux.mode = "error"
     w_err = World(tmp_path / "err")
     w_err.set_providers([w_err.provider(aux.base)])
-    err_run = w_err.run("moment", aux_llm=aux_llm)
+    w_err.set_global_yml(aux_llm=aux_llm)
+    err_run = w_err.run("moment")
     _assert_moment_posted(err_run)
 
     combined = ok_run.output + "\n" + err_run.output
@@ -501,7 +511,8 @@ def test_诊断日志含供应商id与模型名但不含api_key(aux, tmp_path):
 def test_个性签名不受aux影响_仍走原路径(aux, tmp_path):
     w = World(tmp_path)
     w.set_providers([w.provider(aux.base)])
-    run = w.run("signature", aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
+    w.set_global_yml(aux_llm={"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL})
+    run = w.run("signature")
 
     assert run.rc == 0, "签名路径把异常抛给了调用方；stderr：%s" % run.err[-800:]
     result = run.result()
@@ -519,7 +530,8 @@ def test_openai协议请求路径_带不带v1都路由到v1_chat_completions(aux
     # 10a. base_url 不带 /v1，应补成 /v1/chat/completions
     w = World(tmp_path / "no-v1")
     w.set_providers([w.provider(aux.base_no_v1)])
-    run = w.run("moment", aux_llm=aux_llm)
+    w.set_global_yml(aux_llm=aux_llm)
+    run = w.run("moment")
     _assert_moment_posted(run)
     paths = [r["path"] for r in aux.requests]
     assert paths == ["/v1/chat/completions"], \
@@ -530,7 +542,8 @@ def test_openai协议请求路径_带不带v1都路由到v1_chat_completions(aux
     aux.requests.clear()
     w2 = World(tmp_path / "with-v1")
     w2.set_providers([w2.provider(aux.base)])
-    run2 = w2.run("moment", aux_llm=aux_llm)
+    w2.set_global_yml(aux_llm=aux_llm)
+    run2 = w2.run("moment")
     _assert_moment_posted(run2)
     paths2 = [r["path"] for r in aux.requests]
     assert not any("/v1/v1/" in p for p in paths2), \
