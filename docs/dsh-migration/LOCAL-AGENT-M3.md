@@ -1,5 +1,8 @@
 # 本机 AI 任务书：M3 真机验收（bot5：承诺、主动消息、心情与好感）
 
+> 注意：文中“提交/推送本机报告”的步骤已作废。`docs/dsh-migration/local/` 是本机工作目录，只留本机，不提交、不推送。
+
+
 你在用户的 Mac 上工作，接着 M2 的活。新代码在仓库 `wsxwj123/dsh-bot` 的分支 `claude/nice-brahmagupta-dtjsma` 上（M1、M2 已经合进 master）。
 
 ## 先读

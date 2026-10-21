@@ -1,5 +1,8 @@
 # 本机 AI 任务书：M1 真机验收（bot5）
 
+> 注意：文中“提交/推送本机报告”的步骤已作废。`docs/dsh-migration/local/` 是本机工作目录，只留本机，不提交、不推送。
+
+
 你在用户的 Mac 上工作，接着之前"本机准备"的活。这次的任务是帮用户做新系统 M1 的真机验收。
 
 新系统的代码已经由另一个 AI 写好，在 GitHub 仓库 `wsxwj123/dsh-bot` 的分支 `claude/nice-brahmagupta-dtjsma` 上（拉取请求 #1）。

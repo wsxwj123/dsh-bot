@@ -1,5 +1,8 @@
 # 本机 AI 任务书：M2 真机验收（bot5，记忆和换段）
 
+> 注意：文中“提交/推送本机报告”的步骤已作废。`docs/dsh-migration/local/` 是本机工作目录，只留本机，不提交、不推送。
+
+
 你在用户的 Mac 上工作，接着之前 M1 实测的活。这次验收新系统的记忆部分。新代码在 GitHub 仓库 `wsxwj123/dsh-bot` 的分支 `claude/nice-brahmagupta-dtjsma` 上（M1 已经合进 master）。
 
 ## 先读这两份
