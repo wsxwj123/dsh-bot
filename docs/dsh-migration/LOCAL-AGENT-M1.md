@@ -151,10 +151,10 @@ DSH_BOT_LOG_CONSOLE=1 bun gateway/src/main.ts --config ~/.dsh-bot/configs/bot5.y
    - 第 6 步三条命令的输出；
    - 第 7 步查到的结果；
    - 发现的问题：复现步骤、现象、事件名（id 已替换）。
-2. 提交前自查：在 `git diff` 里搜一遍这几样，确认都没有：
+2. 提交前自查：在 `git diff HEAD` 里搜一遍这几样，确认都没有：
    - `sk-`
    - 令牌格式（一串数字、冒号、一长串字母）
    - 用户的 Telegram 用户 id
    - 系统用户名
-3. 从 `claude/nice-brahmagupta-dtjsma` 拉出新分支 `local/m1-check`，推到这个分支。不要推到 master，也不要推到以 `claude/` 开头的分支。
-4. 向用户汇报时用平实的中文，先说结论。最后告诉用户："M1 实测已推到 local/m1-check"，用户会把这句话转给另一个 AI。
+3. 报告只留本机，不需要新建分支，也不需要推送。
+4. 向用户汇报时用平实的中文，先说结论。最后告诉用户："M1 实测已完成，报告在本机"，用户会把这句话转给另一个 AI。

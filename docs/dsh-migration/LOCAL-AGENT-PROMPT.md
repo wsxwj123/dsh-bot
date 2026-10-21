@@ -235,16 +235,17 @@ python3 lab/dsh/local/baseline_claude_usage.py --days 30 --out docs/dsh-migratio
 ```bash
 cd ~/dsh-bot-work
 # 注意：docs/dsh-migration/local/ 是本机工作目录，**不要 git add、不要提交、不要推送**。
-# 里面有真实家目录路径和本机报告，只在本机留存。下面的密钥扫描直接扫目录，不经过 git。
-# 密钥扫描：有任何输出就停下来逐条确认
-grep -rnE 'sk-[A-Za-z0-9]{16,}|[0-9]{8,10}:[A-Za-z0-9_-]{30,}|Bearer [A-Za-z0-9._-]{20,}|api_key\s*[:=]\s*\S{8,}|BEGIN [A-Z ]*PRIVATE KEY' docs/dsh-migration/local || echo "未发现疑似密钥"
+# 密钥扫描分两步：先扫真正要提交的内容（脚本修复），再补扫本机报告目录。
+
+# 1）待提交内容：有任何输出就停下来逐条确认
+git diff HEAD | grep -nE 'sk-[A-Za-z0-9]{16,}|[0-9]{8,10}:[A-Za-z0-9_-]{30,}|Bearer [A-Za-z0-9._-]{20,}|api_key\s*[:=]\s*\S{8,}|BEGIN [A-Z ]*PRIVATE KEY' || echo "待提交内容未发现疑似密钥"
+
+# 2）本机报告目录（补充检查，这些文件不会进 git）
+grep -rnE 'sk-[A-Za-z0-9]{16,}|[0-9]{8,10}:[A-Za-z0-9_-]{30,}|Bearer [A-Za-z0-9._-]{20,}|api_key\s*[:=]\s*\S{8,}|BEGIN [A-Z ]*PRIVATE KEY' docs/dsh-migration/local || echo "本机报告未发现疑似密钥"
 ```
 
-1. 把文件清单和 `HANDOFF.md` 全文给用户看，等用户确认。
-2. 本机报告只留在本机。如果确实要备份到远端，推到**私有**仓库，不要推到 `wsxwj123/dsh-bot`。
-   ```bash
-   # 不要执行 git add docs/dsh-migration/local
-   ```
+1. 把要提交的文件清单给用户看，等用户确认。
+2. 本机报告只留在本机。需要备份就用 `tar` 或 `rsync` 打包到家目录以外的地方，**不要用 git**（该目录已被 `.gitignore` 挡住，用 git 只能靠 `git add -f`，等于绕开保护）。
 3. 告诉用户：本机准备已完成，报告在 `docs/dsh-migration/local/`（只在本机）。
 
 ---

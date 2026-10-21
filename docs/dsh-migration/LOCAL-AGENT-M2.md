@@ -113,17 +113,17 @@ HUB_CONFIGS_DIR=~/.dsh-bot/configs python3 memory/memory_compactor.py
    - 第 6 步的结果（如果做了）；
    - 第 7 步三条命令的输出；
    - 发现的问题：复现步骤、现象、事件名，聊天 id 换成 `<chat>`。
-2. 提交前，在 `git diff` 里搜一遍下面这些，确认都没有：
+2. 提交前，在 `git diff HEAD` 里搜一遍下面这些，确认都没有：
    - `sk-`
    - 令牌格式
    - 用户的 Telegram 用户 id
    - 系统用户名
-3. 从 `claude/nice-brahmagupta-dtjsma` 拉出新分支 `local/m2-check`，推到这个分支。
-4. 向用户汇报时用平实的中文，先说结论。最后一句写："M2 实测已推到 local/m2-check"。
+3. 报告只留本机，不需要新建分支，也不需要推送。
+4. 向用户汇报时用平实的中文，先说结论。最后一句写："已完成，报告在本机"。
 
 ## 复测：真机报告里的问题修好之后（约 15 分钟）
 
-铁律同上。这次只复测两件事，报告写到 `docs/dsh-migration/local/reports/m2-recheck.md`，推到新分支 `local/m2-recheck`。
+铁律同上。这次只复测两件事，报告写到 `docs/dsh-migration/local/reports/m2-recheck.md`，只留本机。
 
 ### 1. 拉代码、跑测试
 
@@ -161,4 +161,4 @@ HUB_CONFIGS_DIR=~/.dsh-bot/configs python3 memory/memory_compactor.py
 
 ### 5. 收尾
 
-和第 7 步一样：跑 `check`、`health`、`report.ts --hours 2` 放进报告，Ctrl+C 停网关，问用户要不要恢复旧 bot5。最后一句写："M2 复测已推到 local/m2-recheck"。
+和第 7 步一样：跑 `check`、`health`、`report.ts --hours 2` 放进报告，Ctrl+C 停网关，问用户要不要恢复旧 bot5。最后一句写："已完成，报告在本机"。
