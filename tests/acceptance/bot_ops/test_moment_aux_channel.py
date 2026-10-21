@@ -149,6 +149,11 @@ class FakeAux:
     def base(self):
         return "http://127.0.0.1:%d/v1" % self._srv.server_address[1]
 
+    @property
+    def base_no_v1(self):
+        """同一假上游，但 base_url 不带 /v1 的写法。"""
+        return "http://127.0.0.1:%d" % self._srv.server_address[1]
+
 
 def _closed_port():
     s = socket.socket()
@@ -456,3 +461,31 @@ def test_个性签名不受aux影响_仍走原路径(aux, tmp_path):
     assert len(w.claude_calls()) >= 1, "个性签名仍应走原 DeepSeek 路径"
     sig = result.get("signature")
     assert not (isinstance(sig, str) and "AUX_" in sig), "签名内容来自 aux 通道：%r" % sig
+
+
+# ── 10. 请求地址规则：base_url 带不带 /v1 都发往 /v1/chat/completions ────
+
+def test_openai协议请求路径_带不带v1都路由到v1_chat_completions(aux, tmp_path):
+    aux_llm = {"provider_id": AUX_PROVIDER_ID, "model": AUX_MODEL}
+
+    # 10a. base_url 不带 /v1，应补成 /v1/chat/completions
+    w = World(tmp_path / "no-v1")
+    w.set_providers([w.provider(aux.base_no_v1)])
+    run = w.run("moment", aux_llm=aux_llm)
+    _assert_moment_posted(run)
+    paths = [r["path"] for r in aux.requests]
+    assert paths == ["/v1/chat/completions"], \
+        "base_url 不带 /v1 时，aux 请求路径应为 /v1/chat/completions，实际 %r" % paths
+
+    # 10b. base_url 已带 /v1，不能重复拼成 /v1/v1/chat/completions
+    #      （独立世界：同库第二次发会被「同 kind 4h 不重发」挡住）
+    aux.requests.clear()
+    w2 = World(tmp_path / "with-v1")
+    w2.set_providers([w2.provider(aux.base)])
+    run2 = w2.run("moment", aux_llm=aux_llm)
+    _assert_moment_posted(run2)
+    paths2 = [r["path"] for r in aux.requests]
+    assert not any("/v1/v1/" in p for p in paths2), \
+        "base_url 末尾的 /v1 被重复拼接：%r" % paths2
+    assert paths2 == ["/v1/chat/completions"], \
+        "base_url 已带 /v1 时，aux 请求路径应为 /v1/chat/completions，实际 %r" % paths2
