@@ -151,8 +151,14 @@ test('带关键词的结果超过 80 条：只列前 80，末尾说明还有多�
   expect(lines[1]).toMatch(/^sfw（(80|100) 条；标签中英文都有，如 Happy、生气）$/)
   const listed = lines.filter(l => l.startsWith('#sfw:'))
   expect(listed.length).toBe(80)
-  expect(listed[0]).toBe('#sfw:1 Bulk 1')
-  expect(listed[79]).toBe('#sfw:80 Bulk 80')
+  // 同分打散：顺序可变，但列出的成员固定 —— 截断仍是「同分按 id 升序取前 80 条」，集合无重复、无遗漏
+  const first80 = Array.from({ length: 100 }, (_, j) => j + 1)
+    .map(n => `sfw:${n}`)
+    .sort()
+    .slice(0, 80)
+    .map(id => `#${id} Bulk ${id.slice('sfw:'.length)}`)
+  expect(new Set(listed)).toEqual(new Set(first80))
+  expect(listed.length).toBe(new Set(listed).size)
   expect(lines.at(-1)).toBe('（只列了前 80 条，还有 20 条；加个更具体的关键词再找）')
 })
 
