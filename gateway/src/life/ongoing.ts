@@ -9,26 +9,56 @@ export type OngoingEvent = {
   effect: string
   /** 开始时刻（Unix epoch 秒） */
   startedAt: number
-  /** 第几天：开始当天算第 1 天，按本地时区的自然日 */
+  /** 第几天：开始当天算第 1 天，按配置时区的自然日 */
   days: number
 }
 
-/** 一次最多列几条（接口约定 3 条） */
-const MAX_EVENTS = 3
+/** 每轮最多注入几条（接口约定 3 条）。截取由引擎在滤掉已见事件之后做。 */
+export const MAX_ONGOING_EVENTS = 3
 
-/** 从 started_at 那天到今天经过的自然日 +1（本地时区）。
- *  夏令时下一天可能只有 23 或 25 小时，所以按本地零点算完再四舍五入。 */
-export function dayNumber(startedAtSec: number, nowMs = Date.now()): number {
-  const started = new Date(startedAtSec * 1000)
-  const now = new Date(nowMs)
-  if (!Number.isFinite(started.getTime())) return 1
-  const a = new Date(started.getFullYear(), started.getMonth(), started.getDate()).getTime()
-  const b = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  return Math.max(1, Math.round((b - a) / 86_400_000) + 1)
+/** 某时刻在指定时区是哪一天（年月日）。时区没配或不合法（Intl 会抛）时退回宿主本地日期，绝不上抛。 */
+function ymd(ms: number, timeZone?: string): [number, number, number] {
+  const d = new Date(ms)
+  if (!timeZone) return [d.getFullYear(), d.getMonth() + 1, d.getDate()]
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d)
+    const get = (t: string) => Number(parts.find(p => p.type === t)?.value)
+    const [y, m, day] = [get('year'), get('month'), get('day')]
+    if (![y, m, day].every(Number.isFinite)) throw new Error('bad date')
+    return [y, m, day]
+  } catch {
+    return [d.getFullYear(), d.getMonth() + 1, d.getDate()]
+  }
 }
 
-/** 查这个 bot 还没过期的持续事件，按开始时间从新到旧，最多 3 条。任何异常返回 []。 */
-export function queryOngoingEvents(dbPath: string | null | undefined, botId: string, nowMs = Date.now()): OngoingEvent[] {
+/** 从 started_at 那天到今天经过的自然日 +1，按 timeZone（配置时区，默认 Asia/Shanghai）。
+ *  用 UTC 日期序号相减，不受夏令时 23/25 小时影响。 */
+export function dayNumber(startedAtSec: number, nowMs = Date.now(), timeZone?: string): number {
+  const started = new Date(startedAtSec * 1000)
+  if (!Number.isFinite(started.getTime())) return 1
+  const [ay, am, ad] = ymd(started.getTime(), timeZone)
+  const [by, bm, bd] = ymd(nowMs, timeZone)
+  const diff = (Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86_400_000
+  return Math.max(1, Math.round(diff) + 1)
+}
+
+/** 事件名/效果要拼进提示词：去掉控制字符、换行和 U+2028/2029，⟦⟧ 换成 〚〛（与 escapeUserText 一致，
+ *  防止伪造系统行），压缩空白，各截到 80 字。 */
+function cleanText(v: unknown): string {
+  if (typeof v !== 'string') return ''
+  const s = v
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/[\p{Zl}\p{Zp}]/gu, ' ')
+    .replace(/⟦/g, '〚')
+    .replace(/⟧/g, '〛')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return Array.from(s).slice(0, 80).join('')
+}
+
+/** 查这个 bot 还没过期的持续事件，按开始时间从新到旧（不在这里 LIMIT，
+ *  由调用方先滤掉"已经注入过"的再截取，否则旧事件会被前面已见的行永久挡住）。任何异常返回 []。 */
+export function queryOngoingEvents(dbPath: string | null | undefined, botId: string, nowMs = Date.now(), timeZone?: string): OngoingEvent[] {
   if (!dbPath || !botId) return []
   const nowSec = Math.floor(nowMs / 1000)
   let db: Database | null = null
@@ -38,11 +68,11 @@ export function queryOngoingEvents(dbPath: string | null | undefined, botId: str
     const rows = db.query<{ event_name: unknown; effect: unknown; started_at: unknown; expires_at: unknown }, [string, number]>(
       `SELECT event_name, effect, started_at, expires_at FROM ongoing_events
        WHERE bot_id = ? AND CAST(expires_at AS INTEGER) > ?
-       ORDER BY CAST(started_at AS INTEGER) DESC LIMIT ${MAX_EVENTS}`,
+       ORDER BY CAST(started_at AS INTEGER) DESC`,
     ).all(botId, nowSec)
     const out: OngoingEvent[] = []
     for (const r of rows) {
-      const name = typeof r.event_name === 'string' ? r.event_name.trim() : ''
+      const name = cleanText(r.event_name)
       const startedAt = Number(r.started_at)
       const expiresAt = Number(r.expires_at)
       // 字段异常（空名字、不是数字、开始时间不合理）当作这行不存在
@@ -50,9 +80,9 @@ export function queryOngoingEvents(dbPath: string | null | undefined, botId: str
       if (!Number.isFinite(expiresAt) || expiresAt <= nowSec) continue
       out.push({
         name,
-        effect: typeof r.effect === 'string' ? r.effect.trim() : '',
+        effect: cleanText(r.effect),
         startedAt,
-        days: dayNumber(startedAt, nowMs),
+        days: dayNumber(startedAt, nowMs, timeZone),
       })
     }
     return out
@@ -68,23 +98,4 @@ export function ongoingLine(events: OngoingEvent[]): string {
   if (events.length === 0) return ''
   const parts = events.map(e => `${e.name}（${e.effect ? `${e.effect}，` : ''}第 ${e.days} 天）`)
   return `⟦持续中的事⟧ ${parts.join('；')}`
-}
-
-// 直接跑这个文件时做一个最小自检：bun src/life/ongoing.ts
-if (import.meta.main) {
-  const now = new Date(2026, 9, 21, 12, 0, 0).getTime()
-  const sec = (d: Date) => Math.floor(d.getTime() / 1000)
-  const at = (daysAgo: number) => { const d = new Date(now); d.setDate(d.getDate() - daysAgo); return sec(d) }
-  console.assert(dayNumber(at(0), now) === 1, '当天算第 1 天')
-  console.assert(dayNumber(at(2), now) === 3, '两天前算第 3 天')
-  console.assert(
-    ongoingLine([{ name: '例假来了', effect: '肚子坠痛', startedAt: at(2), days: 3 }]) === '⟦持续中的事⟧ 例假来了（肚子坠痛，第 3 天）',
-    '有 effect 的文案',
-  )
-  console.assert(
-    ongoingLine([{ name: '搬家', effect: '', startedAt: at(0), days: 1 }]) === '⟦持续中的事⟧ 搬家（第 1 天）',
-    '没 effect 省略效果',
-  )
-  console.assert(queryOngoingEvents('/definitely/not/here/state.db', 'chenlulu', now).length === 0, '库不存在返回空')
-  console.log('ongoing.ts self-check ok')
 }

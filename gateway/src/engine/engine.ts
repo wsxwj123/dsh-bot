@@ -24,7 +24,7 @@ import { imageBlock, Media, rowMedia } from '../media/media'
 import { Commitments } from '../commit/service'
 import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
-import { ongoingLine, queryOngoingEvents } from '../life/ongoing'
+import { MAX_ONGOING_EVENTS, ongoingLine, queryOngoingEvents } from '../life/ongoing'
 import { LifeActions } from '../life/actions'
 import { effectiveEngine, ImageSwitch } from '../life/image_switch'
 import { effectiveVoiceModel } from '../life/voice_model'
@@ -670,8 +670,9 @@ export class Engine {
     let ongoing = 0
     if (f.life && every && this.cfg.lifeId) {
       const dbPath = process.env.BOTLIFE_STATE_DB || (this.cfg.gw.botlifeDb ? expandHome(this.cfg.gw.botlifeDb) : null)
-      const evs = queryOngoingEvents(dbPath, this.cfg.lifeId)
-      const unseen = evs.filter(e => !this.ledger.getMeta(`ongoing_seen:${chatId}:${e.name}:${e.startedAt}`))
+      const evs = queryOngoingEvents(dbPath, this.cfg.lifeId, Date.now(), this.cfg.gw.timezone)
+      // 先滤掉已经注入过的，再取最新 3 条：SQL 不 LIMIT，避免旧事件被前面已见的行永久挡住
+      const unseen = evs.filter(e => !this.ledger.getMeta(`ongoing_seen:${chatId}:${e.name}:${e.startedAt}`)).slice(0, MAX_ONGOING_EVENTS)
       if (unseen.length) {
         out.push(ongoingLine(unseen))
         for (const e of unseen) this.ledger.setMeta(`ongoing_seen:${chatId}:${e.name}:${e.startedAt}`, '1')
