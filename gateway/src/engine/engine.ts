@@ -24,6 +24,7 @@ import { imageBlock, Media, rowMedia } from '../media/media'
 import { Commitments } from '../commit/service'
 import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
+import { ongoingLine, queryOngoingEvents } from '../life/ongoing'
 import { LifeActions } from '../life/actions'
 import { effectiveEngine, ImageSwitch } from '../life/image_switch'
 import { effectiveVoiceModel } from '../life/voice_model'
@@ -665,9 +666,21 @@ export class Engine {
     } catch {}
     const situ = f.life ? situLine(this.situation.current()) : null
     if (situ && (every || fresh || this.ledger.getMeta(`situ_seen:${chatId}`) !== situ)) { out.push(situ); this.ledger.setMeta(`situ_seen:${chatId}`, situ) }
+    // 持续中的事（例假、生病这类）：只查真人私聊；功能开关 life 关着不查；同一事件同一聊天只带一次
+    let ongoing = 0
+    if (f.life && every && this.cfg.lifeId) {
+      const dbPath = process.env.BOTLIFE_STATE_DB || (this.cfg.gw.botlifeDb ? expandHome(this.cfg.gw.botlifeDb) : null)
+      const evs = queryOngoingEvents(dbPath, this.cfg.lifeId)
+      const unseen = evs.filter(e => !this.ledger.getMeta(`ongoing_seen:${chatId}:${e.name}:${e.startedAt}`))
+      if (unseen.length) {
+        out.push(ongoingLine(unseen))
+        for (const e of unseen) this.ledger.setMeta(`ongoing_seen:${chatId}:${e.name}:${e.startedAt}`, '1')
+        ongoing = unseen.length
+      }
+    }
     const late = f.life ? takeHangArchive(this.cfg.stateDir, chatId) : null
     if (late) out.push(hangText(late))
-    if (out.length) this.log.info('life.lines', { chat: chatId, relationship: out.some(l => l.startsWith('⟦关系状态')), situation: !!situ && out.includes(situ), late: !!late })
+    if (out.length) this.log.info('life.lines', { chat: chatId, relationship: out.some(l => l.startsWith('⟦关系状态')), situation: !!situ && out.includes(situ), ongoing, late: !!late })
     return out
   }
 
