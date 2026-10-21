@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import db
 import quota
 from school_calendar import IN_SESSION, TERM_LABEL_ZH
-from claude_cli import call_claude
+from claude_cli import call_aux
 
 
 VISUAL_HOBBIES = {"想画画", "想拍照", "想看老剧", "想买花", "想烤饼干",
@@ -283,7 +283,9 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
             last_activity_line=last_activity_line,
         )
         # 朋友圈用 sonnet：haiku 对 NSFW/隐性人设拒绝率高
-        raw = call_claude(prompt, timeout=60, model="sonnet").strip()
+        # 走 call_aux：aux_llm 配好则直连该供应商，否则等价于原 call_claude
+        raw = call_aux(prompt, timeout=60, model="sonnet",
+                       aux_llm=(global_cfg or {}).get("aux_llm")).strip()
         quota.record_call("moment_text", quota.MOMENT_TEXT_WEIGHT)
         text, visibility = _parse_moment_output(raw)
         if not text or len(text) > 200:
@@ -362,10 +364,10 @@ def _trigger_bot_image_gen(bot_id: str, bot_cfg: dict, moment_id: int,
 def _translate_via_cli(prompt: str, timeout: int = 60) -> dict:
     """朋友圈中文场景 → NovelAI 结构化 prompt。走 claude_cli 自动分流。
 
-    sonnet 模式 → 真 Claude haiku；deepseek 模式 → 直连 deepseek-v4-flash。
+    配了 aux_llm 时由该供应商返回 JSON；否则/失败回退原路径
+    （deepseek 模式直连 deepseek-v4-flash，sonnet 模式走真 Claude haiku）。
     """
-    from claude_cli import call_claude_json
-    return call_claude_json(prompt, timeout=timeout, model="haiku")
+    return call_aux(prompt, timeout=timeout, json_mode=True, model="haiku")
 
 
 def _gen_image_comfyui(bot_id: str, moment_id: int, text: str, visibility: str):
