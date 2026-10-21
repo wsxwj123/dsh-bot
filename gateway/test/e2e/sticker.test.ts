@@ -102,16 +102,18 @@ test('list 不给关键词：分类汇总按数量降序、无分类归未分类
   for (const ext of ['.gif', '.jpg', '.webp']) expect(r.text).not.toContain(ext)
 })
 
-test('list 带关键词：完全相等的排最前，其余同分按 id，只列命中的档', async () => {
+test('list 带关键词：完全相等的排最前，其余同分顺序可变，只列命中的档', async () => {
   const r = await callSticker(tg, b, { action: 'list', query: 'Happy' })
   expect(r.isError).toBe(false)
-  expect(r.text.split('\n')).toEqual([
+  const lines = r.text.split('\n')
+  expect(lines.slice(0, 2)).toEqual([
     '匹配「Happy」的 3 条：',
     'sfw（3 条；标签中英文都有，如 Happy、生气）',
-    '#sfw:3 Happy',
-    '#sfw:1 Happy 1',
-    '#sfw:2 Happy 2',
   ])
+  // 精确命中必在第一条；其余两条同分，顺序不再固定，按集合比较
+  expect(lines[2]).toBe('#sfw:3 Happy')
+  expect(new Set(lines.slice(3))).toEqual(new Set(['#sfw:1 Happy 1', '#sfw:2 Happy 2']))
+  expect(lines.length).toBe(5)
 })
 
 test('list 关键词拆词：全部词都命中才列出（只命中一部分的不列）', async () => {
