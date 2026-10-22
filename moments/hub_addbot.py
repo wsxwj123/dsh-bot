@@ -843,7 +843,7 @@ def set_enabled(bot_id, enabled):
     _edit_target(bot_id)                    # 400 / 404 都由放行闸给；归属先于任何文件读写判完
     if enabled and os.path.lexists(os.path.join(str(config_sources.dsh_bot_dir(bot_id)), ".moved")):
         # 适配服务 13.2：已迁到另一种底层的 bot 不许从这里启用（标记在就拦，不管内容）；停用照常
-        raise HubError(409, "moved", "这只 bot 已迁到另一种底层，请在管理台用切换底层")
+        raise HubError(409, "moved", "这只 bot 已标记迁到另一种底层，不能在这边启用；要改回来，先发一次带 moved_to: null 的停用清掉迁出标记")
     path = _dsh_yml(bot_id)
     try:
         with open(path, encoding="utf-8") as f:

@@ -200,7 +200,7 @@ ENV_TOKEN_LINE_RE = re.compile(r"^[ \t]*TELEGRAM_BOT_TOKEN[ \t]*=[ \t]*[\"']?([^
 MOVED_MARKER = ".moved"
 MOVED_TARGETS = ("pending", "claude")
 MOVED_LINE_RE = re.compile(r"^to=([a-z]+) op=(\S+) at=(\S+)\n?\Z")
-MOVED_REFUSED = "这只 bot 已迁到另一种底层，请在管理台用切换底层"
+MOVED_REFUSED = "这只 bot 已标记迁到另一种底层，不能在这边启用；要改回来，先发一次带 moved_to: null 的停用清掉迁出标记"
 #: 13.3：新建的编号规则（person 同）、purpose 的两种取值、自动挑端口的范围
 CREATE_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}\Z")
 CREATE_PURPOSES = ("new", "switch_in")
