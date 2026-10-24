@@ -1,4 +1,4 @@
-# 验收测试专用桩（只用于 tests/acceptance/life_person_key，经 PYTHONPATH 带进每个 Python 子进程）：
+# 验收测试专用桩（只用于 tests/acceptance/forced_early_initiate，经 PYTHONPATH 带进每个 Python 子进程）：
 #   1. 拒绝一切域名解析和 AF_INET / AF_INET6 的连接与发送（含 127.0.0.1），不分 TCP/UDP；
 #   2. 掷骰子可控：所有掷骰都经仓库根的 rng 模块，这里整体替换；
 #   3. 可选：记下打开过的、路径里含指定子串的文件（审计钩子，事件 open / sqlite3.connect）。
