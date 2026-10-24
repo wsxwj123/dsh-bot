@@ -19,6 +19,10 @@ from datetime import datetime, timezone
 
 COOLDOWN_MIN = 1800     # 最短间隔 30 分钟
 COOLDOWN_MAX = 86400    # 最长间隔 24 小时
+# 想念值满（积温 forced）时可以不等随机闸提前开口，但要守这三条
+EARLY_MIN_GAP = 3 * 3600   # 距上次成功投递（正常或提前）至少 3 小时
+EARLY_DAILY_MAX = 2        # 本地日期当天最多提前投递 2 次
+EARLY_RETRY = 1800         # 提前那次被 life-context 回 SKIP（或投递失败）后 30 分钟内不再提前
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_DIR = os.path.expanduser("~/.claude/dispatcher/.self-initiate-state")
@@ -81,6 +85,55 @@ def _inject(cfg: dict, chat: str, text: str, key: str) -> bool:
     return gateway_client.inject(cfg["bot_channel_path"], chat, text, "self_initiate", key, port=cfg.get("dispatcher_port") or None)
 
 
+def _read_json(path: str) -> dict:
+    """小状态文件读不到/坏了一律当空，不影响主流程。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_json(path: str, data: dict) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def _early_count(early: dict) -> int:
+    c = early.get("count")
+    return c if isinstance(c, int) and c > 0 else 0
+
+
+def _jiwen_forced(bot: str, chat: str) -> bool:
+    """积温 forced（想念值满）；关了、没状态文件、坏文件都当不满。"""
+    try:
+        import config_loader
+        from jiwen import reader as jiwen_reader
+        info = jiwen_reader.read(bot, chat, config_loader.load_global())
+        return bool(info and info.get("forced"))
+    except Exception:
+        return False
+
+
+def _early_block(bot: str, chat: str, now: int, sent: dict, early: dict) -> str:
+    """随机闸没到时能不能提前开口：能返回空串，不能返回原因。便宜的先判，积温最后读。"""
+    last = sent.get("last_sent_at")
+    if isinstance(last, (int, float)) and now - last < EARLY_MIN_GAP:
+        return "距上次投递不到 3 小时"
+    today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+    if early.get("day") == today and _early_count(early) >= EARLY_DAILY_MAX:
+        return "今天提前名额用完"
+    skip_at = early.get("last_skip_at")
+    if isinstance(skip_at, (int, float)) and now - skip_at < EARLY_RETRY:
+        return "提前那次刚被跳过"
+    if not _jiwen_forced(bot, chat):
+        return "想念值没满"
+    return ""
+
+
 def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_judge: bool = False) -> int:
     # 功能开关（约定 v1.1 5.19）："主动找你聊"关着就什么都不做，不问 life-context、不投递、不改下次机会的时间
     from moments import features as feature_switch
@@ -94,8 +147,23 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
         next_at = int(open(next_f, encoding="utf-8").read().strip())
     except Exception:
         next_at = 0
+    sent_f = os.path.join(state_dir, f"{chat}.sent.json")    # 上次成功投递时刻（正常、提前都记）
+    early_f = os.path.join(state_dir, f"{chat}.early.json")  # 提前开口记账：当天次数、上次被跳过的时刻
+    sent, early_state = _read_json(sent_f), _read_json(early_f)
+    early = False
     if not force and now < next_at:
-        print(f"skip: 还没到下次机会（还有 {(next_at - now) // 60} 分钟）", file=sys.stderr)
+        why = "手动测试不走提前" if skip_judge else _early_block(bot, chat, now, sent, early_state)
+        if why:
+            print(f"skip: 还没到下次机会（还有 {(next_at - now) // 60} 分钟；不提前：{why}）", file=sys.stderr)
+            return 0
+        early = True
+        print("想念值满，随机闸没到但提前问一次 life-context", file=sys.stderr)
+
+    def early_skipped(why: str) -> int:
+        # 提前那次没成：不动 .next（随机闸原定时间不被推后），记下时刻，30 分钟内不再提前
+        early_state["last_skip_at"] = now
+        _write_json(early_f, early_state)
+        print(f"{why}（提前那次，下次机会时间不变）", file=sys.stderr)
         return 0
 
     def schedule(sec: int, why: str) -> int:
@@ -114,9 +182,12 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
             return 1
         print("已投递给网关（测试，跳过了判断，不改下次机会的时间）" if ok else "投递被拒", file=sys.stderr)
         return 0 if ok else 1
+    # 提前那次带标记，让 life-context 照跑硬规则预筛、只跳过判官；正常路径不传 env（与原来一致）
+    extra = {"env": {**os.environ, "SELF_INITIATE_EARLY": "1"}} if early else {}
     try:
         r = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "life-context.py"), bot, chat],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, cwd=REPO_ROOT)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, cwd=REPO_ROOT,
+                           **extra)
         out = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 and r.stdout.strip() else {"action": "FALLBACK"}
     except Exception as e:
         print(f"life-context error {type(e).__name__} → 用 FALLBACK 文本", file=sys.stderr)
@@ -124,6 +195,8 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
     action = out.get("action")
     if action == "SKIP":
         reason = str(out.get("reason", ""))
+        if early:
+            return early_skipped(f"skip: {reason}")
         wake = _next_wake(bot) if ("sleep" in reason or "睡" in reason) and "用户" not in reason else None
         return schedule(retry_after(reason, now, wake), f"skip: {reason}")
     if action == "TEXT":
@@ -131,9 +204,19 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
     try:
         ok = _inject(cfg, chat, text, f"{chat}:{now}")
     except Exception as e:
-        return schedule(600, f"投递失败（网关没在跑？）：{type(e).__name__}")
+        why = f"投递失败（网关没在跑？）：{type(e).__name__}"
+        return early_skipped(why) if early else schedule(600, why)
     if not ok:
-        return schedule(600, "投递被拒")
+        return early_skipped("投递被拒") if early else schedule(600, "投递被拒")
+    _write_json(sent_f, {"last_sent_at": now})
+    if early:
+        # 提前投出去了：记一次当天名额，随机闸原定时间不变（到点照常走正常流程）
+        today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+        count = _early_count(early_state) if early_state.get("day") == today else 0
+        early_state.update(day=today, count=count + 1)
+        _write_json(early_f, early_state)
+        print(f"已提前投递给网关（今天第 {count + 1} 次提前），下次机会时间不变", file=sys.stderr)
+        return 0
     # 真正投出去了：下一次机会按随机间隔（开口时机不可预测，像活人）
     return schedule(random.randint(COOLDOWN_MIN, COOLDOWN_MAX), "已投递给网关")
 
