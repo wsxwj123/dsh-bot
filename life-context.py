@@ -178,7 +178,10 @@ def main():
         jiwen_forced = False
 
     # ─── 4. 硬规则预筛（省 LLM 配额）────────────────────
-    if jiwen_forced:
+    # 随机闸没到、因想念值满被提前叫起（SELF_INITIATE_EARLY=1）：硬规则照跑，只跳过判官，
+    # 免得"提前"这条路绕开静默期/忙碌/刚说过相同话题这些底线
+    early = os.environ.get("SELF_INITIATE_EARLY") == "1"
+    if jiwen_forced and not early:
         skip_reason = ""  # 强制开口，跳过 prefilter
         sys.stderr.write(f"[{bot_id}] jiwen forced：bypass prefilter\n")
     else:
