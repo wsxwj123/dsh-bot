@@ -1,0 +1,17 @@
+#!/bin/sh
+# 假 LLM（验收测试专用）：从 stdin 读提示词，按内容回固定答案，不联网。
+#   含 FAILME                  -> 报错退出（模拟这一次调用失败）
+#   含"短期痴迷"               -> 回一个痴迷数组
+#   含"严格只输出 JSON"        -> 回判断结果 JSON（action 取 $FAKE_ACTION，默认 dm）
+#   其余（朋友圈文案）         -> 回空；设了 $FAKE_FAIL_TEXT 时报错退出
+# 设了 $FAKE_LOG 时，每次调用往里记一行：提示词含 skip|dm 的记 judge，其余记 other。
+p=$(cat)
+if [ -n "$FAKE_LOG" ]; then
+  case "$p" in *'skip|dm'*) echo judge >> "$FAKE_LOG";; *) echo other >> "$FAKE_LOG";; esac
+fi
+case "$p" in
+  *FAILME*) echo boom >&2; exit 1;;
+  *短期痴迷*) echo '[{"name":"测试痴迷","effect":"测试效果","theme":"剧"}]';;
+  *'严格只输出 JSON'*) echo "{\"action\":\"${FAKE_ACTION:-dm}\",\"reason\":\"测试\",\"new_sig\":\"测试签名\"}";;
+  *) if [ -n "$FAKE_FAIL_TEXT" ]; then echo textfail >&2; exit 1; fi; echo '';;
+esac
