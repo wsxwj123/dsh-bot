@@ -196,24 +196,37 @@ def _off_limits(path, user_home, dsh_home, forbidden):
     return _within(path, dsh_home) and path != os.path.join(dsh_home, "life")
 
 
-def allowed_dir():
-    """允许目录 ``(写法, 真实路径)``；没有允许目录回 None（所有 bot 都按情形 O）。每次请求现读环境变量。"""
+def _forbidden():
+    """2.1 的判据：``(用户家目录, 本系统家目录, 禁区)``，都是规范过的绝对路径写法。"""
     dsh_home = os.path.normpath(os.path.abspath(str(config_sources.dsh_home())))
-    raw = (os.environ.get("DSH_CONSOLE_LIFE_DIR") or "").strip()
-    written = os.path.expanduser(raw) if raw else os.path.join(dsh_home, "life")
-    if not os.path.isabs(written):
-        return None
-    written = os.path.normpath(written)
     user_home = os.path.normpath(os.path.abspath(os.path.expanduser("~")))
     forbidden = [os.path.join(user_home, "claudebotlife"), os.path.join(user_home, ".claude"),
                  str(config_sources.legacy_dir())]
     configs = config_sources.dsh_dir()
     if configs is not None:
         forbidden.append(str(configs))
-    forbidden = [os.path.normpath(os.path.abspath(p)) for p in forbidden]
-    # 先按字符串判：写法上已经落在禁区里的，不再碰文件系统
-    if _off_limits(written, user_home, dsh_home, forbidden):
+    return user_home, dsh_home, [os.path.normpath(os.path.abspath(p)) for p in forbidden]
+
+
+def planned_dir():
+    """允许目录的写法，只按字符串判（不碰文件系统，目录还没建出来也回它）；写法本身不合格回 None。
+
+    给新建 bot 用：目录不在时先拿这个写法建出来（0700），建完再用 ``allowed_dir`` 复核真实路径。"""
+    user_home, dsh_home, forbidden = _forbidden()
+    raw = (os.environ.get("DSH_CONSOLE_LIFE_DIR") or "").strip()
+    written = os.path.expanduser(raw) if raw else os.path.join(dsh_home, "life")
+    if not os.path.isabs(written):
         return None
+    written = os.path.normpath(written)
+    return None if _off_limits(written, user_home, dsh_home, forbidden) else written
+
+
+def allowed_dir():
+    """允许目录 ``(写法, 真实路径)``；没有允许目录回 None（所有 bot 都按情形 O）。每次请求现读环境变量。"""
+    written = planned_dir()
+    if written is None:
+        return None
+    user_home, dsh_home, forbidden = _forbidden()
     if not os.path.isdir(written):
         return None
     # 再拿真实路径复核：软链绕进禁区的同样不算（禁区本身是软链的，按它指向的真实位置比）
