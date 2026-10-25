@@ -114,12 +114,29 @@ def _jiwen_forced(bot: str, chat: str) -> bool:
         from jiwen import reader as jiwen_reader
         info = jiwen_reader.read(bot, chat, config_loader.load_global())
         return bool(info and info.get("forced"))
-    except Exception:
+    except Exception as e:
+        print(f"积温读取失败 {type(e).__name__}", file=sys.stderr)
         return False
 
 
-def _early_block(bot: str, chat: str, now: int, sent: dict, early: dict) -> str:
-    """随机闸没到时能不能提前开口：能返回空串，不能返回原因。便宜的先判，积温最后读。"""
+def _in_sleep(bot: str, cfg: dict, now: int) -> bool:
+    """睡眠时段以 load_bot 合并后的配置为准，取不到就用传入的 cfg；判定本身出错当不在睡。"""
+    import config_loader
+    try:
+        bot_cfg = config_loader.load_bot(bot)
+    except Exception:
+        bot_cfg = cfg or {}
+    try:
+        return config_loader.in_sleep_hours(bot_cfg, datetime.fromtimestamp(now))
+    except Exception as e:
+        print(f"睡眠时段判定失败 {type(e).__name__}", file=sys.stderr)
+        return False
+
+
+def _early_block(bot: str, chat: str, now: int, sent: dict, early: dict, cfg: dict | None = None) -> str:
+    """随机闸没到时能不能提前开口：能返回空串，不能返回原因。睡眠时段最先判，积温最后读。"""
+    if _in_sleep(bot, cfg or {}, now):
+        return "在睡眠时段"
     last = sent.get("last_sent_at")
     if isinstance(last, (int, float)) and now - last < EARLY_MIN_GAP:
         return "距上次投递不到 3 小时"
@@ -152,7 +169,7 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
     sent, early_state = _read_json(sent_f), _read_json(early_f)
     early = False
     if not force and now < next_at:
-        why = "手动测试不走提前" if skip_judge else _early_block(bot, chat, now, sent, early_state)
+        why = "手动测试不走提前" if skip_judge else _early_block(bot, chat, now, sent, early_state, cfg)
         if why:
             print(f"skip: 还没到下次机会（还有 {(next_at - now) // 60} 分钟；不提前：{why}）", file=sys.stderr)
             return 0
@@ -192,11 +209,12 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
     except Exception as e:
         print(f"life-context error {type(e).__name__} → 用 FALLBACK 文本", file=sys.stderr)
         out = {"action": "FALLBACK"}
-    action = out.get("action")
+    action = out.get("action") if isinstance(out, dict) else "FALLBACK"
+    if early and action != "TEXT":
+        # 提前那次只认 TEXT：FALLBACK、出错、空输出、坏 JSON、超时都不投递（只有正常路径才用默认文本兜底）
+        return early_skipped(f"skip: life-context 回 {action}" + (f"（{out.get('reason', '')}）" if isinstance(out, dict) and out.get("reason") else ""))
     if action == "SKIP":
         reason = str(out.get("reason", ""))
-        if early:
-            return early_skipped(f"skip: {reason}")
         wake = _next_wake(bot) if ("sleep" in reason or "睡" in reason) and "用户" not in reason else None
         return schedule(retry_after(reason, now, wake), f"skip: {reason}")
     if action == "TEXT":
@@ -208,7 +226,10 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
         return early_skipped(why) if early else schedule(600, why)
     if not ok:
         return early_skipped("投递被拒") if early else schedule(600, "投递被拒")
-    _write_json(sent_f, {"last_sent_at": now})
+    try:  # 记上次投递时刻失败不能挡住后面写 .next / 记名额，否则会连发
+        _write_json(sent_f, {"last_sent_at": now})
+    except Exception as e:
+        print(f"记上次投递时刻失败 {type(e).__name__}", file=sys.stderr)
     if early:
         # 提前投出去了：记一次当天名额，随机闸原定时间不变（到点照常走正常流程）
         today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
