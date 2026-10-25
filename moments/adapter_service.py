@@ -2428,10 +2428,14 @@ def _create_yml(fields, bots):
     while namespace in used:
         namespace = str(uuid.uuid4())
     target = os.path.abspath(os.path.join(str(config_sources.dsh_bot_dir(fields["bot_id"])), "channel"))
-    text = hub_addbot._render_yml(fields, target, namespace) + _create_extra(fields)
+    life = hub_addbot.life_target(fields["bot_id"])     # 有就写 life_config，lay_down 照它生成生活设定文件
+    text = hub_addbot._render_yml(fields, target, namespace, life and life[1]) + _create_extra(fields)
+    expect = {"id": fields["bot_id"], "display_name": fields["display_name"],
+              "bot_channel_path": target, "namespace_uuid": namespace}
+    if life:
+        expect["life_config"] = life[1]
     try:
-        hub_addbot._readback(text, {"id": fields["bot_id"], "display_name": fields["display_name"],
-                                    "bot_channel_path": target, "namespace_uuid": namespace})
+        hub_addbot._readback(text, expect)
     except HubError as e:
         raise _hub_invalid(e) from None
     return text
