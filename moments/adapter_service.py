@@ -2437,14 +2437,15 @@ def _create_yml(fields, bots):
     return text
 
 
-def _undo_create(bot_id, seams):
-    """新建在装启动项这一步没成：两个单元都 bootout，再把这次写的东西（配置、bot 目录、启动项文件）整份
-    移走，同删除（有废纸篓移进废纸篓，没有直接删）。撤的过程里再出错只记类名，不盖掉原来那个错。"""
+def _undo_create(bot_id, seams, life=None):
+    """新建在装启动项这一步没成：两个单元都 bootout，再把这次写的东西（配置、bot 目录、启动项文件，
+    ``life`` 是 ``lay_down`` 这次生成的生活设定文件）整份移走，同删除（有废纸篓移进废纸篓，没有直接删）。
+    撤的过程里再出错只记类名，不盖掉原来那个错。"""
     for timer in (False, True):
         with contextlib.suppress(Exception):
             bot_launchd.bootout(bot_id, seams, timer=timer)
     try:
-        _discard(bot_id, _bot_items(bot_id, seams))
+        _discard(bot_id, _bot_items(bot_id, seams, life))
     except Exception as e:                  # noqa: BLE001
         _log.error("create rollback failed: %s", type(e).__name__)
 
@@ -2489,6 +2490,9 @@ def _create_locked(fields, bots, seams, deadline):
     bot_id = fields["bot_id"]
     if any(os.path.lexists(path) for path, _rel in _bot_slots(bot_id, seams)):
         raise Refuse(409, "exists", "已经有一只叫 %s 的 bot 了（配置、bot 目录或启动项还在）" % bot_id)
+    life = hub_addbot.life_target(bot_id)   # bot_id 已过 BOT_ID_RE（_create_fields）才拼路径
+    if life is not None and os.path.lexists(life[1]):      # 软链也算占用，什么都不写、原文件不动
+        raise Refuse(409, "exists", hub_addbot.LIFE_TAKEN % bot_id)
     fields["port"] = _create_port(fields["port"], bot_id, bots)
     fields["features_final"], fields["features_skipped"] = _create_features(fields)
     fields["yml_text"] = _create_yml(fields, bots)
@@ -2518,7 +2522,7 @@ def _create_locked(fields, bots, seams, deadline):
         fields["skills_placed"] = _create_skills(fields)
     except Exception as e:                  # noqa: BLE001  技能没放成整只撤回；异常消息可能带路径，只记类名
         _log.error("create skills failed: %s", type(e).__name__)
-        _undo_create(bot_id, seams)
+        _undo_create(bot_id, seams, fields.get("life_file"))
         raise Refuse(500, "internal", "放技能文件失败，已撤回这次写的文件") from None
     try:
         # 13.3：enabled 为 false 时启动项文件按停用收起（只写成 .plist.disabled），不装载、不启动
@@ -2527,7 +2531,7 @@ def _create_locked(fields, bots, seams, deadline):
     except Exception:                       # noqa: BLE001
         step = {}
     if step.get("state") != "done":
-        _undo_create(bot_id, seams)
+        _undo_create(bot_id, seams, fields.get("life_file"))
         if step.get("detail") == "timeout" or time.monotonic() >= deadline - UNDO_RESERVE:
             raise Refuse(503, "unavailable", "装启动项没在时限内做完，已撤回这次写的文件与启动项")
         raise Refuse(503, "unavailable", "装启动项失败，已撤回这次写的文件与启动项")
