@@ -141,16 +141,21 @@ def test_09_提前回SKIP后_随机闸原定时刻不变_到点走正常流程�
     assert len(r2.injects) == 1
 
 
-def test_10_提前投递成功后_随机闸原定时刻不变_到点走正常流程不带提前标记(early):
-    early.normal_delivery(T0)                                   # 闸 = T0 + 24h
+def test_10_提前投递成功后_随机闸下次机会不早于E加3小时(early):
+    early.normal_delivery(T0, interval=5 * HOUR)                # 原定随机闸 = T0 + 5h
     set_connection(early.root, FULL)
-    r1 = early.run(T0 + 4 * HOUR, TEXT)
+    e = T0 + 4 * HOUR                                           # 提前投递时刻 E；原定闸落在 E + 1h，即 E 之后不到 3 小时
+    r1 = early.run(e, TEXT)
+    assert r1.rc == 0
     assert_early_call(r1)
     assert len(r1.injects) == 1
-    r2 = early.run(T0 + DAY + 1, TEXT)                          # 原定时刻之后（若提前投递重抽了闸，这里还没到点）
+    r2 = early.run(e + 1 * HOUR + 1, TEXT)                      # 原定时刻之后、E+3h 之前：闸被推迟，仍未到
     assert r2.rc == 0
-    assert_normal_call(r2)
-    assert len(r2.injects) == 1
+    assert_no_call(r2)
+    r3 = early.run(e + 3 * HOUR + 1, TEXT)                      # E+3h 之后：走正常流程
+    assert r3.rc == 0
+    assert_normal_call(r3)
+    assert len(r3.injects) == 1
 
 
 def test_11_功能开关关着_想念满_闸未到_不调_不投递(early):
