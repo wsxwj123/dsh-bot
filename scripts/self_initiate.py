@@ -239,6 +239,16 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
         return schedule(retry_after(reason, now, wake), f"skip: {reason}")
     if action == "TEXT":
         text = "⟦系统·主动开口⟧ " + str(out.get("text", ""))[:4000]
+    if early:
+        # 提前那次先记账再投递：记账写不进去就不发。投出去之后才写，一旦写失败，
+        # 3 小时间隔和每日名额就守不住，会连发；先记了再投递失败，最多保守多等 3 小时
+        today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+        count = _early_count(early_state) if early_state.get("day") == today else 0
+        if not _save(sent_f, {"last_sent_at": now}, "上次投递时刻"):
+            return early_skipped("记账写不进去，不提前")
+        early_state.update(day=today, count=count + 1)
+        if not _save(early_f, early_state, "提前记账"):
+            return early_skipped("记账写不进去，不提前")
     try:
         ok = _inject(cfg, chat, text, f"{chat}:{now}")
     except Exception as e:
@@ -246,20 +256,12 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
         return early_skipped(why) if early else schedule(600, why)
     if not ok:
         return early_skipped("投递被拒") if early else schedule(600, "投递被拒")
-    # 记上次投递时刻失败不能挡住后面写 .next / 记名额，否则会连发
-    sent_ok = _save(sent_f, {"last_sent_at": now}, "上次投递时刻")
     if early:
-        # 提前投出去了：记一次当天名额，随机闸原定时间不变（到点照常走正常流程）
-        today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
-        count = _early_count(early_state) if early_state.get("day") == today else 0
-        early_state.update(day=today, count=count + 1)
-        early_ok = _save(early_f, early_state, "提前记账")
-        if not (sent_ok and early_ok):
-            # 记账没写进去，3 小时间隔和每天名额就守不住：把下次机会推到至少 3 小时后保守限速。
-            # 取 max 是为了不把原定更晚的随机闸提前
-            return schedule(max(next_at, now + EARLY_MIN_GAP) - now, "已提前投递但记账没写进去，保守限速")
-        print(f"已提前投递给网关（今天第 {count + 1} 次提前），下次机会时间不变", file=sys.stderr)
-        return 0
+        # 提前投出去了（账已先记好）：随机闸下次机会不早于 3 小时后，让 3 小时间隔对正常那条路也生效；
+        # 取 max 不把原定更晚的随机闸提前
+        return schedule(max(next_at, now + EARLY_MIN_GAP) - now, f"已提前投递给网关（今天第 {count + 1} 次提前）")
+    # 记上次投递时刻失败只记日志，不能挡住后面写 .next
+    _save(sent_f, {"last_sent_at": now}, "上次投递时刻")
     # 真正投出去了：下一次机会按随机间隔（开口时机不可预测，像活人）
     return schedule(random.randint(COOLDOWN_MIN, COOLDOWN_MAX), "已投递给网关")
 
