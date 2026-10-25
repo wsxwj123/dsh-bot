@@ -36,7 +36,7 @@ import requests
 import yaml
 from flask import current_app
 
-from moments import bots_client, config_sources, hub_auth, redact
+from moments import bots_client, config_sources, hub_auth, life_settings, redact
 from moments.provider_model import HubError
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -424,6 +424,33 @@ def _check_free(bot_id):
     if home is not None and _bot_home_taken(home):
         raise HubError(409, "bot_exists",
                        "新系统里已经有一个叫 %s 的 bot 家了，换个名字或先手动清理" % bot_id)
+    life = life_target(bot_id)
+    if life is not None and os.path.lexists(life[1]):
+        raise HubError(409, "bot_exists", LIFE_TAKEN % bot_id)
+
+
+#: 生活设定目录里已有同名文件时的那一句（新建页 409 bot_exists、适配服务 409 exists 共用）
+LIFE_TAKEN = "生活设定目录里已有同名文件 %s.yml，没有新建；换个名字或先手动清理"
+
+
+def life_target(bot_id):
+    """新 bot 的生活设定文件该落在哪：``(允许目录写法, <允许目录>/<bot_id>.yml)``；允许目录的写法本身不合格
+    （落在禁区里、不是绝对路径）回 None，这只就不生成生活设定文件（同改动前）。
+
+    ``bot_id`` 必须已经过编号字符规则（新建页 ``BOT_ID_RE`` / 适配服务 ``BOT_ID_RE``，都不含路径分隔符与
+    ``..``），这里只拼路径不再校验。查重（含软链：``lexists``）与落盘共用这一处，保证查的就是要写的那个位置。
+    """
+    folder = life_settings.planned_dir()
+    return None if folder is None else (folder, os.path.join(folder, bot_id + ".yml"))
+
+
+def _life_text(fields):
+    """最小的合法生活设定：注释一行 + ``id``、``display_name``，其余字段一律不写（读出来都是空/缺省）。
+    ``id`` 是这只的 person（适配服务新建给了 person 时），没有就是编号。"""
+    return ("# 生活设定：新建 bot 时生成的最小版本，没写的字段都按缺省\n"
+            "id: %s\n"
+            "display_name: %s\n"
+            % (_yaml_str(fields.get("person") or fields["bot_id"]), _yaml_str(fields["display_name"])))
 
 
 def _bot_home_taken(home):
@@ -756,9 +783,20 @@ def lay_down(fields, port_check=None):
     # 要落盘的配置全文：A 段核对过的那份（`_validate` 放进来的）。没经 A 段直接调到这里的，
     # 在建任何文件之前现渲染、现核对 —— 没读回来核对过的文本不许落盘。
     yml_text = fields.get("yml_text") or _checked_yml(fields)
+    # 生活设定文件（两条新建路径都经这里）：配置里多一行 life_config 指过去，同样先读回核对再落盘。
+    # 查重在调用方的 409 阶段已做过，这里再看一眼只防并发；真正挡同名的是下面 O_EXCL 建文件。
+    life = life_target(bot_id)
+    if life is not None:
+        if os.path.lexists(life[1]):
+            raise HubError(409, "bot_exists", LIFE_TAKEN % bot_id)
+        plain_yml = yml_text
+        yml_text += "life_config: %s\n" % _yaml_str(life[1])
+        _readback(yml_text, {"life_config": life[1]})
     # 这两级目录可能本来就是有的（新系统早就在跑）；只记下"哪些是这次才建出来的"，
     # 失败回滚时把它们摘掉 —— 否则一次失败的创建会在新系统家目录里留一个空的 bots/。
     seeded = [d for d in (str(cfg_root), os.path.dirname(home)) if not os.path.isdir(d)]
+    if life is not None and not os.path.isdir(life[0]):
+        seeded.append(life[0])
     os.makedirs(str(cfg_root), exist_ok=True)
     os.makedirs(os.path.dirname(home), exist_ok=True)   # <DSH_BOT_HOME>/bots
     yml = os.path.join(str(cfg_root), bot_id + ".yml")
@@ -799,6 +837,20 @@ def lay_down(fields, port_check=None):
             made.append((_MADE_HOME, home))
             made.append((_MADE_TREE, channel))
         _fix_modes(home)
+        if life is not None:
+            os.makedirs(life[0], mode=0o700, exist_ok=True)
+            if life[0] in seeded:
+                os.chmod(life[0], 0o700)          # 这次才建的目录：不受 umask 影响，就是 0700
+            allowed = life_settings.allowed_dir()
+            if allowed is None or allowed[0] != life[0]:
+                # 真实路径绕进了禁区（目录或上级是软链）：不生成，配置也不写 life_config（同改动前）
+                yml_text = plain_yml
+                if life[0] in seeded:
+                    _rmdir(life[0])
+            else:
+                _create_file(life[1], _life_text(fields))      # 0600，O_EXCL：同名不覆盖
+                made.append((_MADE_FILE, life[1]))
+                fields["life_file"] = life[1]     # 适配服务的整单撤回（_undo_create）靠它一并移走
         _create_file(yml, yml_text)               # 没写完它自己删，不会留下空配置
         made.append((_MADE_FILE, yml))
         if port_check is None:
