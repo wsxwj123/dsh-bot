@@ -102,6 +102,16 @@ def _write_json(path: str, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def _save(path: str, data: dict, what: str) -> bool:
+    """状态写入一律不抛：失败往 stderr 留一行带异常类名的说明，返回 False 让调用方决定怎么兜底。"""
+    try:
+        _write_json(path, data)
+        return True
+    except Exception as e:
+        print(f"{what}写入失败 {type(e).__name__}", file=sys.stderr)
+        return False
+
+
 def _early_count(early: dict) -> int:
     c = early.get("count")
     return c if isinstance(c, int) and c > 0 else 0
@@ -133,12 +143,19 @@ def _in_sleep(bot: str, cfg: dict, now: int) -> bool:
         return False
 
 
-def _early_block(bot: str, chat: str, now: int, sent: dict, early: dict, cfg: dict | None = None) -> str:
+def _early_block(bot: str, chat: str, now: int, sent: dict, early: dict, cfg: dict | None = None,
+                 sent_f: str | None = None) -> str:
     """随机闸没到时能不能提前开口：能返回空串，不能返回原因。睡眠时段最先判，积温最后读。"""
     if _in_sleep(bot, cfg or {}, now):
         return "在睡眠时段"
     last = sent.get("last_sent_at")
-    if isinstance(last, (int, float)) and now - last < EARLY_MIN_GAP:
+    if not isinstance(last, (int, float)) or isinstance(last, bool):
+        # 没有上次投递记录（刚上线、记录丢了、新 bot）：先把现在记成上次投递，3 小时后才可能提前，
+        # 免得记录一丢就绕开 3 小时间隔
+        if sent_f:
+            _save(sent_f, {"last_sent_at": now}, "上次投递时刻")
+        return "没有上次投递记录，先记下"
+    if now - last < EARLY_MIN_GAP:
         return "距上次投递不到 3 小时"
     today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
     if early.get("day") == today and _early_count(early) >= EARLY_DAILY_MAX:
@@ -169,7 +186,7 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
     sent, early_state = _read_json(sent_f), _read_json(early_f)
     early = False
     if not force and now < next_at:
-        why = "手动测试不走提前" if skip_judge else _early_block(bot, chat, now, sent, early_state, cfg)
+        why = "手动测试不走提前" if skip_judge else _early_block(bot, chat, now, sent, early_state, cfg, sent_f)
         if why:
             print(f"skip: 还没到下次机会（还有 {(next_at - now) // 60} 分钟；不提前：{why}）", file=sys.stderr)
             return 0
@@ -179,13 +196,16 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
     def early_skipped(why: str) -> int:
         # 提前那次没成：不动 .next（随机闸原定时间不被推后），记下时刻，30 分钟内不再提前
         early_state["last_skip_at"] = now
-        _write_json(early_f, early_state)
+        _save(early_f, early_state, "提前记账")
         print(f"{why}（提前那次，下次机会时间不变）", file=sys.stderr)
         return 0
 
     def schedule(sec: int, why: str) -> int:
-        with open(next_f, "w", encoding="utf-8") as f:
-            f.write(str(now + sec))
+        try:
+            with open(next_f, "w", encoding="utf-8") as f:
+                f.write(str(now + sec))
+        except Exception as e:
+            print(f"下次机会时间写入失败 {type(e).__name__}", file=sys.stderr)
         print(f"{why}；下次机会在 {sec // 60} 分钟后", file=sys.stderr)
         return 0
 
@@ -226,16 +246,18 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
         return early_skipped(why) if early else schedule(600, why)
     if not ok:
         return early_skipped("投递被拒") if early else schedule(600, "投递被拒")
-    try:  # 记上次投递时刻失败不能挡住后面写 .next / 记名额，否则会连发
-        _write_json(sent_f, {"last_sent_at": now})
-    except Exception as e:
-        print(f"记上次投递时刻失败 {type(e).__name__}", file=sys.stderr)
+    # 记上次投递时刻失败不能挡住后面写 .next / 记名额，否则会连发
+    sent_ok = _save(sent_f, {"last_sent_at": now}, "上次投递时刻")
     if early:
         # 提前投出去了：记一次当天名额，随机闸原定时间不变（到点照常走正常流程）
         today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
         count = _early_count(early_state) if early_state.get("day") == today else 0
         early_state.update(day=today, count=count + 1)
-        _write_json(early_f, early_state)
+        early_ok = _save(early_f, early_state, "提前记账")
+        if not (sent_ok and early_ok):
+            # 记账没写进去，3 小时间隔和每天名额就守不住：把下次机会推到至少 3 小时后保守限速。
+            # 取 max 是为了不把原定更晚的随机闸提前
+            return schedule(max(next_at, now + EARLY_MIN_GAP) - now, "已提前投递但记账没写进去，保守限速")
         print(f"已提前投递给网关（今天第 {count + 1} 次提前），下次机会时间不变", file=sys.stderr)
         return 0
     # 真正投出去了：下一次机会按随机间隔（开口时机不可预测，像活人）
