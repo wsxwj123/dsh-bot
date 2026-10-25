@@ -434,14 +434,33 @@ LIFE_TAKEN = "生活设定目录里已有同名文件 %s.yml，没有新建；�
 
 
 def life_target(bot_id):
-    """新 bot 的生活设定文件该落在哪：``(允许目录写法, <允许目录>/<bot_id>.yml)``；允许目录的写法本身不合格
-    （落在禁区里、不是绝对路径）回 None，这只就不生成生活设定文件（同改动前）。
+    """新 bot 的生活设定文件该落在哪：``(允许目录写法, <允许目录>/<bot_id>.yml)``。允许目录的写法本身不合格
+    （落在禁区里、不是绝对路径），或目录已在但真实路径不合格（软链绕进禁区），回 None：这只就不生成生活设定
+    文件、配置不写 life_config（同改动前）。目录还不在的，由 ``lay_down`` 建出来后再复核一次。
 
     ``bot_id`` 必须已经过编号字符规则（新建页 ``BOT_ID_RE`` / 适配服务 ``BOT_ID_RE``，都不含路径分隔符与
     ``..``），这里只拼路径不再校验。查重（含软链：``lexists``）与落盘共用这一处，保证查的就是要写的那个位置。
     """
     folder = life_settings.planned_dir()
-    return None if folder is None else (folder, os.path.join(folder, bot_id + ".yml"))
+    if folder is None:
+        return None
+    if os.path.lexists(folder):
+        allowed = life_settings.allowed_dir()
+        if allowed is None or allowed[0] != folder:
+            return None
+    return folder, os.path.join(folder, bot_id + ".yml")
+
+
+def _planned_life(bot_id, yml_text):
+    """``lay_down`` 要生成的生活设定文件：核对过的配置全文里 ``life_config`` 写的那个 → ``(目录, 路径)``；
+    没写回 None。写了却不是 ``life_target`` 此刻给的那个位置（渲染之后环境变了）就拒绝，不往别处写。"""
+    written = (yaml.safe_load(yml_text) or {}).get("life_config")
+    if written is None:
+        return None
+    life = life_target(bot_id)
+    if life is None or written != life[1]:
+        raise HubError(500, "internal", "生活设定目录在校验之后变了，没有新建")
+    return life
 
 
 def _life_text(fields):
@@ -726,7 +745,7 @@ def _new_namespace():
     return ns
 
 
-def _render_yml(fields, target, namespace=None):
+def _render_yml(fields, target, namespace=None, life_config=None):
     """`configs/<bot>.yml`：**不含 token**（F5），只有注册表要的那几个键。
 
     `id` 与 `display_name` 同一种写法，带双引号（§7）：`null`、`true`、`no`、`on` 这类名字
@@ -735,8 +754,10 @@ def _render_yml(fields, target, namespace=None):
     `bot_channel_path` 写**绝对路径**（§7、§14）。此前能收进 `~` 就收成 `~/…`，而管理台里
     有几处拿到值不展开就去拼路径，在工作目录下建出一棵名字叫 `~` 的目录。读的一侧已经
     统一展开（`config_sources.channel_dir`），写的一侧也不再产出那个形状。
+
+    ``life_config``（``life_target`` 给的生活设定文件绝对路径）给了才写一行，``lay_down`` 照它生成那个文件。
     """
-    return ("id: %s\n"
+    text = ("id: %s\n"
             "display_name: %s\n"
             "bot_channel_path: %s\n"
             "chat_id: %d\n"
@@ -745,6 +766,9 @@ def _render_yml(fields, target, namespace=None):
             % (_yaml_str(fields["bot_id"]), _yaml_str(fields["display_name"]),
                _yaml_str(os.path.abspath(target)),
                fields["chat_id"], fields["port"], namespace or _new_namespace()))
+    if life_config:
+        text += "life_config: %s\n" % _yaml_str(life_config)
+    return text
 
 
 def _checked_yml(fields):
@@ -755,9 +779,13 @@ def _checked_yml(fields):
     """
     target = os.path.join(str(config_sources.dsh_bot_dir(fields["bot_id"])), "channel")
     namespace = _new_namespace()
-    text = _render_yml(fields, target, namespace)
-    _readback(text, {"id": fields["bot_id"], "display_name": fields["display_name"],
-                     "bot_channel_path": os.path.abspath(target), "namespace_uuid": namespace})
+    life = life_target(fields["bot_id"])
+    text = _render_yml(fields, target, namespace, life and life[1])
+    expect = {"id": fields["bot_id"], "display_name": fields["display_name"],
+              "bot_channel_path": os.path.abspath(target), "namespace_uuid": namespace}
+    if life:
+        expect["life_config"] = life[1]
+    _readback(text, expect)
     return text
 
 
@@ -783,15 +811,11 @@ def lay_down(fields, port_check=None):
     # 要落盘的配置全文：A 段核对过的那份（`_validate` 放进来的）。没经 A 段直接调到这里的，
     # 在建任何文件之前现渲染、现核对 —— 没读回来核对过的文本不许落盘。
     yml_text = fields.get("yml_text") or _checked_yml(fields)
-    # 生活设定文件（两条新建路径都经这里）：配置里多一行 life_config 指过去，同样先读回核对再落盘。
+    # 生活设定文件（两条新建路径都经这里）：核对过的配置里写了 life_config 就照它生成那个文件，没写就不生成。
     # 查重在调用方的 409 阶段已做过，这里再看一眼只防并发；真正挡同名的是下面 O_EXCL 建文件。
-    life = life_target(bot_id)
-    if life is not None:
-        if os.path.lexists(life[1]):
-            raise HubError(409, "bot_exists", LIFE_TAKEN % bot_id)
-        plain_yml = yml_text
-        yml_text += "life_config: %s\n" % _yaml_str(life[1])
-        _readback(yml_text, {"life_config": life[1]})
+    life = _planned_life(bot_id, yml_text)
+    if life is not None and os.path.lexists(life[1]):
+        raise HubError(409, "bot_exists", LIFE_TAKEN % bot_id)
     # 这两级目录可能本来就是有的（新系统早就在跑）；只记下"哪些是这次才建出来的"，
     # 失败回滚时把它们摘掉 —— 否则一次失败的创建会在新系统家目录里留一个空的 bots/。
     seeded = [d for d in (str(cfg_root), os.path.dirname(home)) if not os.path.isdir(d)]
@@ -843,14 +867,11 @@ def lay_down(fields, port_check=None):
                 os.chmod(life[0], 0o700)          # 这次才建的目录：不受 umask 影响，就是 0700
             allowed = life_settings.allowed_dir()
             if allowed is None or allowed[0] != life[0]:
-                # 真实路径绕进了禁区（目录或上级是软链）：不生成，配置也不写 life_config（同改动前）
-                yml_text = plain_yml
-                if life[0] in seeded:
-                    _rmdir(life[0])
-            else:
-                _create_file(life[1], _life_text(fields))      # 0600，O_EXCL：同名不覆盖
-                made.append((_MADE_FILE, life[1]))
-                fields["life_file"] = life[1]     # 适配服务的整单撤回（_undo_create）靠它一并移走
+                # 刚建出来的目录真实路径不合格（上级是绕进禁区的软链）：配置已写了 life_config，整单撤回
+                raise HubError(500, "internal", "生活设定目录的真实位置不在允许范围内，没有新建")
+            _create_file(life[1], _life_text(fields))          # 0600，O_EXCL：同名不覆盖
+            made.append((_MADE_FILE, life[1]))
+            fields["life_file"] = life[1]         # 适配服务的整单撤回（_undo_create）靠它一并移走
         _create_file(yml, yml_text)               # 没写完它自己删，不会留下空配置
         made.append((_MADE_FILE, yml))
         if port_check is None:
