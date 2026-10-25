@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""self_initiate 提前开口（想念值满不等随机闸）的白盒补充：坏状态文件、提前那次投递失败、记账写失败。"""
+"""self_initiate 提前开口（想念值满不等随机闸）的白盒补充：坏状态文件、提前那次投递失败、先记账后投递。"""
 import importlib.util
 import json
 from pathlib import Path
@@ -84,32 +84,52 @@ def test_提前那次投递失败_不动随机闸_30分钟内不再提前(tmp_pa
     assert len(calls) == 1, "失败后 30 分钟内不该再提前"
 
 
-def test_提前投递成功但sent写失败_下次机会推到3小时后(tmp_path, monkeypatch, capsys):
+def _record_inject(sent):
+    def inject(*a, **k):
+        sent.append(a)
+        return True
+    return inject
+
+
+def test_提前那次sent写失败_不投递_10分钟后也不再调(tmp_path, monkeypatch, capsys):
     si = _si()
-    st, cfg, calls = _world(tmp_path, monkeypatch, si, T + 600)
+    sent = []
+    st, cfg, calls = _world(tmp_path, monkeypatch, si, T + 86400, inject=_record_inject(sent))
     _fail_on(si, monkeypatch, "1.sent.json")
     assert si.run_dsh("b", "1", cfg, T) == 0
-    assert calls[0].get("SELF_INITIATE_EARLY") == "1"
-    assert (st / "1.next").read_text(encoding="utf-8") == str(T + GAP)
+    assert len(calls) == 1 and calls[0].get("SELF_INITIATE_EARLY") == "1"
+    assert sent == [], "记账写不进去不该投递"
     assert "PermissionError" in capsys.readouterr().err
-
-
-def test_提前投递成功但early写失败_下次机会推到3小时后(tmp_path, monkeypatch, capsys):
-    si = _si()
-    st, cfg, calls = _world(tmp_path, monkeypatch, si, T + 600)
-    _fail_on(si, monkeypatch, "1.early.json")
-    assert si.run_dsh("b", "1", cfg, T) == 0
-    assert calls[0].get("SELF_INITIATE_EARLY") == "1"
-    assert (st / "1.next").read_text(encoding="utf-8") == str(T + GAP)
-    assert "PermissionError" in capsys.readouterr().err
-
-
-def test_记账写失败时不把更晚的随机闸提前(tmp_path, monkeypatch):
-    si = _si()
-    st, cfg, calls = _world(tmp_path, monkeypatch, si, T + 86400)
-    _fail_on(si, monkeypatch, "1.early.json")
-    assert si.run_dsh("b", "1", cfg, T) == 0
+    assert si.run_dsh("b", "1", cfg, T + 600) == 0
+    assert len(calls) == 1, "记账失败后 10 分钟不该再调 life-context"
     assert (st / "1.next").read_text(encoding="utf-8") == str(T + 86400)
+
+
+def test_提前那次early写失败_不投递_10分钟后也不再调(tmp_path, monkeypatch, capsys):
+    si = _si()
+    sent = []
+    st, cfg, calls = _world(tmp_path, monkeypatch, si, T + 86400, inject=_record_inject(sent))
+    _fail_on(si, monkeypatch, "1.early.json")
+    assert si.run_dsh("b", "1", cfg, T) == 0
+    assert len(calls) == 1 and calls[0].get("SELF_INITIATE_EARLY") == "1"
+    assert sent == [], "记账写不进去不该投递"
+    assert "PermissionError" in capsys.readouterr().err
+    assert si.run_dsh("b", "1", cfg, T + 600) == 0
+    assert len(calls) == 1, "记账失败后 10 分钟不该再调 life-context"
+    assert (st / "1.next").read_text(encoding="utf-8") == str(T + 86400)
+
+
+def test_提前投递成功_下次机会取原定与3小时后的较晚者(tmp_path, monkeypatch):
+    for next_at, want in ((T + 600, T + GAP), (T + 86400, T + 86400)):
+        si = _si()
+        sent = []
+        base = tmp_path / str(next_at)
+        st, cfg, calls = _world(base, monkeypatch, si, next_at, inject=_record_inject(sent))
+        assert si.run_dsh("b", "1", cfg, T) == 0
+        assert len(sent) == 1 and calls[0].get("SELF_INITIATE_EARLY") == "1"
+        assert (st / "1.next").read_text(encoding="utf-8") == str(want)
+        assert json.loads((st / "1.sent.json").read_text(encoding="utf-8"))["last_sent_at"] == T
+        assert json.loads((st / "1.early.json").read_text(encoding="utf-8"))["count"] == 1
 
 
 def test_early_skipped写失败不抛异常(tmp_path, monkeypatch, capsys):
