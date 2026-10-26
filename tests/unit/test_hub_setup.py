@@ -41,6 +41,7 @@ RETIRED = [
 
 def _app(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))   # Windows 上 expanduser 读它
     app = Flask(__name__, template_folder=str(TEMPLATES))
     app.register_blueprint(hub_bp)
     app.config["TESTING"] = True

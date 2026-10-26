@@ -34,6 +34,7 @@ def w(tmp_path, monkeypatch):
     for p in d.values():
         p.mkdir()
     monkeypatch.setenv("HOME", str(d["home"]))
+    monkeypatch.setenv("USERPROFILE", str(d["home"]))   # Windows 上 expanduser 读它
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(d["legacy"]))
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(d["dsh"]))
     monkeypatch.setenv("DSH_BOT_HOME", str(d["dsh_home"]))
@@ -104,6 +105,7 @@ def test_末尾带斜杠与多余的点_规范之后还在家里就行(w):
 
 def test_波浪号按HOME展开_展开到家里的也认(w, monkeypatch):
     monkeypatch.setenv("HOME", str(w.bot_home))
+    monkeypatch.setenv("USERPROFILE", str(w.bot_home))   # Windows 上 expanduser 读它
     assert _dir("~/channel") == os.path.join(w.real_bot_home, "channel")
 
 

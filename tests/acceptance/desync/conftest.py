@@ -53,6 +53,7 @@ os.environ["CLAUDEBOTLIFE_TEST"] = "1"
 os.environ["CLAUDEBOTLIFE_TEST_ROOT"] = _ROOT
 os.makedirs(os.path.join(_ROOT, "home"), exist_ok=True)
 os.environ["HOME"] = os.path.join(_ROOT, "home")
+os.environ["USERPROFILE"] = os.path.join(_ROOT, "home")   # Windows 上 expanduser 读它
 # 兜底：db.DB_PATH 是导入期读 BOTLIFE_STATE_DB 定死的；任何早于夹具的 import
 # （收集期等）都不许落到仓库根的 state.db。逐用例再收紧到 tmp_path，见 _botlife_state_db。
 os.environ["BOTLIFE_STATE_DB"] = os.path.join(_ROOT, "state.db")

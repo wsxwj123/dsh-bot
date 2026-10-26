@@ -30,11 +30,13 @@ CHAT = "77"
 
 def test_波浪号开头_展开成家目录(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))   # Windows 上 expanduser 读它
     assert config_sources.channel_dir({"bot_channel_path": "~/chan/x"}) == str(tmp_path / "chan" / "x")
 
 
 def test_只有一个波浪号_就是家目录(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))   # Windows 上 expanduser 读它
     assert config_sources.channel_dir({"bot_channel_path": "~"}) == str(tmp_path)
 
 
@@ -42,6 +44,7 @@ def test_只有一个波浪号_就是家目录(tmp_path, monkeypatch):
                                  "/abs/chan/../x", "  /abs/padded  "])
 def test_不以波浪号开头的_原样返回_一个字节都不规整(raw, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))   # Windows 上 expanduser 读它
     assert config_sources.channel_dir({"bot_channel_path": raw}) == raw
 
 
@@ -56,8 +59,10 @@ def test_没写或不是字符串或不是配置_返回空串(cfg):
 def test_每次调用现读HOME_不缓存(tmp_path, monkeypatch):
     a, b = tmp_path / "a", tmp_path / "b"
     monkeypatch.setenv("HOME", str(a))
+    monkeypatch.setenv("USERPROFILE", str(a))   # Windows 上 expanduser 读它
     assert config_sources.channel_dir({"bot_channel_path": "~/c"}) == str(a / "c")
     monkeypatch.setenv("HOME", str(b))
+    monkeypatch.setenv("USERPROFILE", str(b))   # Windows 上 expanduser 读它
     assert config_sources.channel_dir({"bot_channel_path": "~/c"}) == str(b / "c")
 
 
@@ -81,6 +86,7 @@ def panel(tmp_path, monkeypatch):
     for d in (home, legacy, dsh, cwd):
         d.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))   # Windows 上 expanduser 读它
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(legacy))
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(dsh))
     monkeypatch.setenv("BOTLIFE_STATE_DB", str(tmp_path / "state.db"))
@@ -183,6 +189,7 @@ def test_模型页找网关_波浪号写法的频道目录照样认得出网关(
         'id: tildebot\nbot_channel_path: "~/gw/tildebot/channel"\ndispatcher_port: 17962\n',
         encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))   # Windows 上 expanduser 读它
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(dsh))
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(tmp_path / "configs-legacy-missing"))
     assert hub_routes._dm_bots() == [
@@ -198,6 +205,7 @@ def _render(target):
 
 def test_新建_频道目录在HOME底下_写的是绝对路径不是波浪号(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))   # Windows 上 expanduser 读它
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(tmp_path / "configs-dsh"))
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(tmp_path / "configs-legacy"))
     target = str(tmp_path / ".dsh-bot" / "bots" / "newbot" / "channel")
@@ -218,6 +226,7 @@ def test_收成波浪号的那个函数已经删掉():
 
 def test_写出去的值经取值函数读回来_还是同一个目录(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))   # Windows 上 expanduser 读它
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(tmp_path / "configs-dsh"))
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(tmp_path / "configs-legacy"))
     target = str(tmp_path / ".dsh-bot" / "bots" / "newbot" / "channel")

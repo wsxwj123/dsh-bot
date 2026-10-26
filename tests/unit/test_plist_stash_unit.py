@@ -87,6 +87,7 @@ def w(tmp_path, monkeypatch, fakes):
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(tmp_path / "configs-dsh"))
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(tmp_path / "configs-legacy"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))   # Windows 上 expanduser 读它
     monkeypatch.delenv("HUB_BOTS_FILE", raising=False)
     monkeypatch.setattr(bl, "POLL_INTERVAL", 0.02)
     monkeypatch.setattr(bl, "RESTART_WAIT", 1.0)

@@ -47,6 +47,7 @@ def test_默认新系统目录跟HOME走(tmp_path, monkeypatch):
     # 跟 HOME 走」，所以它也得删。HOME 下一行就钉在 tmp，默认路径落不到真家目录。
     monkeypatch.delenv("DSH_BOT_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))   # Windows 上 expanduser 读它
     assert cs.dsh_dir() == tmp_path / ".dsh-bot" / "configs"
 
 

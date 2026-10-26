@@ -30,6 +30,7 @@ def _seams(tmp_path, monkeypatch):
     for name in ("configs", "channels", "dsh-configs", "dsh-home", "home"):
         (tmp_path / name).mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))   # Windows 上 expanduser 读它
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(tmp_path / "configs"))
     monkeypatch.setenv("HUB_CHANNELS_DIR", str(tmp_path / "channels"))
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(tmp_path / "dsh-configs"))

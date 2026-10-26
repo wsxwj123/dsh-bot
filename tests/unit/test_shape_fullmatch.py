@@ -127,6 +127,7 @@ def client(tmp_path, monkeypatch):
     from flask import Flask
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))   # Windows 上 expanduser 读它
     app = Flask(__name__)
     app.register_blueprint(hub_routes.hub_bp)
     app.config["TESTING"] = True

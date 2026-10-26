@@ -45,6 +45,7 @@ def roots(tmp_path, monkeypatch):
     legacy.mkdir()
     dsh.mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))   # Windows 上 expanduser 读它
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(legacy))
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(dsh))

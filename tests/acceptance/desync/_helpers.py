@@ -58,6 +58,7 @@ def iso(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDEBOTLIFE_TEST", "1")
     monkeypatch.setenv("CLAUDEBOTLIFE_TEST_ROOT", root)
     monkeypatch.setenv("HOME", dirs["home"])
+    monkeypatch.setenv("USERPROFILE", dirs["home"])   # Windows 上 expanduser 读它
     monkeypatch.setenv("HUB_CONFIGS_DIR", dirs["cfg"])
     monkeypatch.setenv("CLAUDEBOT_CONFIG_DIR", dirs["cfg"])
     monkeypatch.setenv("DIRECTOR_CHANNELS_ROOT", dirs["ch"])

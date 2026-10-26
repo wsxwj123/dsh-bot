@@ -78,6 +78,7 @@ def roots(tmp_path, monkeypatch):
     for p in d.values():
         p.mkdir()
     monkeypatch.setenv("HOME", str(d["home"]))
+    monkeypatch.setenv("USERPROFILE", str(d["home"]))   # Windows 上 expanduser 读它
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(d["legacy"]))
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(d["dsh"]))
     monkeypatch.setenv("DSH_BOT_HOME", str(d["dsh_home"]))

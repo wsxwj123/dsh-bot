@@ -66,6 +66,7 @@ def delivery(tmp_path, monkeypatch):
     for d in (legacy, dsh, home / ".claude" / "channels"):
         d.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))   # Windows 上 expanduser 读它
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(legacy))
     monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(dsh))
     monkeypatch.setenv("BOTLIFE_STATE_DB", str(tmp_path / "state.db"))

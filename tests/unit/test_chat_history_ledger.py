@@ -102,6 +102,7 @@ def test_对话尾巴_格式不变_只看这个聊天(bot):
 def test_没有账本时回到旧数据源(tmp_path, monkeypatch):
     monkeypatch.delenv("DSH_BOT_LEDGER", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))   # Windows 上 expanduser 读它
     old = tmp_path / ".claude" / "channels" / "oldbot"
     old.mkdir(parents=True)
     assert not chat_history.is_dsh_bot(str(old))

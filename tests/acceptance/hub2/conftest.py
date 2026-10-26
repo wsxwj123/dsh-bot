@@ -166,6 +166,7 @@ def _isolate(tmp_path, monkeypatch, configs_dir, launchagents_dir, channels_dir,
     fake_home = tmp_path / "fakehome"
     (fake_home / ".claude" / "channels").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(fake_home))   # 防炸垫，不是接缝（见模块 docstring 4）
+    monkeypatch.setenv("USERPROFILE", str(fake_home))   # Windows 上 expanduser 读它
     monkeypatch.setenv("CLAUDE_TGBOT_HOME", str(tmp_path / "tgbot-home"))
     (tmp_path / "tgbot-home").mkdir(exist_ok=True)
     monkeypatch.setenv("CLAUDE_SETTINGS_PATH", str(fake_home / ".claude" / "settings.json"))

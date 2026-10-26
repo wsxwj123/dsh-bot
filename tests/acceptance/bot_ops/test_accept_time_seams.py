@@ -47,6 +47,7 @@ def elsewhere(sandbox, monkeypatch, spare_launchctl):
             monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(dirs["configs-dsh-2"]))
             monkeypatch.setenv("HUB_CONFIGS_DIR", str(dirs["configs-legacy-2"]))
             monkeypatch.setenv("HOME", str(dirs["fakehome-2"]))
+            monkeypatch.setenv("USERPROFILE", str(dirs["fakehome-2"]))   # Windows 上 expanduser 读它
 
     return Elsewhere
 

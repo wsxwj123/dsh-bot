@@ -86,6 +86,7 @@ def world(tmp_path, monkeypatch):
     for p in d.values():
         p.mkdir()
     monkeypatch.setenv("HOME", str(d["home"]))
+    monkeypatch.setenv("USERPROFILE", str(d["home"]))   # Windows 上 expanduser 读它
     monkeypatch.setenv("HUB_LAUNCHCTL", a.path)
     monkeypatch.setenv("HUB_LAUNCHAGENTS_DIR", str(d["agents1"]))
     monkeypatch.setenv("DSH_BOT_HOME", str(d["h1"]))
@@ -103,6 +104,7 @@ def world(tmp_path, monkeypatch):
         monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(d["dsh2"]))
         monkeypatch.setenv("HUB_CONFIGS_DIR", str(d["legacy2"]))
         monkeypatch.setenv("HOME", str(d["home2"]))
+        monkeypatch.setenv("USERPROFILE", str(d["home2"]))   # Windows 上 expanduser 读它
 
     def bot(root, bot_id, enabled=None, **fields):
         text = "id: %s\n" % bot_id
