@@ -30,15 +30,14 @@ def with_novelai_token(adapter):
         "version: 1\nrefs:\n  NOVELAI_BEARER_TOKEN: pst-fake-token-0123456789\n", encoding="utf-8")
 
 
-def test_新建_全勾_外貌进生图技能_成人技能取人设例句_缺生活设定的不打开但列出来(adapter, telegram, bun):
+def test_新建_全勾_外貌进生图技能_成人技能取人设例句_九个全开_生活设定随新建生成_无跳过项(adapter, telegram, bun):
     with_novelai_token(adapter)
     body = good_body(persona_text=PERSONA, fish_voice_id="voice_abc-1", features=ALL, appearance="  长发\r\n圆脸  ")
     got = adapter.ok(adapter.call("POST", au.BOTS, body))
-    want = dict(dict.fromkeys(ALL, True), life=False)
+    want = dict.fromkeys(ALL, True)
     assert got["features"] == want, got
     assert got["skills"] == ["voice", "image", "gif", "moments", "proactive", "group", "nsfw"], got
-    assert got["features_skipped"] == [{"key": "life", "missing": [{"code": "life_config_missing",
-                                        "message": got["features_skipped"][0]["missing"][0]["message"]}]}], got
+    assert got["features_skipped"] == [], got
     cfg = yaml.safe_load((adapter.sandbox.dsh_cfg / ("%s.yml" % NEW)).read_text(encoding="utf-8"))
     assert cfg["features"] == want, cfg
     image = skill(adapter, "image").read_text(encoding="utf-8")
