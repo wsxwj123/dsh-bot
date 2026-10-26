@@ -36,7 +36,8 @@ import requests
 import yaml
 from flask import current_app
 
-from moments import bots_client, config_sources, hub_auth, life_settings, redact
+from moments import bots_client, config_sources, hub_auth, life_settings, redact, skill_templates
+from moments import features as feature_switch
 from moments.provider_model import HubError
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -326,6 +327,47 @@ def _fish_key(value):
 
 def _bad(why):
     raise HubError(400, "bad_field", why)
+
+
+def _requested_features(body):
+    """可选 ``features`` 数组 → 按九个键的固定顺序排好的键元组；键缺失等于九个全不勾。
+
+    不是数组、含未知键、有重复项一律 400 ``bad_body``（此刻一个文件都没建）。键名原样比对，
+    不 trim、不认大小写 —— 与适配接口 5.18.1 同一把尺。
+    """
+    if "features" not in body:
+        return ()
+    raw = body["features"]
+    if not isinstance(raw, list) or len(set(map(repr, raw))) != len(raw) \
+            or not all(isinstance(k, str) and k in feature_switch.KEY_SET for k in raw):
+        raise HubError(400, "bad_body",
+                       "features 要是功能键的数组，不重复，只能用 voice、image、stickers、moments、"
+                       "proactive、life、relationship、groups、nsfw")
+    return tuple(k for k, _label in feature_switch.KEYS if k in raw)
+
+
+def _feature_ready(fields):
+    """三个有就绪条件的功能此刻齐不齐（与适配接口 5.19.2 同口径）：voice 要音色编号、
+    image 要 NovelAI 令牌、life 要 ``life_target`` 这次真能给出生活设定文件；其余恒可用。"""
+    from moments import adapter_service      # 延迟 import：它反过来 import 本模块
+    return {"voice": bool(fields.get("fish_voice_id")),
+            "image": adapter_service._has_novelai_token({}),
+            "life": life_target(fields["bot_id"]) is not None}
+
+
+def _plan_features(fields):
+    """→ ``(九个最终布尔, features_skipped)``：勾了且就绪的开；勾了但缺就绪项的不打开、
+    列进跳过项；没勾的关。跳过项形状同适配接口（``[{key, missing:[{code,message}]}]``）。"""
+    from moments import adapter_service      # 跳过项的码与文案跟适配接口同一份
+    ready = _feature_ready(fields)
+    final, skipped = {}, []
+    for key, _label in feature_switch.KEYS:
+        ticked = key in fields["features"]
+        final[key] = ticked and ready.get(key, True)
+        if ticked and not ready.get(key, True):
+            code, message = adapter_service.REQUIREMENT_TEXT[key]
+            skipped.append({"key": key, "missing": [{"code": code, "message": message}]})
+    return final, skipped
 
 
 def _name_char_banned(ch):
@@ -624,9 +666,13 @@ def _validate(body):
     # （四个组合独立落盘，不做成对约束）。
     fish_voice_id = _fish_voice(_optional(body, "fish_voice_id"))
     fish_api_key = _fish_key(_optional(body, "fish_api_key"))
+    requested = _requested_features(body)
     out = {"bot_id": bot_id, "token": fields["telegram_token"], "port": port,
            "chat_id": chat_id, "display_name": name, "persona": persona,
-           "fish_voice_id": fish_voice_id, "fish_api_key": fish_api_key}
+           "fish_voice_id": fish_voice_id, "fish_api_key": fish_api_key,
+           "features": requested}
+    # 九个开关的最终值与跳过项（§5.18.1）：就绪判定在写盘之前，末尾落盘的 yml 用的是这一份
+    out["features_final"], out["features_skipped"] = _plan_features(out)
     # 写配置之前先读回来核对（§0 第 9 条）：排在 fish_* 之后、环境与冲突错（409）之前，
     # 此刻一个文件都还没建。核对过的这份全文就是 B 段要落盘的那份，不再渲染第二遍。
     out["yml_text"] = _checked_yml(out)
@@ -691,27 +737,33 @@ def _rmdir(path):
 
 
 #: 回滚清单条目类型（R8-3 的精确 unlink 清单）
-_MADE_FILE = 0      # yml 文件：直接 unlink
+_MADE_FILE = 0      # yml / 生活设定文件：直接 unlink
 _MADE_TREE = 1      # 频道树：删清单内的文件与目录，再 rmdir 树根
 _MADE_HOME = 2      # bot 家：只 rmdir（非空一律保留）
+_MADE_SKILL = 3     # 技能文件：unlink 后 rmdir 它的 skill-<通用名>/ 目录（空的才删）
 
 
 def _rollback(made):
     """按创建清单逆序精确删除。回滚过程里再抛异常会把真正的错因盖掉，所以全程吞。
 
-    三类条目见上面的常量：频道树删 `TREE_FILES`/`TREE_DIRS` 清单内的东西，
+    条目类型见上面的常量：频道树删 `TREE_FILES`/`TREE_DIRS` 清单内的东西，
     bot 家与其它目录一律只 rmdir（空的才删）—— 用户的 bot 家可能早就在那儿，
-    一次手滑就是别人的聊天记录没了（R8-3）。"""
+    一次手滑就是别人的聊天记录没了（R8-3）。技能文件按每条 `_MADE_SKILL` 精确删，
+    最后把空掉的 `skills/` 摘掉；不递归删任何目录。"""
     for kind, path in reversed(made):
         if kind == _MADE_FILE:
             _unlink(path)
         elif kind == _MADE_HOME:
             _rmdir(path)
+        elif kind == _MADE_SKILL:
+            _unlink(path)
+            _rmdir(os.path.dirname(path))
         else:
             for rel in TREE_FILES:
                 _unlink(os.path.join(path, rel))
             for rel in TREE_DIRS:
                 _rmdir(os.path.join(path, rel))
+            _rmdir(os.path.join(path, "skills"))
             _rmdir(path)
 
 
@@ -725,6 +777,32 @@ def _fix_modes(home):
         os.chmod(os.path.join(channel, rel), 0o700)
     for rel in TREE_FILES:
         os.chmod(os.path.join(channel, rel), 0o600)
+
+
+def _place_skills(channel, fields):
+    """在频道树里放这次勾了的技能，返回 ``[(相对路径, 通用名)]``（相对路径以频道目录为准）。
+
+    勾了的功能都放：缺就绪项没打开的也照放、头部写停用标记，补齐后在功能块打开就能用
+    （约定 5.18.1）；relationship、life 没有技能。文件走 `_create_file`（0600、O_EXCL），
+    目录 0700。模板读不出照抛，由调用方按整单撤回处理。
+    """
+    placed = []
+    for key in fields["features"]:
+        generic = feature_switch.SKILL_OF.get(key)
+        if generic is None:
+            continue
+        text = skill_templates.render(generic, persona=fields["persona"])
+        if not fields["features_final"][key]:
+            text = feature_switch.set_skill_disabled(text, True)
+        skills_dir = os.path.join(channel, "skills")
+        if not os.path.isdir(skills_dir):
+            os.mkdir(skills_dir, 0o700)
+        rel = os.path.join("skills", "skill-" + generic, "SKILL.md")
+        target = os.path.join(channel, rel)
+        os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+        _create_file(target, text)
+        placed.append((rel, generic))
+    return placed
 
 
 def _yaml_str(value):
@@ -745,7 +823,7 @@ def _new_namespace():
     return ns
 
 
-def _render_yml(fields, target, namespace=None, life_config=None):
+def _render_yml(fields, target, namespace=None, life_config=None, features=None):
     """`configs/<bot>.yml`：**不含 token**（F5），只有注册表要的那几个键。
 
     `id` 与 `display_name` 同一种写法，带双引号（§7）：`null`、`true`、`no`、`on` 这类名字
@@ -756,6 +834,8 @@ def _render_yml(fields, target, namespace=None, life_config=None):
     统一展开（`config_sources.channel_dir`），写的一侧也不再产出那个形状。
 
     ``life_config``（``life_target`` 给的生活设定文件绝对路径）给了才写一行，``lay_down`` 照它生成那个文件。
+    ``features``（九个键的布尔表）给了才写 ``features:`` 块，九个键显式写出（5.19.4）；适配接口自己
+    拼这块，不传这个参数，产出逐字节不变。
     """
     text = ("id: %s\n"
             "display_name: %s\n"
@@ -768,6 +848,9 @@ def _render_yml(fields, target, namespace=None, life_config=None):
                fields["chat_id"], fields["port"], namespace or _new_namespace()))
     if life_config:
         text += "life_config: %s\n" % _yaml_str(life_config)
+    if features is not None:
+        # json.dumps 出来的 ``{"voice": false, …}`` 是合法 YAML，键序就是九个键的固定顺序
+        text += "features: %s\n" % json.dumps(features, ensure_ascii=False)
     return text
 
 
@@ -780,16 +863,19 @@ def _checked_yml(fields):
     target = os.path.join(str(config_sources.dsh_bot_dir(fields["bot_id"])), "channel")
     namespace = _new_namespace()
     life = life_target(fields["bot_id"])
-    text = _render_yml(fields, target, namespace, life and life[1])
+    features = fields.get("features_final")
+    text = _render_yml(fields, target, namespace, life and life[1], features)
     expect = {"id": fields["bot_id"], "display_name": fields["display_name"],
               "bot_channel_path": os.path.abspath(target), "namespace_uuid": namespace}
     if life:
         expect["life_config"] = life[1]
     _readback(text, expect)
+    if features is not None and (yaml.safe_load(text) or {}).get("features") != features:
+        raise HubError(500, "internal", "功能开关写进配置之后读不回原样")
     return text
 
 
-def lay_down(fields, port_check=None):
+def lay_down(fields, port_check=None, place_skills=False):
     """B 段：tmp 里建好整棵树 → 一次 `move` 到 `<bot 家>` → 写 yml → 复查端口。
 
     落点全在新系统那套位置（§7）：配置进 `<dsh 配置根>/<bot>.yml`，频道树进
@@ -801,6 +887,9 @@ def lay_down(fields, port_check=None):
 
     ``port_check``：落盘之后复查端口用的函数（抛错即回滚）。不给是管理台这一页的 `_check_port`
     （查新旧两套配置）；适配服务只许读本系统，传它自己只查本系统的那一份（补充文件 12.2）。
+
+    ``place_skills``：管理台新建页传 True，按 ``fields["features"]`` 在 tmp 树里先放好技能
+    （随频道目录一次 move 就位，失败按 `_MADE_SKILL` 精确删）。适配服务自己放技能，不传，行为不变。
     """
     bot_id = fields["bot_id"]
     home = str(config_sources.dsh_bot_dir(bot_id))
@@ -847,6 +936,9 @@ def lay_down(fields, port_check=None):
                      json.dumps(access, ensure_ascii=False) + "\n")
         _create_file(os.path.join(chan, "CLAUDE.md"), fields["persona"])
         _create_file(os.path.join(chan, "memory", "MEMORY.md"), MEMORY_SEED)
+        # 技能也先在 tmp 树里放好（管理台新建页）：随下面那一次 move 一起就位，
+        # move 失败时目标位置一个字节都没写过，tmp 整个删掉即可。
+        skill_rels = _place_skills(chan, fields) if place_skills else []
         if os.path.exists(home):
             # 已有的 bot 家（网关自建过 state/logs 之类）→ 只把频道树补进去，
             # 绝不用 move 整个 src（那会变成"搬进人家目录里"）
@@ -860,6 +952,11 @@ def lay_down(fields, port_check=None):
             shutil.move(src, home)
             made.append((_MADE_HOME, home))
             made.append((_MADE_TREE, channel))
+        if place_skills:
+            # 技能文件已随树就位：在清单里逐条登记，回滚时先删文件、再摘空的 skill-目录
+            for rel, _generic in skill_rels:
+                made.append((_MADE_SKILL, os.path.join(channel, rel)))
+            fields["skills_placed"] = [generic for _rel, generic in skill_rels]
         _fix_modes(home)
         if life is not None:
             os.makedirs(life[0], mode=0o700, exist_ok=True)
@@ -1075,7 +1172,11 @@ def _respond(fields, probe, steps):
     `restart_hint` 按 S4 分档：201 没有待补动作；207 的待补动作都属「让 bot 跑起来」面。
     """
     body = {"ok": True, "bot_id": fields["bot_id"], "username": probe.get("username"),
-            "steps": steps, "restart_hint": dict(RESTART_FLAGS_DONE)}
+            "steps": steps, "restart_hint": dict(RESTART_FLAGS_DONE),
+            # 约定 5.18.1：九个最终开关、跳过项、放了的技能通用名；原有键的形状不变
+            "features": fields["features_final"],
+            "features_skipped": fields["features_skipped"],
+            "skills": fields.get("skills_placed") or []}
     stuck = [s for s in steps if s["state"] != "done"]
     if not stuck:
         return body, 201
@@ -1099,7 +1200,7 @@ def create(body, jobs):
     _check_token_free(fields["bot_id"], probe.get("bot_id"))
     steps = [_step("validate", "done"), _step("getme", "done")]
     try:
-        lay_down(fields)
+        lay_down(fields, place_skills=True)
     except HubError:
         raise                              # 端口复查这类：已回滚干净，照原码抛
     except Exception as e:

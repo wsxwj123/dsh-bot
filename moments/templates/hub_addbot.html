@@ -48,6 +48,21 @@
     <div class="muted" style="margin-top:6px">两个都填了也不做在线校验，只看形状；key 不落任何全局位置。</div>
   </details>
 
+  {# 九个功能开关（约定 5.18.1 / 5.19.4）：默认全不勾，只开文字聊天 #}
+  <div class="card">
+    <h2>功能（可选）</h2>
+    <div class="muted" style="margin-bottom:8px">默认全不勾，只开文字聊天；建好后也能在功能块打开</div>
+    <label><input type="checkbox" class="feature" value="voice"> 发语音</label>
+    <label><input type="checkbox" class="feature" value="image"> 生图</label>
+    <label><input type="checkbox" class="feature" value="stickers"> 表情包</label>
+    <label><input type="checkbox" class="feature" value="moments"> 朋友圈</label>
+    <label><input type="checkbox" class="feature" value="proactive"> 主动找你聊</label>
+    <label><input type="checkbox" class="feature" value="life"> 生活作息</label>
+    <label><input type="checkbox" class="feature" value="relationship"> 关系进展</label>
+    <label><input type="checkbox" class="feature" value="groups"> 群聊</label>
+    <label><input type="checkbox" class="feature" value="nsfw"> 成人内容</label>
+  </div>
+
   <div class="card">
     <h2>人设（二选一）</h2>
     <label for="persona_mode">来源</label>
@@ -136,6 +151,9 @@ function payload() {
   if (voice) body.fish_voice_id = voice;
   const fishKey = $('fish_api_key').value;
   if (fishKey.trim()) body.fish_api_key = fishKey;
+  // 功能开关（约定 5.18.1）：勾了才带 features；一个都没勾就不带，等于九个全关
+  const features = Array.from(document.querySelectorAll('input.feature:checked')).map((el) => el.value);
+  if (features.length) body.features = features;
   return body;
 }
 // 步骤表：后端给的是英文内部名（INTERFACE §13d），显示时换成中文；对照表里没有的原样显示。
