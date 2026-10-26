@@ -75,7 +75,7 @@ CFG_PAIR = (CFG_PROVIDER, CFG_MODEL)
 UNAUTHORIZED = {"ok": False, "code": "unauthorized", "message": "令牌缺失或不对"}
 EFFORT_LEVELS = ["off", "low", "high", "max"]
 CAPABILITIES = {
-    "bot.restart.graceful": False,
+    "bot.restart.graceful": True,        # graceful-restart 契约：等空闲重启已支持
     "bot.restart.force": True,
     "bot.set_provider": True,
     "bot.reset_provider": False,

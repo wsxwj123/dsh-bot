@@ -263,11 +263,17 @@ NO_FORCE = {
 
 
 @pytest.mark.parametrize("body,raw", list(NO_FORCE.values()), ids=list(NO_FORCE))
-def test_重启_没要求强制_回501_unsupported_不重启(adapter, live, body, raw):
-    adapter.expect_error(adapter.call("POST", au.restart_url("botalpha"), body, raw=raw),
-                         501, "unsupported")
-    assert adapter.launchctl.actions() == [], \
-        "不支持等空闲重启，却换成别的方式动了启动项：%r" % adapter.launchctl.actions()
+def test_重启_没要求强制_立即重启_回ok不再501(adapter, live, body, raw):
+    """graceful-restart 契约：不带 force 或 force:false 是等空闲重启，不再回 501。
+
+    假网关对 /v1/health 回 404（问不到），按契约应当作空闲、立即重启。
+    """
+    adapter.launchctl.set_default(installed=True, running=False, pid=4242)
+    got = adapter.ok(adapter.call("POST", au.restart_url("botalpha"), body, raw=raw))
+    assert got.get("status") == "ok", "没要求强制时应立即重启并回 status ok：%r" % (got,)
+    adapter.human_message(got.get("message"))
+    assert adapter.launchctl.actions(), \
+        "没要求强制，却没有去重启（启动项零调用）：%r" % adapter.launchctl.calls()
 
 
 @pytest.mark.parametrize("force", ["true", 1, 0, None, [], {"a": 1}],

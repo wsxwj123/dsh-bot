@@ -16,7 +16,7 @@ from .adapter_util import adapter, console_guard  # noqa: F401  夹具
 #: 补充文件第 7 节与 9.1：4.1 表里的八个，加 bot.notify、bot.life_settings，再加 bot.enable、
 #: bot.switch_in、bot.group_chat（v0.6/v0.7），再加 bot.persona、bot.voice（v0.8，补充文件 10.1），再加 bot.skills（v0.9，补充文件 11.1），再加 bot.create、bot.archive、bot.delete、bot.profile（v1.0，补充文件 12.1），再加 bot.token_handoff（补充文件 13.8），再加 bot.groups_discovered（约定 v1.1 5.20）、bot.features（5.19），恰好二十三个键
 CAPABILITIES_TEN = {
-    "bot.restart.graceful": False,
+    "bot.restart.graceful": True,
     "bot.restart.force": True,
     "bot.set_provider": True,
     "bot.reset_provider": False,
@@ -42,7 +42,7 @@ CAPABILITIES_TEN = {
 }
 
 
-def test_meta_固定取值与十项能力如约(adapter):
+def test_meta_固定取值与能力表如约(adapter):
     body = adapter.ok(adapter.call("GET", au.META))
     assert body["backend"] == "dsh"
     assert body["adapter"] == "v1"
@@ -316,7 +316,7 @@ def test_泄密_各种成功和失败的响应里都搜不到假密钥假令牌�
         "bot_id 不合规的 422": ("POST", au.provider_url(".."), {"effort": "high"}, au.GOOD),
         "没有这只 bot 的 404": ("POST", au.restart_url("ghost"), {"force": True}, au.GOOD),
         "不支持回到默认的 501": ("POST", au.provider_url("botalpha"), {"reset": True}, au.GOOD),
-        "不支持等空闲重启的 501": ("POST", au.restart_url("botalpha"), {"force": False}, au.GOOD),
+        "force不是布尔值的 422": ("POST", au.restart_url("botalpha"), {"force": "yes"}, au.GOOD),
         "没有这家供应商的 404": ("POST", au.provider_url("botalpha"),
                           {"provider_id": "no-such-provider-zz9", "model": "m"}, au.GOOD),
         "网关连不上的 503": ("POST", au.provider_url("botalpha"), {"effort": "high"}, au.GOOD),
