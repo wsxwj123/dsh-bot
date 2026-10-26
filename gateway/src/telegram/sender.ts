@@ -159,94 +159,98 @@ export class Sender {
     let lastSentAt = new Date()
 
     let textIdx = 0
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i]!
-      const ti = item.kind === 'text' ? textIdx++ : -1
-      if (this.halted) {
-        this.log.info('send.halted', { chat: req.chatId, part: i + 1 })
-        results.push({ index: i + 1, kind: item.kind, state: 'skipped', reason: '网关正在停止' })
-        continue
-      }
-      if (stopAfter) { results.push({ index: i + 1, kind: item.kind, state: 'skipped', reason: '被 Telegram 限流', retryAfterSec: stopAfter.retryAfterSec }); continue }
-      if (i > 0 && delay > 0) {
-        void this.api.sendChatAction(req.chatId).catch(() => {})
-        await sleep(delay)
-      }
-      const replyTo = replyMode === 'off' ? undefined : (replyMode === 'all' || i === 0) ? req.replyTo : undefined
-      if (item.kind === 'text' && req.skipTexts?.has(normText(item.text))) {
-        results.push({ index: i + 1, kind: 'text', state: 'duplicate' })
-        continue
-      }
+    try {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i]!
+        const ti = item.kind === 'text' ? textIdx++ : -1
+        if (this.halted) {
+          this.log.info('send.halted', { chat: req.chatId, part: i + 1 })
+          results.push({ index: i + 1, kind: item.kind, state: 'skipped', reason: '网关正在停止' })
+          continue
+        }
+        if (stopAfter) { results.push({ index: i + 1, kind: item.kind, state: 'skipped', reason: '被 Telegram 限流', retryAfterSec: stopAfter.retryAfterSec }); continue }
+        if (i > 0 && delay > 0) {
+          void this.api.sendChatAction(req.chatId).catch(() => {})
+          await sleep(delay)
+        }
+        const replyTo = replyMode === 'off' ? undefined : (replyMode === 'all' || i === 0) ? req.replyTo : undefined
+        if (item.kind === 'text' && req.skipTexts?.has(normText(item.text))) {
+          results.push({ index: i + 1, kind: 'text', state: 'duplicate' })
+          continue
+        }
 
-      let filePath: string | null = null
-      if (item.kind === 'file') {
-        filePath = allowedFile(item.path, this.o.allowDirs())
-        if (!filePath) { results.push({ index: i + 1, kind: 'file', state: 'failed', reason: '文件不存在或不在允许发送的目录里' }); continue }
-        // 同一轮里同一个文件只发一次（真机 M4 问题 3：发图慢、模型以为没发出去又调一次 reply，图发了两遍）
-        if (req.skipFiles?.has(filePath)) { results.push({ index: i + 1, kind: 'file', state: 'duplicate' }); continue }
-        req.skipFiles?.add(filePath)
-      }
-      const fk = item.kind === 'file' ? fileKind(filePath!) : null
-      const outKind: OutboundKind = fk ?? req.kind ?? 'text'
-      const okey = req.turnId !== null ? `turn:${req.turnId}:c${req.callSeq}:p${i + 1}` : null
-      const outId = this.ledger.outboundIntent({ okey, chatId: req.chatId, turnId: req.turnId, part: i + 1, ofParts: items.length, kind: outKind, text: item.kind === 'text' ? item.text : null, file: filePath, replyTo: replyTo ?? null })
+        let filePath: string | null = null
+        if (item.kind === 'file') {
+          filePath = allowedFile(item.path, this.o.allowDirs())
+          if (!filePath) { results.push({ index: i + 1, kind: 'file', state: 'failed', reason: '文件不存在或不在允许发送的目录里' }); continue }
+          // 同一轮里同一个文件只发一次（真机 M4 问题 3：发图慢、模型以为没发出去又调一次 reply，图发了两遍）
+          if (req.skipFiles?.has(filePath)) { results.push({ index: i + 1, kind: 'file', state: 'duplicate' }); continue }
+          req.skipFiles?.add(filePath)
+        }
+        const fk = item.kind === 'file' ? fileKind(filePath!) : null
+        const outKind: OutboundKind = fk ?? req.kind ?? 'text'
+        const okey = req.turnId !== null ? `turn:${req.turnId}:c${req.callSeq}:p${i + 1}` : null
+        const outId = this.ledger.outboundIntent({ okey, chatId: req.chatId, turnId: req.turnId, part: i + 1, ofParts: items.length, kind: outKind, text: item.kind === 'text' ? item.text : null, file: filePath, replyTo: replyTo ?? null })
 
-      let attempt = 0
-      let useReply = replyTo
-      let triedWithoutReply = false
-      const shrunk = fk === 'photo' ? shrinkPhoto(filePath!) : null
-      if (shrunk) this.log.info('send.photo_shrunk', { chat: req.chatId, part: i + 1, from: statSync(filePath!).size, to: statSync(shrunk).size })
-      for (;;) {
-        attempt++
-        try {
-          const m = item.kind === 'text'
-            ? await this.api.sendMessage(req.chatId, item.text, { replyTo: useReply })
-            : await this.api.sendFile(fk!, req.chatId, shrunk ?? filePath!, { replyTo: useReply })
-          crashPoint('after_send_before_record')
-          this.ledger.outboundResult(outId, 'sent', { tgMessageId: m.message_id })
-          results.push({ index: i + 1, kind: item.kind, state: 'sent', messageId: m.message_id })
-          if (item.kind === 'text') this.log.chatLine('bot', req.chatId, item.text)
-          if (sentTexts.length === 0) firstSentId = m.message_id
-          sentTexts.push(item.kind === 'text' ? item.text : fk === 'photo' ? '[图片]' : fk === 'animation' ? '[表情包]' : fk === 'sticker' ? '[贴纸]' : '[文件]')
-          lastSentAt = new Date()
-          if (item.kind === 'text' && req.voice) await this.sendVoice(req, i + 1, req.voiceTexts ? (req.voiceTexts[ti] ?? '') : item.text)
-          if (i === 0 && items.length > 1) crashPoint('mid_reply')
-          break
-        } catch (e) {
-          if (useReply && !triedWithoutReply && isReplyNotFound(e)) {
-            triedWithoutReply = true
-            useReply = undefined
-            this.log.info('send.reply_target_missing', { chat: req.chatId, part: i + 1 })
-            continue
-          }
-          const info = classifySendError(e)
-          this.log.warn('send.failed', { chat: req.chatId, part: i + 1, cls: info.cls, reason: info.reason, err: safeError(e) })
-          if (info.cls === 'retryable') {
-            const waitMs = info.retryAfterSec !== undefined ? info.retryAfterSec * 1000 : 1000 * attempt
-            if (attempt < 4 && waitMs <= waitBudget) {
-              waitBudget -= waitMs
-              await sleep(waitMs)
+        let attempt = 0
+        let useReply = replyTo
+        let triedWithoutReply = false
+        const shrunk = fk === 'photo' ? shrinkPhoto(filePath!) : null
+        if (shrunk) this.log.info('send.photo_shrunk', { chat: req.chatId, part: i + 1, from: statSync(filePath!).size, to: statSync(shrunk).size })
+        for (;;) {
+          attempt++
+          try {
+            const m = item.kind === 'text'
+              ? await this.api.sendMessage(req.chatId, item.text, { replyTo: useReply })
+              : await this.api.sendFile(fk!, req.chatId, shrunk ?? filePath!, { replyTo: useReply })
+            crashPoint('after_send_before_record')
+            this.ledger.outboundResult(outId, 'sent', { tgMessageId: m.message_id })
+            results.push({ index: i + 1, kind: item.kind, state: 'sent', messageId: m.message_id })
+            if (item.kind === 'text') this.log.chatLine('bot', req.chatId, item.text)
+            if (sentTexts.length === 0) firstSentId = m.message_id
+            sentTexts.push(item.kind === 'text' ? item.text : fk === 'photo' ? '[图片]' : fk === 'animation' ? '[表情包]' : fk === 'sticker' ? '[贴纸]' : '[文件]')
+            lastSentAt = new Date()
+            if (item.kind === 'text' && req.voice) await this.sendVoice(req, i + 1, req.voiceTexts ? (req.voiceTexts[ti] ?? '') : item.text)
+            if (i === 0 && items.length > 1) crashPoint('mid_reply')
+            break
+          } catch (e) {
+            if (useReply && !triedWithoutReply && isReplyNotFound(e)) {
+              triedWithoutReply = true
+              useReply = undefined
+              this.log.info('send.reply_target_missing', { chat: req.chatId, part: i + 1 })
               continue
             }
-            this.ledger.outboundResult(outId, 'failed', { error: info.reason })
-            const ra = info.retryAfterSec ?? Math.ceil(waitMs / 1000)
-            results.push({ index: i + 1, kind: item.kind, state: 'skipped', reason: '被 Telegram 限流', retryAfterSec: ra })
-            stopAfter = { retryAfterSec: ra }
+            const info = classifySendError(e)
+            this.log.warn('send.failed', { chat: req.chatId, part: i + 1, cls: info.cls, reason: info.reason, err: safeError(e) })
+            if (info.cls === 'retryable') {
+              const waitMs = info.retryAfterSec !== undefined ? info.retryAfterSec * 1000 : 1000 * attempt
+              if (attempt < 4 && waitMs <= waitBudget) {
+                waitBudget -= waitMs
+                await sleep(waitMs)
+                continue
+              }
+              this.ledger.outboundResult(outId, 'failed', { error: info.reason })
+              const ra = info.retryAfterSec ?? Math.ceil(waitMs / 1000)
+              results.push({ index: i + 1, kind: item.kind, state: 'skipped', reason: '被 Telegram 限流', retryAfterSec: ra })
+              stopAfter = { retryAfterSec: ra }
+              break
+            }
+            if (info.cls === 'undelivered') {
+              this.ledger.outboundResult(outId, 'failed', { error: info.reason })
+              results.push({ index: i + 1, kind: item.kind, state: 'failed', reason: `Telegram 拒收（${info.reason}）` })
+              break
+            }
+            this.ledger.outboundResult(outId, 'ambiguous', { error: info.reason })
+            results.push({ index: i + 1, kind: item.kind, state: 'ambiguous', reason: `网络异常，可能已送达（${info.reason}）` })
             break
           }
-          if (info.cls === 'undelivered') {
-            this.ledger.outboundResult(outId, 'failed', { error: info.reason })
-            results.push({ index: i + 1, kind: item.kind, state: 'failed', reason: `Telegram 拒收（${info.reason}）` })
-            break
-          }
-          this.ledger.outboundResult(outId, 'ambiguous', { error: info.reason })
-          results.push({ index: i + 1, kind: item.kind, state: 'ambiguous', reason: `网络异常，可能已送达（${info.reason}）` })
-          break
         }
+        if (shrunk) rmSync(shrunk, { force: true })
       }
-      if (shrunk) rmSync(shrunk, { force: true })
+    } finally {
+      // 中途抛异常也把已经发出去的段记上（对方已经看到了）
+      if (sentTexts.length) this.o.onSent?.(req.chatId, firstSentId, sentTexts.join('\n'), lastSentAt)
     }
-    if (sentTexts.length) this.o.onSent?.(req.chatId, firstSentId, sentTexts.join('\n'), lastSentAt)
     return results
   }
 

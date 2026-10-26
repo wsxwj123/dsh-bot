@@ -275,7 +275,7 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     providerSwitchSummaryMs: msNum(g.provider_switch_summary_ms, 30_000, 'gateway.provider_switch_summary_ms', 1_000, 600_000),
     lastUserDir: resolve(expandHome(str(g.last_user_dir, join(homedir(), '.config', 'claude-dsh-console', 'shared', 'last-user')))),
     groupsRotateBytes: num(g.groups_rotate_bytes, 5 * 1024 * 1024, 'gateway.groups_rotate_bytes'),
-    groupTurnTtlMs: num(g.group_turn_ttl_ms, 90_000, 'gateway.group_turn_ttl_ms'),
+    groupTurnTtlMs: msNum(g.group_turn_ttl_ms, 90_000, 'gateway.group_turn_ttl_ms', 100, 3_600_000),
   }
 }
 

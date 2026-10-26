@@ -94,9 +94,13 @@ export class GroupTranscript {
       // 抢锁前后别人可能刚轮转完：复查一遍还超才改名
       if (statSync(path).size > limit) {
         const old = `${path}.1`
-        // Windows 上改名目标已存在会失败，先删
-        if (process.platform === 'win32') rmSync(old, { force: true })
-        retryWhenBusy(() => renameSync(path, old))
+        // 直接改名覆盖旧的 .1；改名失败（个别 Windows 环境目标已存在时）才删掉 .1 再试一次，不先删免得 .1 空窗
+        try {
+          retryWhenBusy(() => renameSync(path, old))
+        } catch {
+          rmSync(old, { force: true })
+          retryWhenBusy(() => renameSync(path, old))
+        }
         this.log.info('group.transcript_rotated', { chat: chatId })
       }
     } catch (e) {
