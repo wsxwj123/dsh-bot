@@ -71,7 +71,7 @@ CAPABILITIES = {
     "bot.restart.graceful": True,
     "bot.restart.force": True,
     "bot.set_provider": True,
-    "bot.reset_provider": False,
+    "bot.reset_provider": True,
     "bot.set_effort": True,
     "provider.subscription": False,
     "provider.per_session": False,
@@ -842,16 +842,21 @@ def _set_provider(bot_id):
     # 补充文件 6.1：整条请求在 deadline 前返回；读阶段（读清单、读原强度）在 read_by 前回来
     deadline, read_by = started + budget, started + READ_SHARE * budget
     body = _json_object()
-    if "reset" in body:
-        raise Refuse(501, "unsupported", "这个底层还不支持一键回到默认供应商")
+    has_reset = "reset" in body
+    if has_reset:
+        # 5.4：reset 只认布尔 true；它与 provider_id、model 是相反的两种操作，不能一起给
+        if body["reset"] is not True:
+            raise _invalid("reset 只能是 true，或者不给")
+        if "provider_id" in body or "model" in body:
+            raise _invalid("reset 和 provider_id、model 不能同时给")
     has_provider, has_model, has_effort = "provider_id" in body, "model" in body, "effort" in body
     if has_provider != has_model or (
             has_provider and not (_text(body["provider_id"]) and _text(body["model"]))):
         raise _invalid("provider_id 和 model 必须一起给，而且都不能为空")
     if has_effort and not (isinstance(body["effort"], str) and body["effort"] in EFFORT_LEVELS):
         raise _invalid("思考强度只能是 off、low、high、max 之一")
-    if not has_provider and not has_effort:
-        raise _invalid("请求里没有要改的内容：给 provider_id 加 model，或者给 effort")
+    if not has_reset and not has_provider and not has_effort:
+        raise _invalid("请求里没有要改的内容：给 provider_id 加 model，或者给 effort，或者 reset")
     bot = _require_bot(bot_id)
     if not bot["enabled"]:                  # 13.7（第 3 步修订）：停着的不再 409，核对过写进配置，下次启用时生效
         return _queue_provider(bot, body, has_provider, has_effort)
@@ -859,6 +864,35 @@ def _set_provider(bot_id):
     channel = bot["channel"]
     if not gateway_client.available(channel):
         raise Refuse(503, "unavailable", NOT_SAVED)
+    if has_reset:
+        # 回默认：先读现在生效的那一组（判断是不是换了一家、失败时换回哪里），
+        # 要改强度的话再记下单独指定的强度（回默认会清掉它），然后让网关清掉覆盖。
+        info = _read_gateway(lambda t: gateway_client.model_info(channel, timeout=t), read_by)
+        before = _pair(info.get("current") if isinstance(info, dict) else None)
+        prior_effort = _read_gateway(lambda t: _effort_override(channel, t), read_by) \
+            if has_effort else None
+        ok, got = _gateway(lambda t: gateway_client.model_set(channel, "default", timeout=t),
+                           deadline)
+        after = _pair(got.get("current") if isinstance(got, dict) else None)
+        if not ok:
+            raise RuntimeError("unexpected gateway reply")
+        if has_effort:
+            try:
+                _apply_effort(channel, body["effort"], deadline)
+            except _NoReply:
+                # 6.1：改强度已经发出、时限内没回；回默认那一步是确认过的
+                return _unconfirmed(after[0] != before[0])
+            except Exception:               # noqa: BLE001  不只是拒绝：网关回 400、500、认不出的也在这里
+                # 回默认已经生效，改强度没成：在剩下的时间里把供应商、模型与原来的强度恢复回去，
+                # 再照原错误返回（约定 5.4：不许写了一半）。
+                _undo_switch(channel, before, prior_effort, deadline)
+                raise
+        new_segment = after[0] != before[0]
+        message = "已回到配置文件里那一组，下一条消息起生效"
+        if new_segment:
+            message += "；换到了另一家供应商，当前对话会先总结再另开一段"
+        return {"ok": True, "applied": True, "queued": False, "new_segment": new_segment,
+                "message": message}
     before = after = prior_effort = None
     if has_provider:
         # 第 4 步：向这只 bot 的网关读一次清单（只读请求），没过就到此为止，什么都没写。
@@ -980,8 +1014,8 @@ def _switch(channel, before, provider_id, model, deadline):
 def _apply_effort(channel, effort, deadline):
     """经这只 bot 的网关改思考强度：``POST /v1/effort``，请求体 ``{"effort": 档位}``。"""
     code, got = _gateway(lambda t: gateway_client.effort_set(channel, effort, timeout=t), deadline)
-    if code == 409:
-        # 网关的 409 unsupported：档位在四档之内，但这只 bot 现在用的模型不支持它
+    if code in (409, 422):
+        # 网关的 409 unsupported（或 422）：档位在四档之内，但这只 bot 现在用的模型不支持它
         raise _invalid("这只 bot 现在用的模型不支持这个思考强度")
     if code != 200 or not isinstance(got, dict) or got.get("ok") is not True:
         raise RuntimeError("unexpected gateway reply")
