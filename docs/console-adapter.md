@@ -30,7 +30,7 @@
 |---|---|
 | `GET /meta` | 版本与能力清单（壳据此决定显示哪些功能） |
 | `GET /bots` | 本系统全部 bot：状态、启用开关、网关在不在收消息、Telegram 用户名、当前模型、朋友圈里记的名字（`person`）、是否已迁到另一种底层、同一账号两边同时在跑的提示 |
-| `POST /bots`、`GET /bots/templates` | 新建一只 bot（可以先建好不启动）；列出可用的人设模板 |
+| `POST /bots`、`GET /bots/templates` | 新建一只 bot（可以先建好不启动）；列出可用的人设模板。新建时会在生活设定目录生成 `<bot_id>.yml` 并写进 `life_config`，之后就能用 `/bots/{id}/life` 读写；该目录已有同名文件时回 409 `exists` |
 | `GET /providers`、`POST /bots/{id}/provider` | 看可选的供应商和模型；给一只 bot 换供应商、模型、思考强度。bot 停着时只存进配置，下次启用生效 |
 | `POST /bots/{id}/restart` | 重启一只 bot |
 | `POST /bots/{id}/enabled` | 启用或停用；从旧系统切过来时可顺带导入旧的私聊记录与没到点的约定。停用时可记下「已迁到另一种底层」，有这个标记就不许再启用。真正启动（停用后再启用）成功后还会异步触发一次日志看板重建（launchd 任务 `com.dsh-bot.tmux-logs`）；触发失败只记日志，不影响回包与耗时 |

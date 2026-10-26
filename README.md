@@ -485,7 +485,7 @@ DeepSeek 官方就提供 Anthropic 格式的兼容端点，不用中转站，直
 - `personal_hobbies`（爱好，free 时段随机触发）
 - `interest_keywords` + `rss_feeds`（可选，让 ta 聊到关心的新闻）
 
-配好后，`self_initiate.py` 后台任务（Windows 的 `register-tasks.ps1` 已挂、Mac 挂 `self-initiate` plist）会每隔一段**随机时间（30 分钟～24 小时）**判断要不要主动找你——不是定时打卡，是像活人一样不可预测。
+配好后，`self_initiate.py` 后台任务（Windows 的 `register-tasks.ps1` 已挂、Mac 挂 `self-initiate` plist）会每隔一段**随机时间（30 分钟～24 小时）**判断要不要主动找你——不是定时打卡，是像活人一样不可预测。如果 ta 特别想你（情绪引擎的想念值满了），会不等这个随机时间提前来找你，但距上次主动开口至少 3 小时、每天最多提前 2 次，睡觉时段照样不发。
 
 ### ② 随机发朋友圈
 在上面基础上：`configs/<bot>.yml` 里把 `moments.enabled` 改成 `true` → 起 `moments-web`（朋友圈网页 `:8765`）→ 挂上 `jiwen`（情绪引擎）任务。之后 bot 会按心情/情境随机发圈，你能在 `:8765` 看、点赞、评论，ta 会异步读到并回应。
