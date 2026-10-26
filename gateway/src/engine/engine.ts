@@ -876,7 +876,15 @@ export class Engine {
       pending = this.ledger.pendingFor(chatId)
     }
     const cut = pending.findIndex(p => p.kind === 'command')
-    const raw = cut >= 0 ? pending.slice(0, cut) : pending
+    let raw = cut >= 0 ? pending.slice(0, cut) : pending
+    // 导演点名排队太久才轮到（场已经散了）：不交给模型，标成已处理（约定 v1.2 5.12.3）；同批别的消息照常
+    const now = Date.now()
+    const expired = raw.filter(r => r.kind === 'synthetic' && safeMeta(r.meta)?.source === 'director' && now - r.received_at > this.cfg.gw.groupTurnTtlMs)
+    if (expired.length) {
+      this.ledger.settleInbound(expired.map(r => r.id), 'done', 'group turn expired')
+      for (const r of expired) this.log.info('group.turn_expired', { chat: chatId, inbound: r.id, waited_ms: now - r.received_at })
+      raw = raw.filter(r => !expired.includes(r))
+    }
     if (raw.length === 0) return 0
     // 语音转写、图片下载：放在这里做（每个聊天自己排队），不卡收消息和别的聊天
     const batch = await this.media.prepare(raw)
