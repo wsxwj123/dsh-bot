@@ -73,6 +73,8 @@ export function makeBot(tg: FakeTelegram, o: { name?: string; root?: string; gw?
       log_level: 'debug',
       // 私聊"刚聊过"标记写进临时目录：缺省是真机上导演读的共用目录，测试不许往那里写
       last_user_dir: join(root, 'director', 'last-user'),
+      // 群聊记录同理：缺省是两边导演共读的中立目录，测试只写临时目录
+      groups_dir: join(root, 'groups'),
       ...o.gw,
     },
     brain: { provider: 'deepseek-official', model: 'deepseek-flash', reasoning_effort: 'low', ...o.brain },
