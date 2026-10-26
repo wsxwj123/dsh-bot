@@ -76,8 +76,8 @@ def test_前提_这只bot在名单里_启用时带provider_id走得过前三步(
 
 
 EARLY = {
-    "第1步_带reset为假": ({"reset": False, **SWITCH}, 501, "unsupported"),
-    "第1步_带reset为真": ({"reset": True}, 501, "unsupported"),
+    "第1步_带reset为假": ({"reset": False, **SWITCH}, 422, "invalid"),
+    "第1步_带reset与供应商": ({"reset": True, **SWITCH}, 422, "invalid"),
     "第2步_只给provider_id": ({"provider_id": "fake-vendor-b"}, 422, "invalid"),
     "第2步_model是空串": ({"provider_id": "fake-vendor-b", "model": " "}, 422, "invalid"),
     "第2步_强度不在四档": ({**SWITCH, "effort": "medium"}, 422, "invalid"),

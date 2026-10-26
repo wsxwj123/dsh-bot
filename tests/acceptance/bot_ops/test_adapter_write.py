@@ -111,13 +111,11 @@ def test_请求体不是JSON对象_写接口回422_invalid_什么都不做(adapt
 
 # ============================================================ 换供应商
 
-@pytest.mark.parametrize("payload", [{"reset": True}, {"reset": False},
-                                     {"reset": True, "effort": "high"}],
-                         ids=["reset为真", "reset为假", "reset加思考强度"])
-def test_换供应商_请求里出现reset_回501_unsupported_网关零请求(adapter, live, payload):
-    adapter.expect_error(adapter.call("POST", au.provider_url("botalpha"), payload),
-                         501, "unsupported")
-    assert live.gw.requests == [], "不支持的操作却去找了网关：%r" % live.gw.requests
+def test_换供应商_reset为false_回422_invalid_网关零请求(adapter, live):
+    """reset-provider 契约：reset 为 false 不是合法重置，也不是原来的 501。"""
+    adapter.expect_error(adapter.call("POST", au.provider_url("botalpha"), {"reset": False}),
+                         422, "invalid")
+    assert live.gw.requests == [], "校验没过却去找了网关：%r" % live.gw.requests
 
 
 INVALID_PAYLOADS = {
