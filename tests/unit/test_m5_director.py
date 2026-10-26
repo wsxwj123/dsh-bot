@@ -55,6 +55,8 @@ def d(tmp_path, monkeypatch):
     monkeypatch.setenv("DSH_BOT_HOME", str(tmp_path))
     for k in ("DIRECTOR_GT_DIR", "DIRECTOR_MARKER_DIR", "DIRECTOR_STATE_DIR", "DIRECTOR_MODE_DIR", "DIRECTOR_HUMAN_ID"):
         monkeypatch.delenv(k, raising=False)
+    # 群聊记录缺省是 ~/.config 下的中立目录：单测显式指到临时目录，不读真机记录
+    monkeypatch.setenv("DIRECTOR_GT_DIR", str(tmp_path / "groups"))
     sys.path.insert(0, str(ROOT))
     import director
     director = importlib.reload(director)

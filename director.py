@@ -145,7 +145,8 @@ def load_dsh_roster(chat_id: str = CHAT_ID) -> bool:
         HUMAN_ID = owners[0]
     BOTS, BOT_BY_USERNAME, BOT_DIR_NAME, BOT_CHANNEL = bots, by_user, dirs, chans
     home = _dsh_home()
-    _GT_DIR = os.environ.get("DIRECTOR_GT_DIR") or os.path.join(home, "groups")
+    # 群聊记录：dsh 网关写在两边导演共读的中立目录（约定 v1.2 5.12.4）
+    _GT_DIR = os.environ.get("DIRECTOR_GT_DIR") or os.path.expanduser("~/.config/claude-dsh-console/group_transcripts")
     MARKER_DIR = os.environ.get("DIRECTOR_MARKER_DIR") or os.path.join(home, "director", "last-user")
     STATE_DIR = os.environ.get("DIRECTOR_STATE_DIR") or os.path.join(home, "director", "state")
     MODE_DIR = os.environ.get("DIRECTOR_MODE_DIR") or os.path.join(home, "director", "mode")
@@ -184,41 +185,46 @@ def read_group_history(chat_id: str = CHAT_ID, n: int = 12) -> list[dict]:
     """按 message_id 去重读群历史（transcript 每条被多个 bot 各记一遍），时间正序取最后 n。
 
     返回 [{msg_id, ts, text, is_bot, from_username, speaker}]，speaker = bot_id 或 '用户'。
+    记录满了会轮转成 <群号>.jsonl.1（约定 v1.2 5.12.4）：先读 .1 再读当前文件，刚轮转过近况也不丢。
     """
     path = os.path.join(_GT_DIR, f"{chat_id}.jsonl")
-    if not os.path.exists(path):
-        return []
+    lines: list[str] = []
+    for p in (path + ".1", path):
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                lines += f.readlines()
+        except FileNotFoundError:
+            continue
     seen: dict[str, dict] = {}
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                o = json.loads(line)
-            except Exception:
-                continue
-            mid = str(o.get("message_id", ""))
-            if not mid or mid in seen:  # 去重：同 message_id 只留第一次
-                continue
-            is_bot = str(o.get("is_bot", "")).lower() == "true"
-            uname = o.get("from_username") or ""
-            if is_bot:
-                speaker = BOT_BY_USERNAME.get(uname, uname or "某bot")
-            else:
-                speaker = HUMAN_NAME if str(o.get("from_id", "")) == HUMAN_ID else "路人"
-            rt_from = o.get("reply_to_from") or ""
-            seen[mid] = {
-                "msg_id": mid,
-                "ts": _parse_ts(o.get("ts", "")),
-                "text": (o.get("text") or "").strip(),
-                "is_bot": is_bot,
-                "from_username": uname,
-                "speaker": speaker,
-                # 引用回复：这条消息是"回复"谁的哪句话
-                "reply_to_text": (o.get("reply_to_text") or "").strip(),
-                "reply_to_speaker": BOT_BY_USERNAME.get(rt_from, rt_from) if rt_from else "",
-            }
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        mid = str(o.get("message_id", ""))
+        if not mid or mid in seen:  # 去重：同 message_id 只留第一次
+            continue
+        is_bot = str(o.get("is_bot", "")).lower() == "true"
+        uname = o.get("from_username") or ""
+        if is_bot:
+            speaker = BOT_BY_USERNAME.get(uname, uname or "某bot")
+        else:
+            speaker = HUMAN_NAME if str(o.get("from_id", "")) == HUMAN_ID else "路人"
+        rt_from = o.get("reply_to_from") or ""
+        seen[mid] = {
+            "msg_id": mid,
+            "ts": _parse_ts(o.get("ts", "")),
+            "text": (o.get("text") or "").strip(),
+            "is_bot": is_bot,
+            "from_username": uname,
+            "speaker": speaker,
+            # 引用回复：这条消息是"回复"谁的哪句话
+            "reply_to_text": (o.get("reply_to_text") or "").strip(),
+            "reply_to_speaker": BOT_BY_USERNAME.get(rt_from, rt_from) if rt_from else "",
+        }
     msgs = [m for m in seen.values() if m["text"]]
     msgs.sort(key=lambda m: (m["ts"], m["msg_id"]))
     return msgs[-n:]
