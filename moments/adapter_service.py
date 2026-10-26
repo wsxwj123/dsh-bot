@@ -2454,10 +2454,15 @@ def _undo_create(bot_id, seams, life=None):
         _log.error("create rollback failed: %s", type(e).__name__)
 
 
-def _create_features(fields):
+def _create_features(fields, life):
     """新建时的九个开关（约定 v1.1 5.18.1、5.19.4）：勾了且必需项齐的开，其余关；勾了但缺必需项的
-    不打开，列进 features_skipped。新 bot 的配置里还没有 image_skill_dir、life_config，按缺省判。"""
-    ready = {"voice": bool(fields.get("fish_voice_id")), "image": _has_novelai_token({}), "life": False}
+    不打开，列进 features_skipped。新 bot 的配置里还没有 image_skill_dir，按缺省判。
+
+    ``life`` 是 ``hub_addbot.life_target(bot_id)`` 的结果（``_create_locked`` 已算好传进来）：不为 None
+    时这次新建会写 life_config 并生成生活设定文件（与 ``_create_yml`` 同一判断；文件已占用的此前已 409），
+    life 就算齐；为 None（允许目录不合格）不写 life_config，life 不打开、列进跳过。"""
+    ready = {"voice": bool(fields.get("fish_voice_id")), "image": _has_novelai_token({}),
+             "life": life is not None}
     final, skipped = {}, []
     for key, _label in feature_switch.KEYS:
         ticked = key in fields["features"]
@@ -2498,7 +2503,7 @@ def _create_locked(fields, bots, seams, deadline):
     if life is not None and os.path.lexists(life[1]):      # 软链也算占用，什么都不写、原文件不动
         raise Refuse(409, "exists", hub_addbot.LIFE_TAKEN % bot_id)
     fields["port"] = _create_port(fields["port"], bot_id, bots)
-    fields["features_final"], fields["features_skipped"] = _create_features(fields)
+    fields["features_final"], fields["features_skipped"] = _create_features(fields, life)
     fields["yml_text"] = _create_yml(fields, bots)
     probe = hub_addbot.getme(fields["token"])
     if not probe.get("ok"):
