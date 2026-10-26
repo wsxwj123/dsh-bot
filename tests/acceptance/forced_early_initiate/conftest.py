@@ -203,6 +203,18 @@ class LifeWorld:
                       "VALUES (?, ?, 'user', ?, ?, ?, 'done')", (f"in-{ms}", CHAT, text, ms, ms))
             c.commit()
 
+    def put_ongoing_event(self):
+        """在共用库里给这只 bot 造一个进行中的突发事件（刚开始 10 分钟、还有 1 天才过期）。
+
+        life-context 的硬规则里"毫无情境素材 → SKIP"和"忙碌时段且无突发 → SKIP"都看这类素材；
+        有进行中事件就两条都不触发，结果与跑测试时的真实时刻（凌晨/白天）无关。
+        时间戳按 time.time() 现算，相对当前时刻，所以不依赖几点跑。"""
+        t = int(time.time())
+        with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
+            c.execute("INSERT INTO ongoing_events (bot_id, event_name, mood_delta, effect, started_at, expires_at) "
+                      "VALUES (?, ?, ?, ?, ?, ?)", (BOT, "测试事件", -0.2, "测试效果", t - 600, t + DAY))
+            c.commit()
+
     def life(self, early_flag):
         """命令行跑 life-context.py bot5 42（不放行预筛）；判官假件一律判 skip，
         这样"判官被问过"会直接体现在结果里。返回 (进程, 最后一行 JSON, 判官调用次数)。"""

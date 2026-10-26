@@ -23,6 +23,7 @@ def test_13_带提前标记_想念满_硬规则会拦_输出SKIP原因是那条�
 
 def test_14_带提前标记_想念满_硬规则不拦_不问判官_直接给TEXT(lc):
     lc.put_inbound("在吗", LONG_AGO)
+    lc.put_ongoing_event()                       # 固定情境素材：不然凌晨跑会被"毫无情境素材"硬规则拦成 SKIP
     p, out, judge = lc.life(early_flag=True)
     assert out["action"] == "TEXT", out          # 判官假件会判 skip：拿到 TEXT 说明没听判官的
     assert out.get("text"), out
