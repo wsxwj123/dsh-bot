@@ -1,11 +1,15 @@
-// 群聊记录（M5）：同一台机器上所有 bot 的网关写同一份 <DSH_BOT_HOME>/groups/<群 id>.jsonl。
+// 群聊记录（M5）：同一台机器上所有 bot 的网关写同一份 <群聊记录目录>/<群 id>.jsonl（默认 ~/.config/claude-dsh-console/group_transcripts，
+// 约定 v1.2 5.12.4 的中立目录）。
 // 导演（director.py）读它决定谁说话、把最近的对话交给被点名的 bot；私聊时也从这里取"群里近况"。
 // 行格式和旧系统的 group_transcripts 相同，另加 from_name（显示名）。
 // - 真人消息：每个网关都会收到一遍，用"抢占标记文件"保证只记一次
-// - bot 自己发出的话：Telegram 不把 bot 的消息投给别的 bot，所以由发出它的网关自己记（不再需要旧系统的 bot 互推）
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync, writeFileSync } from 'fs'
+// - bot 自己发出的话：Telegram 不把 bot 的消息投给别的 bot，所以由发出它的网关自己记（不再需要旧系统的 bot 互推）；
+//   一次回复记一行（导演每行算一次发言，分段记会吃掉额度）
+// - 轮转（约定 v1.2 5.12.4）：文件超过阈值，抢到锁的写方把它改名成 <群 id>.jsonl.1（只留一份旧的）；读方读当前 + .1
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'fs'
 import { join } from 'path'
 import { safeError, type Logger } from '../log'
+import { retryWhenBusy } from '../util'
 import type { TgMessage } from '../telegram/api'
 import { senderName, toInbound } from '../telegram/inbound'
 
@@ -24,12 +28,16 @@ export type TranscriptLine = {
 }
 
 const TAIL_BYTES = 128 * 1024
+/** 轮转锁超过这么久没删，当作写方崩在半路留下的残留，谁都可以删（约定 v1.2 5.12.4） */
+const ROTATE_LOCK_STALE_MS = 60_000
 
 export class GroupTranscript {
   constructor(
     private readonly dir: string,
     private readonly me: () => { id: number; username: string; name: string },
     private readonly log: Logger,
+    /** 超过这么多字节（不含等于）就轮转 */
+    private readonly rotateBytes: () => number = () => 5 * 1024 * 1024,
   ) {}
 
   private file(chatId: string): string { return join(this.dir, `${chatId}.jsonl`) }
@@ -37,6 +45,8 @@ export class GroupTranscript {
   private append(line: TranscriptLine): void {
     try {
       mkdirSync(this.dir, { recursive: true, mode: 0o700 })
+      this.rotate(line.chat_id)
+      // 每行都按路径追加打开、写完就关：别人刚轮转过，下一行自然写进新文件
       appendFileSync(this.file(line.chat_id), JSON.stringify(line) + '\n', { mode: 0o600 })
     } catch (e) {
       this.log.warn('group.transcript_failed', { chat: line.chat_id, err: safeError(e) })
@@ -61,30 +71,60 @@ export class GroupTranscript {
     })
   }
 
-  /** 本 bot 在群里发出的一段 */
-  sent(chatId: string, messageId: number, text: string): void {
+  /** 本 bot 在群里的一次回复（各段已由调用方连成一条；messageId 是第一条发出的段，at 是最后一段发出的时刻） */
+  sent(chatId: string, messageId: number, text: string, at: Date = new Date()): void {
     const me = this.me()
     this.append({
-      ts: new Date().toISOString(), chat_id: chatId, message_id: messageId, from_id: String(me.id), from_username: me.username,
+      ts: at.toISOString(), chat_id: chatId, message_id: messageId, from_id: String(me.id), from_username: me.username,
       from_name: me.name, is_bot: true, text: text.slice(0, 1000), observed_by: me.username,
     })
   }
 
-  /** 某个时间之后的群消息（按消息编号去重、时间正序，最多 limit 条）。只读文件末尾一段，记录再长也不慢 */
-  since(chatId: string, afterMs: number, limit: number): TranscriptLine[] {
+  /** 文件大于阈值就改名成 .1。抢不到锁（别人正在轮转）就跳过这次，调用方照常追加；不整份重写 */
+  private rotate(chatId: string): void {
     const path = this.file(chatId)
-    if (!existsSync(path)) return []
-    let text = ''
+    const limit = this.rotateBytes()
+    try { if (statSync(path).size <= limit) return } catch { return } // 文件还没有
+    const lock = join(this.dir, `.rotate-${chatId}`)
+    try { if (Date.now() - statSync(lock).mtimeMs > ROTATE_LOCK_STALE_MS) rmSync(lock, { force: true }) } catch {}
+    let fd: number
+    try { fd = openSync(lock, 'wx', 0o600) } catch { return }
+    try {
+      try { writeSync(fd, this.me().username) } finally { closeSync(fd) }
+      // 抢锁前后别人可能刚轮转完：复查一遍还超才改名
+      if (statSync(path).size > limit) {
+        const old = `${path}.1`
+        // Windows 上改名目标已存在会失败，先删
+        if (process.platform === 'win32') rmSync(old, { force: true })
+        retryWhenBusy(() => renameSync(path, old))
+        this.log.info('group.transcript_rotated', { chat: chatId })
+      }
+    } catch (e) {
+      this.log.warn('group.rotate_failed', { chat: chatId, err: safeError(e) })
+    } finally {
+      try { rmSync(lock, { force: true }) } catch {}
+    }
+  }
+
+  /** 读文件末尾一段（整行开头）；没有或读不了返回空串 */
+  private tail(path: string): string {
+    if (!existsSync(path)) return ''
     try {
       const size = statSync(path).size
       const start = Math.max(0, size - TAIL_BYTES)
       const buf = Buffer.alloc(size - start)
       const fd = openSync(path, 'r')
-      readSync(fd, buf, 0, buf.length, start)
-      closeSync(fd)
-      text = buf.toString('utf8')
-      if (start > 0) text = text.slice(text.indexOf('\n') + 1)
-    } catch { return [] }
+      try { readSync(fd, buf, 0, buf.length, start) } finally { closeSync(fd) }
+      const text = buf.toString('utf8')
+      return start > 0 ? text.slice(text.indexOf('\n') + 1) : text
+    } catch { return '' }
+  }
+
+  /** 某个时间之后的群消息（按消息编号去重、时间正序，最多 limit 条）。读 .1 和当前文件各自末尾一段（刚轮转过近况也不丢），记录再长也不慢 */
+  since(chatId: string, afterMs: number, limit: number): TranscriptLine[] {
+    const path = this.file(chatId)
+    // 中间补一个换行：.1 最后一行万一没换行也不会和当前文件第一行粘在一起
+    const text = this.tail(`${path}.1`) + '\n' + this.tail(path)
     const seen = new Set<number>()
     const out: TranscriptLine[] = []
     for (const l of text.split('\n')) {

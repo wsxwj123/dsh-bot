@@ -81,6 +81,10 @@ export type GatewayOpts = {
   /** 主人私聊"刚聊过"标记的中立目录（INTERFACE-适配服务 10.5）：默认 ~/.config/claude-dsh-console/shared/last-user，
    *  gateway.last_user_dir 可改（测试用） */
   lastUserDir: string
+  /** 群聊记录文件超过多少字节就轮转成 <群号>.jsonl.1（约定 v1.2 5.12.4，缺省 5 MiB；gateway.groups_rotate_bytes 可调，测试用） */
+  groupsRotateBytes: number
+  /** 导演注入（source=director）收下后超过多久才轮到处理就丢弃不说（约定 v1.2 5.12.3，缺省 90 秒） */
+  groupTurnTtlMs: number
   /** 语音服务（仓库里的 voice-bridge）地址，只用本机 */
   voiceBridgeUrl: string
   /** 生图：novelai | comfyui | off。设了 global_cfg 时引擎按共用开关，novelai、comfyui 只在开关读不到时兜底；off 始终不生图 */
@@ -132,7 +136,8 @@ export type BotConfig = {
   workDir: string
   homeDir: string
   logsDir: string
-  /** 群聊记录（所有 bot 共用一份，导演也读它） */
+  /** 群聊记录（所有 bot 共用一份，导演也读它）：默认 ~/.config/claude-dsh-console/group_transcripts（两边导演共读的中立目录），
+   *  gateway.groups_dir 可改（测试用） */
   groupsDir: string
   /** 导演用的共享目录（各 bot 私聊的"刚聊过"标记等） */
   directorDir: string
@@ -269,7 +274,15 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     providerKeyGraceMs: msNum(g.provider_key_grace_ms, 600_000, 'gateway.provider_key_grace_ms', 0, 86_400_000),
     providerSwitchSummaryMs: msNum(g.provider_switch_summary_ms, 30_000, 'gateway.provider_switch_summary_ms', 1_000, 600_000),
     lastUserDir: resolve(expandHome(str(g.last_user_dir, join(homedir(), '.config', 'claude-dsh-console', 'shared', 'last-user')))),
+    groupsRotateBytes: num(g.groups_rotate_bytes, 5 * 1024 * 1024, 'gateway.groups_rotate_bytes'),
+    groupTurnTtlMs: num(g.group_turn_ttl_ms, 90_000, 'gateway.group_turn_ttl_ms'),
   }
+}
+
+/** 群聊记录目录（写法同 gateway.last_user_dir） */
+function groupsDirOf(raw: unknown): string {
+  const g = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  return resolve(expandHome(str(g.groups_dir, join(homedir(), '.config', 'claude-dsh-console', 'group_transcripts'))))
 }
 
 /** 带范围校验的毫秒配置（INTERFACE 3.13.4）：不是整数或超出范围 → 启动时报配置错误 */
@@ -314,7 +327,7 @@ export function loadBotConfig(configPath: string, env: Record<string, string | u
     workDir: join(botDir, 'work'),
     homeDir: join(botDir, 'home'),
     logsDir: join(botDir, 'logs'),
-    groupsDir: join(root, 'groups'),
+    groupsDir: groupsDirOf(y.gateway),
     directorDir: join(root, 'director'),
     mediaDir: join(botDir, 'media'),
     harnessDir: resolve(expandHome(harnessRaw)),

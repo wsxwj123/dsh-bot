@@ -138,8 +138,9 @@ export class Sender {
     private readonly log: Logger,
     private readonly o: {
       allowDirs: () => string[]; maxSendWaitMs: number; access: () => Access
-      /** 每段发出后（群聊记录用：bot 自己在群里说的话由自己记） */
-      onSent?: (chatId: string, messageId: number, text: string) => void
+      /** 一次 send 的各段都发完后回调一次（群聊记录用：bot 自己在群里说的话由自己记，一次回复记一行）。
+       *  text 是发出的各段按顺序以换行连接（非文字段写占位），messageId 是第一条发出的段，at 是最后一段发出的时刻；一段都没发出就不回调 */
+      onSent?: (chatId: string, messageId: number, text: string, at: Date) => void
     },
   ) {}
 
@@ -151,6 +152,11 @@ export class Sender {
     const results: PartResult[] = []
     let waitBudget = this.o.maxSendWaitMs
     let stopAfter: { retryAfterSec: number } | null = null
+
+    // 已发出的段，发完后汇总成一次回调
+    const sentTexts: string[] = []
+    let firstSentId = 0
+    let lastSentAt = new Date()
 
     let textIdx = 0
     for (let i = 0; i < items.length; i++) {
@@ -200,7 +206,9 @@ export class Sender {
           this.ledger.outboundResult(outId, 'sent', { tgMessageId: m.message_id })
           results.push({ index: i + 1, kind: item.kind, state: 'sent', messageId: m.message_id })
           if (item.kind === 'text') this.log.chatLine('bot', req.chatId, item.text)
-          this.o.onSent?.(req.chatId, m.message_id, item.kind === 'text' ? item.text : fk === 'photo' ? '[图片]' : fk === 'animation' ? '[表情包]' : fk === 'sticker' ? '[贴纸]' : '[文件]')
+          if (sentTexts.length === 0) firstSentId = m.message_id
+          sentTexts.push(item.kind === 'text' ? item.text : fk === 'photo' ? '[图片]' : fk === 'animation' ? '[表情包]' : fk === 'sticker' ? '[贴纸]' : '[文件]')
+          lastSentAt = new Date()
           if (item.kind === 'text' && req.voice) await this.sendVoice(req, i + 1, req.voiceTexts ? (req.voiceTexts[ti] ?? '') : item.text)
           if (i === 0 && items.length > 1) crashPoint('mid_reply')
           break
@@ -238,6 +246,7 @@ export class Sender {
       }
       if (shrunk) rmSync(shrunk, { force: true })
     }
+    if (sentTexts.length) this.o.onSent?.(req.chatId, firstSentId, sentTexts.join('\n'), lastSentAt)
     return results
   }
 

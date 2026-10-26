@@ -77,10 +77,10 @@ async function main(): Promise<void> {
   const allowDirs = () => [cfg.mediaDir, ...cfg.gw.imageDirs.map(d => d.startsWith('~') ? join(homedir(), d.slice(1)) : d)]
   // 群聊记录：bot 自己在群里发出的话由自己记（Telegram 不把 bot 的消息投给别的 bot）
   let me: TgUser | null = null
-  const transcript = new GroupTranscript(cfg.groupsDir, () => ({ id: me?.id ?? 0, username: me?.username ?? '', name: me?.first_name ?? cfg.displayName }), log)
+  const transcript = new GroupTranscript(cfg.groupsDir, () => ({ id: me?.id ?? 0, username: me?.username ?? '', name: me?.first_name ?? cfg.displayName }), log, () => cfg.gw.groupsRotateBytes)
   const sender = new Sender(api, ledger, log, {
     allowDirs, maxSendWaitMs: cfg.gw.maxSendWaitMs, access: () => loadAccess(cfg.channelDir),
-    onSent: (chatId, messageId, text) => { if (isGroupChat(chatId)) transcript.sent(chatId, messageId, text) },
+    onSent: (chatId, messageId, text, at) => { if (isGroupChat(chatId)) transcript.sent(chatId, messageId, text, at) },
   })
   const dsh = new DshProcess(log)
   let engine: Engine | null = null
