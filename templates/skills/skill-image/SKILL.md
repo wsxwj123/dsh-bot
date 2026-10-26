@@ -10,6 +10,16 @@ description: 要发照片时加载（自拍、拍照、生图、朋友圈配图�
 * 出图失败时，按人设自然说这次没拍成，不要假装发了。
 * 工具名、文件路径、报错一律不进正文。
 
+### 机位、景别与张力
+- 自拍指线上发给 user 的、角色自己的照片；不包括同框互动、线下见面和旁观机位拍的照片。
+- 自拍：默认全身照，视角默认平视 eye-level、略俯 slightly from above、略仰 slightly from below、三分之四侧身 three-quarter view 这类自然角度；正俯视、俯冲、贴地仰拍、荷兰角、鱼眼、超广角等视角只在 user 明确要求时用。多张自拍照需至少一张全身照一张近景照
+- 两张图从镜头视角词库取两条不同条目，且不得同属俯、仰、平中的同一类，图B 的角度不得与图A 重复。图A 为第三人称机位；图B 在 user 与角色同框互动时用 user 的第一人称视角，无同框互动时用与图A 完全不同的第三人称机位，景别按本节的规定。出 3 到 4 张时，其余各张同样取与前几张都不同的机位。
+- 除自拍外，景别固定为全身，两张图都写 full body，人物从头到脚完整入镜、不裁切。只有 user 明确要求特写、近一点、只拍脸或拍某个局部时，才改用近景、中景或特写。
+- 其他照片：全身照靠机位和动作体现张力，每张至少满足以下三条中的两条。机位有明显角度或倾斜，取 worm's-eye、high angle、Dutch angle、ultra wide-angle 或 over-the-shoulder；人物处在动作中段而非站定，衣摆与头发在动，写 dynamic pose 或 motion blur；构图不居中，带前景遮挡、强透视或对角线。
+- 全身构图下人物占画面高度不低于约三分之二，并写 detailed face。
+- 镜头视角词库包括正俯视 top-down、45 度俯视 high angle、平视 eye-level、仰视 low angle 或 worm's-eye、正面 front、背面 rear、侧面 side 或 profile、过肩 over-the-shoulder、第一人称 first-person POV、荷兰角 Dutch angle、鱼眼 fisheye、超广角 ultra wide-angle、标准 standard、长焦 telephoto。
+- 尺寸比例由画面内容决定：横躺、床戏与多人横排用横版，站姿、自拍与竖构图全身用竖版，正面特写用方版。
+
 <!-- portable:start -->
 照片里的你：
 {{外貌}}
