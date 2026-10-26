@@ -62,7 +62,7 @@ WOULD_FAIL_OTHERWISE = {
     "方法不对_本该405": ("POST", au.META, {}, None),
     "请求体是坏JSON_本该422": ("POST", au.provider_url("botalpha"), au.NO_BODY, "{not json"),
     "没有这只bot_本该404": ("POST", au.restart_url("ghost"), {"force": True}, None),
-    "不支持的操作_本该501": ("POST", au.provider_url("botalpha"), {"reset": True}, None),
+    "reset不是布尔值_本该422": ("POST", au.provider_url("botalpha"), {"reset": "yes"}, None),
 }
 
 

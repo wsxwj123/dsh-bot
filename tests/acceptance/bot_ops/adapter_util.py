@@ -78,7 +78,7 @@ CAPABILITIES = {
     "bot.restart.graceful": True,        # graceful-restart 契约：等空闲重启已支持
     "bot.restart.force": True,
     "bot.set_provider": True,
-    "bot.reset_provider": False,
+    "bot.reset_provider": True,          # reset-provider 契约：回到配置文件里那一组已支持
     "bot.set_effort": True,
     "provider.subscription": False,
     "provider.per_session": False,
