@@ -83,13 +83,17 @@ class TextNode {
 }
 function parseSel(sel) {
   if (sel[0] === '#') return (e) => e.attrs.id === sel.slice(1);
-  const m = /^([a-zA-Z]+)?((?:\.[\w-]+)*)((?:\[[\w-]+(?:="[^"]*")?\])*)$/.exec(sel);
+  // 支持末尾的 :checked（页面上用它挑勾选的功能开关），其余伪类仍然不认
+  const checked = sel.endsWith(':checked');
+  const rest = checked ? sel.slice(0, -':checked'.length) : sel;
+  const m = /^([a-zA-Z]+)?((?:\.[\w-]+)*)((?:\[[\w-]+(?:="[^"]*")?\])*)$/.exec(rest);
   if (!m) throw new Error('假 DOM 不认识这个选择器：' + sel);
   const tag = m[1] ? m[1].toUpperCase() : null;
   const classes = m[2] ? m[2].split('.').filter(Boolean) : [];
   const attrs = [...(m[3] || '').matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)].map((a) => [a[1], a[2]]);
   return (e) => (!tag || e.tagName === tag) && classes.every((c) => e.classList.contains(c))
-    && attrs.every(([k, v]) => (k in e.attrs) && (v === undefined || e.attrs[k] === v));
+    && attrs.every(([k, v]) => (k in e.attrs) && (v === undefined || e.attrs[k] === v))
+    && (!checked || e.checked);
 }
 class El {
   constructor(tag) {

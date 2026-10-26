@@ -608,7 +608,7 @@ def test_token已被别的bot用_落盘前就拦住(_seams, stub_get):
 
 def test_B段异常翻成500_internal且detail只有异常类名(_seams, stub_get, monkeypatch):
     stub_get(body={"ok": True, "result": {"id": 1, "username": "my_bot"}})
-    monkeypatch.setattr(ab, "lay_down", lambda f: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(ab, "lay_down", lambda f, **kw: (_ for _ in ()).throw(OSError("disk full")))
     with pytest.raises(HubError) as e:
         ab.create(fields(), _Jobs())
     assert (e.value.status, e.value.error, e.value.detail) == (500, "internal", "OSError")
@@ -624,7 +624,7 @@ def test_全流程任何一条失败路径都不把token带进响应(_seams, stu
     blobs.append(json.dumps(ab.create(fields(), _Jobs())[0], ensure_ascii=False))
     stub_get(body={"ok": True, "result": {"id": 1, "username": "my_bot"}})
     blobs.append(json.dumps(ab.create(fields(), _Jobs())[0], ensure_ascii=False))   # 207
-    monkeypatch.setattr(ab, "lay_down", lambda f: (_ for _ in ()).throw(OSError("x")))
+    monkeypatch.setattr(ab, "lay_down", lambda f, **kw: (_ for _ in ()).throw(OSError("x")))
     with pytest.raises(HubError) as e:
         ab.create(fields(bot_id="another"), _Jobs())
     blobs.append(e.value.detail)
