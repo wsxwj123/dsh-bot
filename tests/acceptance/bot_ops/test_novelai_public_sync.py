@@ -372,20 +372,50 @@ def test_行为10_四个文件无令牌串(tmp_path):
 
 # ---------------------------------------------------------------- 行为 11
 
+def _tracked_skill_files():
+    """`git ls-files` 列出 skills/novelai-skill/ 下已跟踪文件的仓库相对路径。
+
+    与 test_public_sanitize.py 同一判定口径：只看 git 跟踪的文件，运行时生成的
+    未跟踪 `__pycache__/` 等产物不算残留。
+    """
+    proc = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "ls-files",
+            "-z",
+            "--",
+            "skills/novelai-skill",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert proc.returncode == 0, "git ls-files 失败: %r" % (proc.stderr[:500],)
+    names = [raw for raw in proc.stdout.split(b"\x00") if raw]
+    return [raw.decode("utf-8", "surrogateescape") for raw in names]
+
+
 def test_行为11_技能目录无敏感残留文件(tmp_path):
+    tracked = _tracked_skill_files()
+    assert tracked, "git ls-files 未列出技能目录下任何已跟踪文件，判定接缝已失效"
+
     offenders = []
-    for path in SKILL_DIR.rglob("*"):
-        name = path.name
-        rel = path.relative_to(REPO_ROOT).as_posix()
+    for rel in tracked:
+        parts = rel.split("/")
+        name = parts[-1]
         if name == ".env.local":
             offenders.append(rel)
         elif ".bak-" in name:
             offenders.append(rel)
-        elif name == ".snapshots" and path.is_dir():
+        elif ".snapshots" in parts:
             offenders.append(rel)
-        elif name == "__pycache__" and path.is_dir():
+        elif "__pycache__" in parts:
             offenders.append(rel)
-    assert offenders == [], "技能目录存在不允许的残留: %r" % (sorted(offenders),)
+    assert offenders == [], "技能目录已跟踪文件里存在不允许的残留: %r" % (
+        sorted(offenders),
+    )
 
 
 # ---------------------------------------------------------------- 行为 12
