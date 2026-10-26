@@ -68,7 +68,7 @@ DEFAULT_TOKEN_FILE = "~/.config/claude-dsh-console/adapter.token"
 
 EFFORT_LEVELS = ["off", "low", "high", "max"]
 CAPABILITIES = {
-    "bot.restart.graceful": False,
+    "bot.restart.graceful": True,
     "bot.restart.force": True,
     "bot.set_provider": True,
     "bot.reset_provider": False,
@@ -103,6 +103,9 @@ MAX_BODY = 64 * 1024
 GATEWAY_READ_TIMEOUT = 2.0
 #: 重启从发命令算起的总时限（补充文件 4.5：50 秒内没等到就回 failed；壳等 60 秒）。
 RESTART_BUDGET = 50.0
+#: 等空闲重启：后台查健康接口的间隔（秒），以及一条排队最多等多久（秒），超时放弃。
+GRACEFUL_POLL = 1.0
+GRACEFUL_QUEUE_TTL = 1800.0
 MAX_ROW_WORKERS = 8
 #: 换供应商整条请求的时限（补充文件 6.1：55 秒内返回）。测试经 DSH_CONSOLE_PROVIDER_BUDGET 缩短（第 8 节）。
 PROVIDER_BUDGET = 55.0
@@ -241,6 +244,12 @@ _log = logging.getLogger("dsh.adapter")
 #: 同一只 bot 同一时刻只许一个重启在跑（进程内）。键是已经过名单精确匹配的 bot id。
 _restart_locks = {}
 _restart_locks_guard = threading.Lock()
+
+#: 等空闲重启的排队（只在内存，进程重启就丢）。键是 bot id，值是 {"deadline": monotonic 时刻}。
+#: 同一只 bot 只留一条；后台线程 _graceful_worker 每秒查一次，空了就退出。
+_graceful_pending = {}
+_graceful_guard = threading.Lock()
+_graceful_worker_running = [False]
 
 
 class Refuse(Exception):
@@ -1002,13 +1011,104 @@ def _restart_lock(bot_id):
         return _restart_locks.setdefault(bot_id, threading.Lock())
 
 
-def _restart(bot_id):
-    body = _json_object(allow_empty=True)
-    if "force" in body and type(body["force"]) is not bool:
-        raise _invalid("force 只能是 true 或 false")
-    if body.get("force") is not True:
-        raise Refuse(501, "unsupported", "这个底层还不支持等空闲再重启，只能强制重启")
-    _require_enabled(_require_bot(bot_id))
+def _turns_running(channel):
+    """这只 bot 的网关 ``GET /v1/health`` 里正在进行的回合数；问不到按 0（空闲）。
+
+    读超时沿用 ``GATEWAY_READ_TIMEOUT``。网关没在跑、连不上、超时、回的不是对象、
+    ``turns_running`` 不是整数，都算问不到。
+    """
+    if not gateway_client.available(channel):
+        return 0
+    try:
+        _code, got = gateway_client._call(channel, "GET", "/v1/health", timeout=GATEWAY_READ_TIMEOUT)
+    except Exception:                       # noqa: BLE001  问不到按空闲处理
+        return 0
+    turns = got.get("turns_running") if isinstance(got, dict) else None
+    return turns if type(turns) is int and turns > 0 else 0
+
+
+def _enabled_bot(bot_id):
+    """后台线程用：名单里还有这只 bot 且仍启用就返回它，否则 None（不抛）。"""
+    for bot in _own_bots():
+        if bot["id"] == bot_id:
+            return bot if bot["enabled"] else None
+    return None
+
+
+def _queue_graceful(bot_id):
+    """登记一条等空闲重启；同一只 bot 只留一条，重复请求不排第二次。"""
+    with _graceful_guard:
+        if bot_id in _graceful_pending:
+            return
+        _graceful_pending[bot_id] = {"deadline": time.monotonic() + GRACEFUL_QUEUE_TTL}
+        start = not _graceful_worker_running[0]
+        if start:
+            _graceful_worker_running[0] = True
+    _log.info("graceful restart queued: bot=%s", bot_id)
+    if start:
+        threading.Thread(target=_graceful_worker, name="graceful-restart", daemon=True).start()
+
+
+def _take_graceful(bot_id, entry):
+    """把这一条排队摘下来；已被取消或换成新的一条时不动，成功才去重启。"""
+    with _graceful_guard:
+        if _graceful_pending.get(bot_id) is not entry:
+            return False
+        del _graceful_pending[bot_id]
+        return True
+
+
+def _cancel_graceful(bot_id):
+    """取消这只 bot 已排队的重启（force 与发现已空闲的立即重启都走它）。"""
+    with _graceful_guard:
+        _graceful_pending.pop(bot_id, None)
+
+
+def _graceful_tick(bot_id, entry):
+    """看一眼这只 bot：还启用、还没超时、网关变空闲或问不到就执行重启。"""
+    if time.monotonic() >= entry["deadline"]:
+        if _take_graceful(bot_id, entry):
+            _log.info("graceful restart abandoned: bot=%s reason=timeout", bot_id)
+        return
+    bot = _enabled_bot(bot_id)
+    if bot is None:
+        if _take_graceful(bot_id, entry):
+            _log.info("graceful restart abandoned: bot=%s reason=disabled", bot_id)
+        return
+    if _turns_running(bot["channel"]) > 0:
+        return
+    if not _take_graceful(bot_id, entry):
+        return                              # 等的期间被 force 或别的立即重启取消了
+    try:
+        result = _restart_now(bot_id)
+    except Refuse:                          # 同一只 bot 正在重启（409 busy）：这条不再补
+        _log.info("graceful restart failed: bot=%s reason=busy", bot_id)
+        return
+    if result["ok"]:
+        _log.info("graceful restart done: bot=%s", bot_id)
+    else:
+        _log.info("graceful restart failed: bot=%s reason=%s", bot_id, result["message"])
+
+
+def _graceful_worker():
+    """后台守护线程：每秒扫一遍排队，全部处理完就退出（下次登记再起）。"""
+    while True:
+        with _graceful_guard:
+            if not _graceful_pending:
+                _graceful_worker_running[0] = False
+                return
+            entries = list(_graceful_pending.items())
+        time.sleep(GRACEFUL_POLL)
+        for bot_id, entry in entries:
+            try:
+                _graceful_tick(bot_id, entry)
+            except Exception as e:          # noqa: BLE001  一只出事不拖累别的排队，也不许线程死掉
+                _log.error("graceful restart failed: bot=%s error=%s", bot_id, type(e).__name__)
+                _take_graceful(bot_id, entry)
+
+
+def _restart_now(bot_id):
+    """立刻重启（force 与等空闲后的后台执行共用），回包形状不变。"""
     # 覆盖命令（HUB_RESTART_CMD）是「整次换成跑一条全局命令」，做不到只动这一只，这里不走它。
     plan = bots_client.restart_plan()
     if not plan.available:
@@ -1026,6 +1126,23 @@ def _restart(bot_id):
     if not reason or "没有新心跳" in reason:
         reason = "%g 秒内没有等到新的心跳" % RESTART_BUDGET
     return {"ok": False, "status": "failed", "message": "重启命令发了，但没起来：%s" % reason}
+
+
+def _restart(bot_id):
+    body = _json_object(allow_empty=True)
+    if "force" in body and type(body["force"]) is not bool:
+        raise _invalid("force 只能是 true 或 false")
+    bot = _require_bot(bot_id)
+    _require_enabled(bot)
+    if body.get("force") is True:
+        _cancel_graceful(bot_id)            # 强制重启立刻做，已排队的那次不再做
+        return _restart_now(bot_id)
+    if _turns_running(bot["channel"]) > 0:
+        _queue_graceful(bot_id)
+        return {"ok": True, "status": "queued",
+                "message": "这只 bot 正在回复，已记下，等这一轮结束再重启"}
+    _cancel_graceful(bot_id)                # 已经空闲：这次立即重启，不留下排队的一条
+    return _restart_now(bot_id)
 
 
 def _utf8_size(text):
