@@ -64,6 +64,18 @@ export function safeError(e: unknown): string {
   return parts.join(' ')
 }
 
+/** 聊天编号脱敏：只留后四位，看不清的短号只留 ***。给日志和给模型看的错误文案用 */
+export function maskChatId(id: string): string {
+  const s = String(id)
+  return s.length > 4 ? `***${s.slice(-4)}` : '***'
+}
+
+/** 把文本里出现的某个聊天编号换成脱敏形式（调用方用它处理错误串，别把完整目标号带进日志） */
+export function maskChatIdIn(text: string, id: string): string {
+  if (!id || !text.includes(id)) return text
+  return text.split(id).join(maskChatId(id))
+}
+
 export class RotatingFile {
   constructor(readonly path: string, readonly maxBytes = 10 * 1024 * 1024, readonly keep = 5) {
     mkdirSync(dirname(path), { recursive: true })

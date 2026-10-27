@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { Logger, redact, redactSecrets, registerSecret, registerSecrets, RotatingFile, safeError } from '../../src/log'
+import { Logger, maskChatId, maskChatIdIn, redact, redactSecrets, registerSecret, registerSecrets, RotatingFile, safeError } from '../../src/log'
 
 test('脱敏：Telegram 令牌、sk- 密钥、Bearer 口令、x-api-key、URL 里的口令', () => {
   const tok = '123456789:TESTONLY_not_a_real_token_0000000000'
@@ -61,6 +61,16 @@ test('日志按大小轮转，最多保留 keep 份', () => {
   expect(files).toEqual(['a.log', 'a.log.1', 'a.log.2'])
   expect(readFileSync(join(dir, 'a.log'), 'utf8').length).toBeLessThan(400)
   rmSync(dir, { recursive: true, force: true })
+})
+
+test('聊天号脱敏：只留后四位，短号只留 ***', () => {
+  expect(maskChatId('-1001777')).toBe('***1777')
+  expect(maskChatId('5550001')).toBe('***0001')
+  expect(maskChatId('1234')).toBe('***')
+  expect(maskChatId('')).toBe('***')
+  expect(maskChatIdIn('chat -1001777 not found', '-1001777')).toBe('chat ***1777 not found')
+  expect(maskChatIdIn('nothing here', '-1001777')).toBe('nothing here')
+  expect(maskChatIdIn('x', '')).toBe('x')
 })
 
 test('Logger 写盘前脱敏', () => {
