@@ -1,5 +1,7 @@
-// 群记录里别人发的图（纯逻辑，不碰文件系统）：水位、排除本 bot 自己写的行、按行序消费、每回合上限。
-// 读目录白名单与真正的 open/fstat/read 在 media.readSharedImage 里；这里只负责"该看哪几行、水位推到哪"。
+// 群记录里别人发的图：水位、排除本 bot 自己写的行、按行序消费、每回合上限。
+// 读目录白名单与真正的 open/fstat/read 在 media.readSharedImage 里；这里只负责"该看哪几行、水位推到哪"，
+// 另外为了判重和上限只对路径做 realpath（不读文件内容）。
+import { realpathSync } from 'fs'
 import { extname, isAbsolute } from 'path'
 import { SHARED_IMAGE_EXTS } from '../media/media'
 import { transcriptTs, type TranscriptLine } from './transcript'
@@ -99,6 +101,14 @@ export function consumeSharedImages(o: {
     if (!info) continue
     if (info.kind === 'skip') { o.onSkip?.(line, info.reason); consumed(line); continue }
     if (!o.botUsername) selfCheckUnavailable = true
+    // 到每回合上限就不再读文件（每张最多 8 MiB + base64），留给下一回合；
+    // 只有"本回合已经给过的同一张图"才继续消费，判重单独用 realpath、不读内容
+    if (picks.length >= o.max) {
+      let real: string | null = null
+      try { real = realpathSync(info.path) } catch {}
+      if (real !== null && seenReal.has(real)) { consumed(line); continue }
+      break
+    }
     const r = o.read(info.path)
     if (!r.ok) { o.onSkip?.(line, r.reason); consumed(line); continue }
     if (seenReal.has(r.real)) { consumed(line); continue }
