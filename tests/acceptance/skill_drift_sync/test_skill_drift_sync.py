@@ -4,8 +4,10 @@
 不 import moments.skill_templates / moments.handoff 等内部模块，不 mock。
 被测模块在用例内部动态导入：实现不存在时是"用例失败"，不是"收集错误"。
 """
+import datetime
 import importlib
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +18,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 START = "<!-- portable:start -->"
 END = "<!-- portable:end -->"
 BACKUP_SUFFIX = ".bak-before-skill-sync"
+IMAGE_GENERIC = "image"
+NSFW_GENERIC = "nsfw"
+# image 模板在拿不到外貌变量时渲染出的 fallback 文案（经公开函数观测）
+IMAGE_FALLBACK_APPEARANCE = "按人设里的外貌描写来画。"
 GENERIC = "gif"
 OTHER_GENERIC = "voice"
 OUTSIDE_BEFORE = "圈外前-KEEP-9f3a"
@@ -68,6 +74,27 @@ def _skill_file(inner, generic=GENERIC):
         + OUTSIDE_BEFORE + "\n"
         + START + "\n" + inner + "\n" + END + "\n"
         + OUTSIDE_AFTER + "\n"
+    )
+
+
+def _backup_path(path):
+    """接口约定：备份名为 <原路径><suffix>-<YYYYMMDD>。"""
+    return Path(str(path) + BACKUP_SUFFIX + "-" + datetime.date.today().strftime("%Y%m%d"))
+
+
+def _circle(path):
+    text = Path(path).read_text(encoding="utf-8")
+    assert START in text and END in text
+    return text.split(START, 1)[1].split(END, 1)[0]
+
+
+def _nsfw_old_section(*examples):
+    """构造旧文件圈内“已渲染过例句段”的形态，只依赖模板占位语义。"""
+    return (
+        "# 情欲场景语气参考\n\n"
+        "以下只作语气参考，不是必用清单。按当下情境自然反应，不照搬原句。\n\n"
+        + "\n".join("- " + example for example in examples)
+        + "\n\n说话特点和回复规则照常驻人设，这份语料不压过人设。"
     )
 
 
@@ -234,7 +261,7 @@ def test_sync_无成对标记_返回no_marker_不写盘不备份_命令行退出
     path = _write_skill(bot_dir, "圈外\n" + START + "\n正文不能泄露-9f3a\n")
     before_bytes = path.read_bytes()
     before_stat = path.stat()
-    backup = Path(str(path) + BACKUP_SUFFIX)
+    backup = _backup_path(path)
 
     result = _skill_sync().sync_bot(str(bot_dir), GENERIC)
 
@@ -269,7 +296,7 @@ def test_sync_模板不存在_返回template_missing且原文不变(tmp_path):
 
     assert result == {"ok": False, "reason": "template_missing"}
     assert path.read_bytes() == before
-    assert not Path(str(path) + BACKUP_SUFFIX).exists()
+    assert not _backup_path(path).exists()
 
 
 def test_sync_圈内有变化_只换圈内_生成同权限备份并保留文件权限(tmp_path):
@@ -277,7 +304,7 @@ def test_sync_圈内有变化_只换圈内_生成同权限备份并保留文件�
     path = _write_skill(bot_dir, _skill_file(OLD_INNER))
     os.chmod(path, 0o640)
     original = path.read_bytes()
-    backup = Path(str(path) + BACKUP_SUFFIX)
+    backup = _backup_path(path)
 
     result = _skill_sync().sync_bot(str(bot_dir), GENERIC)
 
@@ -286,11 +313,15 @@ def test_sync_圈内有变化_只换圈内_生成同权限备份并保留文件�
     assert result["backup"] == str(backup)
     assert backup.exists()
     assert backup.read_bytes() == original
-    assert (backup.stat().st_mode & 0o777) == 0o640
     assert backup.parent == path.parent
 
     new_bytes = path.read_bytes()
-    assert (path.stat().st_mode & 0o777) == 0o640
+    if os.name == "posix":
+        assert (backup.stat().st_mode & 0o777) == 0o640
+        assert (path.stat().st_mode & 0o777) == 0o640
+    else:
+        # Windows 只有只读位，只断言可读
+        assert os.access(backup, os.R_OK) and os.access(path, os.R_OK)
     assert new_bytes.startswith(original.split(START.encode(), 1)[0]), "圈外前半必须逐字节不动"
     assert new_bytes.endswith(original.split(END.encode(), 1)[1]), "圈外后半必须逐字节不动"
     assert new_bytes.count(START.encode()) == 1
@@ -307,7 +338,8 @@ def test_sync_圈内已一致_不写盘不备份且命令行退出码0(tmp_path)
     module = _skill_sync()
     assert module.sync_bot(str(bot_dir), GENERIC)["changed"] is True
 
-    backup = Path(str(path) + BACKUP_SUFFIX)
+    backup = _backup_path(path)
+    assert backup.exists(), "首次同步应生成带当天日期的备份"
     backup.unlink()
     before_bytes = path.read_bytes()
     before_stat = path.stat()
@@ -369,7 +401,7 @@ def test_sync_all_逐个同步_单个失败不影响其余(tmp_path):
     assert result["bot_bad"][GENERIC] == {"ok": False, "reason": "no_marker"}
     assert OLD_INNER.encode() not in good_path.read_bytes(), "成功的 bot 应真正写入"
     assert bad_path.read_bytes() == bad_before, "失败的 bot 不得被改动"
-    assert not Path(str(bad_path) + BACKUP_SUFFIX).exists()
+    assert not _backup_path(bad_path).exists()
 
 
 def test_check_一个技能存在另一个技能缺失_缺失记为missing(tmp_path):
@@ -386,3 +418,100 @@ def test_check_一个技能存在另一个技能缺失_缺失记为missing(tmp_p
     _assert_bot_counts(info)
     assert result["totals"]["diff"] == 1
     assert _run_cli("check", "--bots-root", str(bots_root)).returncode == 1
+
+
+def test_sync_image_旧圈内照片里的你之后的外貌_同步后原文写回新圈内(tmp_path):
+    bot_dir = tmp_path / "bots" / "bot1"
+    appearance = "外貌原文-APPEARANCE-9f3a"
+    path = _write_skill(
+        bot_dir,
+        _skill_file("照片里的你：\n" + appearance, IMAGE_GENERIC),
+        IMAGE_GENERIC,
+    )
+
+    result = _skill_sync().sync_bot(str(bot_dir), IMAGE_GENERIC)
+
+    assert result["ok"] is True
+    assert result["changed"] is True
+    assert appearance in _circle(path), "旧圈内的外貌必须原样进入新圈内"
+
+
+def test_sync_image_旧圈内没有照片里的你_同步后写回fallback文案(tmp_path):
+    bot_dir = tmp_path / "bots" / "bot1"
+    old_only = "旧圈内没有外貌标记-NOAPPEARANCE-9f3a"
+    path = _write_skill(bot_dir, _skill_file(old_only, IMAGE_GENERIC), IMAGE_GENERIC)
+
+    result = _skill_sync().sync_bot(str(bot_dir), IMAGE_GENERIC)
+
+    assert result["ok"] is True
+    circle = _circle(path)
+    assert IMAGE_FALLBACK_APPEARANCE in circle
+    assert old_only not in circle, "拿不到外貌变量时不应沿用旧圈内正文"
+
+
+def test_sync_nsfw_传入persona_用persona的例句替换旧例句(tmp_path):
+    bot_dir = tmp_path / "bots" / "bot1"
+    path = _write_skill(
+        bot_dir,
+        _skill_file(_nsfw_old_section("旧例句NSFW-OLD-9f3a"), NSFW_GENERIC),
+        NSFW_GENERIC,
+    )
+    persona = (
+        "## 语料库\n"
+        "1.日常对话\n- 日常一句DAILY-9f3a\n\n"
+        "2.NSFW\n- 新例句NSFW-NEW-9f3a\n- 新例句二NSFW-NEW2-9f3a\n\n"
+        "## USER.md：\n- Name: 测试\n"
+    )
+
+    result = _skill_sync().sync_bot(str(bot_dir), NSFW_GENERIC, persona=persona)
+
+    assert result["ok"] is True
+    circle = _circle(path)
+    assert "新例句NSFW-NEW-9f3a" in circle
+    assert "新例句二NSFW-NEW2-9f3a" in circle
+    assert "旧例句NSFW-OLD-9f3a" not in circle, "传了 persona 就不该沿用旧例句"
+    assert "日常一句DAILY-9f3a" not in circle, "只提取 NSFW 段，日常语料不进入技能"
+
+
+def test_sync_nsfw_不传persona_旧圈内例句段原样保留(tmp_path):
+    bot_dir = tmp_path / "bots" / "bot1"
+    path = _write_skill(
+        bot_dir,
+        _skill_file(
+            _nsfw_old_section("旧例句NSFW-KEEP-9f3a", "旧例句二NSFW-KEEP2-9f3a"),
+            NSFW_GENERIC,
+        ),
+        NSFW_GENERIC,
+    )
+
+    result = _skill_sync().sync_bot(str(bot_dir), NSFW_GENERIC)
+
+    assert result["ok"] is True
+    circle = _circle(path)
+    assert "旧例句NSFW-KEEP-9f3a" in circle
+    assert "旧例句二NSFW-KEEP2-9f3a" in circle
+
+
+def test_check_默认输出_每个技能一行含名字状态行数且不含正文(tmp_path):
+    bots_root = tmp_path / "bots"
+    _write_skill(bots_root / "bot1", _skill_file(DRIFT_INNER))
+
+    result = _run_cli("check", "--bots-root", str(bots_root))
+
+    assert result.returncode == 1
+    assert re.search(
+        r"bot1\s+%s\s+diff\s+\d+\s+行" % re.escape(GENERIC), result.stdout
+    ), "默认输出应在同一行给出 bot 名、技能名、diff 与差异行数"
+    assert DRIFT_INNER not in result.stdout, "默认输出不得打印技能正文"
+
+
+def test_check_verbose_输出差异行号且仍不含正文(tmp_path):
+    bots_root = tmp_path / "bots"
+    _write_skill(bots_root / "bot1", _skill_file(DRIFT_INNER))
+
+    result = _run_verbose_check(bots_root)
+
+    assert result.returncode == 1
+    assert re.search(r"第\s*\d+(?:\s*、\s*\d+)*\s*行", result.stdout), \
+        "verbose 应给出差异行号"
+    assert DRIFT_INNER not in result.stdout, "verbose 也不得打印技能正文"
