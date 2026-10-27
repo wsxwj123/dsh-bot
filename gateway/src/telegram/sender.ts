@@ -5,7 +5,7 @@ import { extname, isAbsolute, join, relative } from 'path'
 import type { Access } from '../config'
 import type { Ledger, OutboundKind } from '../ledger'
 import { MAX_SHARED_IMAGE_BYTES } from '../media/media'
-import { safeError, type Logger } from '../log'
+import { maskChatIdIn, safeError, type Logger } from '../log'
 import { crashPoint, sleep } from '../util'
 import { classifySendError, isReplyNotFound, type TelegramApi } from './api'
 import { buildSendPlan } from './send_plan'
@@ -39,6 +39,9 @@ export type SendRequest = {
   /** 语音朗读稿，按段对应文字段（第 i 段文字配第 i 段朗读稿）。和旧系统一样：每段先发文字，再发语音；
    *  没给朗读稿就读文字本身；某段朗读稿是空的，这一段只发文字 */
   voiceTexts?: string[]
+  /** 日志里显示的聊天标识：缺省就是 chatId（现有行为不变）。跨聊天发送时传脱敏值，
+   *  此时不写正文对话行（跨聊天的正文不进当前聊天的 chat.log） */
+  logChat?: string
 }
 
 /** 比较"是不是同一句话"时用：去掉首尾空白，连续空白算一个 */
@@ -151,6 +154,9 @@ export class Sender {
   async send(req: SendRequest): Promise<PartResult[]> {
     const access = req.keepParagraphs ? { ...this.o.access(), splitOnParagraph: false } : this.o.access()
     const items = planParts(req.text, req.files ?? [], access)
+    // 日志上的聊天标识：同聊天就是真实号（与改动前逐字节一致）；跨聊天是脱敏值，且不写正文对话行
+    const logChat = req.logChat ?? req.chatId
+    const crossChat = logChat !== req.chatId
     const delay = access.splitOnParagraph ? Math.max(0, access.paragraphDelay ?? 0) : 0
     const replyMode = access.replyToMode ?? 'first'
     const results: PartResult[] = []
@@ -170,7 +176,7 @@ export class Sender {
         const item = items[i]!
         const ti = item.kind === 'text' ? textIdx++ : -1
         if (this.halted) {
-          this.log.info('send.halted', { chat: req.chatId, part: i + 1 })
+          this.log.info('send.halted', { chat: logChat, part: i + 1 })
           results.push({ index: i + 1, kind: item.kind, state: 'skipped', reason: '网关正在停止' })
           continue
         }
@@ -202,7 +208,7 @@ export class Sender {
         let useReply = replyTo
         let triedWithoutReply = false
         const shrunk = fk === 'photo' ? shrinkPhoto(filePath!) : null
-        if (shrunk) this.log.info('send.photo_shrunk', { chat: req.chatId, part: i + 1, from: statSync(filePath!).size, to: statSync(shrunk).size })
+        if (shrunk) this.log.info('send.photo_shrunk', { chat: logChat, part: i + 1, from: statSync(filePath!).size, to: statSync(shrunk).size })
         for (;;) {
           attempt++
           try {
@@ -217,7 +223,7 @@ export class Sender {
               const shared = allowedFile(filePath!, this.o.shareDirs?.() ?? [])
               try { if (shared && statSync(shared).size <= MAX_SHARED_IMAGE_BYTES) sharedPhoto = shared } catch {}
             }
-            if (item.kind === 'text') this.log.chatLine('bot', req.chatId, item.text)
+            if (item.kind === 'text' && !crossChat) this.log.chatLine('bot', req.chatId, item.text)
             if (sentTexts.length === 0) firstSentId = m.message_id
             sentTexts.push(item.kind === 'text' ? item.text : fk === 'photo' ? '[图片]' : fk === 'animation' ? '[表情包]' : fk === 'sticker' ? '[贴纸]' : '[文件]')
             lastSentAt = new Date()
@@ -228,11 +234,11 @@ export class Sender {
             if (useReply && !triedWithoutReply && isReplyNotFound(e)) {
               triedWithoutReply = true
               useReply = undefined
-              this.log.info('send.reply_target_missing', { chat: req.chatId, part: i + 1 })
+              this.log.info('send.reply_target_missing', { chat: logChat, part: i + 1 })
               continue
             }
             const info = classifySendError(e)
-            this.log.warn('send.failed', { chat: req.chatId, part: i + 1, cls: info.cls, reason: info.reason, err: safeError(e) })
+            this.log.warn('send.failed', { chat: logChat, part: i + 1, cls: info.cls, reason: info.reason, err: crossChat ? maskChatIdIn(safeError(e), req.chatId) : safeError(e) })
             if (info.cls === 'retryable') {
               const waitMs = info.retryAfterSec !== undefined ? info.retryAfterSec * 1000 : 1000 * attempt
               if (attempt < 4 && waitMs <= waitBudget) {
@@ -263,7 +269,7 @@ export class Sender {
       if (sentTexts.length) {
         // 记群记录失败不能影响已经发出的结果：回调内部再兜一层
         try { this.o.onSent?.(req.chatId, firstSentId, sentTexts.join('\n'), lastSentAt, sharedPhoto ? [sharedPhoto] : undefined) }
-        catch { this.log.warn('send.on_sent_failed', { chat: req.chatId }) }
+        catch { this.log.warn('send.on_sent_failed', { chat: logChat }) }
       }
     }
     return results
@@ -272,12 +278,13 @@ export class Sender {
   /** 文字段发出后补发语音（文字已经在了，语音失败只记日志，不影响这一段算送达） */
   private async sendVoice(req: SendRequest, part: number, text: string): Promise<void> {
     if (!text.trim() || !req.voice) return
+    const logChat = req.logChat ?? req.chatId
     const audio = await req.voice(text)
     let ok = false
     if (audio) {
-      try { await this.api.sendFile('voice', req.chatId, audio); ok = true } catch (e) { this.log.warn('send.voice_failed', { chat: req.chatId, part, err: safeError(e) }) }
+      try { await this.api.sendFile('voice', req.chatId, audio); ok = true } catch (e) { this.log.warn('send.voice_failed', { chat: logChat, part, err: logChat !== req.chatId ? maskChatIdIn(safeError(e), req.chatId) : safeError(e) }) }
     }
-    this.log.info('send.voice', { chat: req.chatId, part, ok })
+    this.log.info('send.voice', { chat: logChat, part, ok })
   }
 }
 
