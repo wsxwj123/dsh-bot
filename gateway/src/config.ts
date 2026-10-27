@@ -406,14 +406,23 @@ export function readAccess(channelDir: string): Access | null {
  * 每次用时重读（和旧系统一样支持热改）。
  * 文件不存在 → 全部拒绝；文件在但读坏了 → 沿用本进程上次成功读到的白名单
  * （配置损坏不该把已经放行的人踢掉，也不会放陌生人进来）；从没读成功过 → 全部拒绝。
+ * 沿用旧名单时回调 reporter（main 接到日志上并限频），不让配置损坏静默发生。
  */
 const lastGoodAccess = new Map<string, Access>()
+let accessFallbackReporter: ((channelDir: string) => void) | null = null
+
+/** main 启动时接入日志；传 null 取消。调用频率由 loadAccess 决定（每次读坏都会调一次，建议调用方限频） */
+export function setAccessFallbackReporter(fn: ((channelDir: string) => void) | null): void {
+  accessFallbackReporter = fn
+}
 
 export function loadAccess(channelDir: string): Access {
   if (!existsSync(join(channelDir, 'access.json'))) return { dmPolicy: 'disabled', allowFrom: [], groups: {} }
   const a = readAccess(channelDir)
   if (a) { lastGoodAccess.set(channelDir, a); return a }
-  return lastGoodAccess.get(channelDir) ?? { dmPolicy: 'disabled', allowFrom: [], groups: {} }
+  const fallback = lastGoodAccess.get(channelDir)
+  if (fallback) accessFallbackReporter?.(channelDir)
+  return fallback ?? { dmPolicy: 'disabled', allowFrom: [], groups: {} }
 }
 
 /** 跨聊天发送的目标：chatId 是实际要发的编号，kind 决定是否写群记录 */
@@ -422,18 +431,19 @@ export type RegisteredChat = { chatId: string; kind: 'group' | 'dm' }
 /**
  * 在 access.json 的登记表里找 raw 对应的聊天（raw 由调用方 trim、验过格式）。
  * 只做首尾 trim 后逐 UTF-16 码元相等，不做大小写折叠、前缀、数值归一；未登记返回 null。
- * 群用 access.groups 的原始键（群记录按它落盘），私聊取 allowFrom 里的登记值。
+ * 返回的 chatId 是校验过的规范形态（trim 后），发送与落盘都用它——校验用哪个值、
+ * 使用就必须是同一个值，不能让配置里的原始键（可能带空白）进入发送路径。
  */
 export function registeredChatTarget(access: Pick<Access, 'allowFrom' | 'groups'>, raw: string): RegisteredChat | null {
   const t = raw.trim()
   if (!t) return null
   if (t.startsWith('-')) {
-    for (const key of Object.keys(access.groups)) if (key.trim() === t) return { chatId: key, kind: 'group' }
+    for (const key of Object.keys(access.groups)) if (key.trim() === t) return { chatId: t, kind: 'group' }
     return null
   }
   for (const entry of access.allowFrom) {
-    const s = String(entry)
-    if (s.trim() === t) return { chatId: s.trim(), kind: 'dm' }
+    const s = String(entry).trim()
+    if (s === t) return { chatId: t, kind: 'dm' }
   }
   return null
 }

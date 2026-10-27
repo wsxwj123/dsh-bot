@@ -8,7 +8,7 @@
 // - 轮转（约定 v1.2 5.12.4）：文件超过阈值，抢到锁的写方把它改名成 <群 id>.jsonl.1（只留一份旧的）；读方读当前 + .1
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'fs'
 import { join } from 'path'
-import { safeError, type Logger } from '../log'
+import { maskChatIdIn, safeError, type Logger } from '../log'
 import { retryWhenBusy } from '../util'
 import type { TgMessage } from '../telegram/api'
 import { senderName, toInbound } from '../telegram/inbound'
@@ -53,14 +53,15 @@ export class GroupTranscript {
 
   private file(chatId: string): string { return join(this.dir, `${chatId}.jsonl`) }
 
-  private append(line: TranscriptLine): void {
+  private append(line: TranscriptLine, logChat?: string): void {
+    const shown = logChat ?? line.chat_id
     try {
       mkdirSync(this.dir, { recursive: true, mode: 0o700 })
-      this.rotate(line.chat_id)
+      this.rotate(line.chat_id, logChat)
       // 每行都按路径追加打开、写完就关：别人刚轮转过，下一行自然写进新文件
       appendFileSync(this.file(line.chat_id), JSON.stringify(line) + '\n', { mode: 0o600 })
     } catch (e) {
-      this.log.warn('group.transcript_failed', { chat: line.chat_id, err: safeError(e) })
+      this.log.warn('group.transcript_failed', { chat: shown, err: logChat ? maskChatIdIn(safeError(e), line.chat_id) : safeError(e) })
     }
   }
 
@@ -84,17 +85,17 @@ export class GroupTranscript {
 
   /** 本 bot 在群里的一次回复（各段已由调用方连成一条；messageId 是第一条发出的段，at 是最后一段发出的时刻）。
    *  photoPath 是这次回复第一张实际送达、且在共享图库内的原图真实路径；没有就不写图片字段。 */
-  sent(chatId: string, messageId: number, text: string, at: Date = new Date(), photoPath?: string): void {
+  sent(chatId: string, messageId: number, text: string, at: Date = new Date(), photoPath?: string, logChat?: string): void {
     const me = this.me()
     this.append({
       ts: at.toISOString(), chat_id: chatId, message_id: messageId, from_id: String(me.id), from_username: me.username,
       from_name: me.name, is_bot: true, text: text.slice(0, 1000), observed_by: me.username,
       ...(photoPath ? { attachment_kind: 'photo', image_path: photoPath } : {}),
-    })
+    }, logChat)
   }
 
   /** 文件大于阈值就改名成 .1。抢不到锁（别人正在轮转）就跳过这次，调用方照常追加；不整份重写 */
-  private rotate(chatId: string): void {
+  private rotate(chatId: string, logChat?: string): void {
     const path = this.file(chatId)
     const limit = this.rotateBytes()
     try { if (statSync(path).size <= limit) return } catch { return } // 文件还没有
@@ -114,10 +115,10 @@ export class GroupTranscript {
           rmSync(old, { force: true })
           retryWhenBusy(() => renameSync(path, old))
         }
-        this.log.info('group.transcript_rotated', { chat: chatId })
+        this.log.info('group.transcript_rotated', { chat: logChat ?? chatId })
       }
     } catch (e) {
-      this.log.warn('group.rotate_failed', { chat: chatId, err: safeError(e) })
+      this.log.warn('group.rotate_failed', { chat: logChat ?? chatId, err: logChat ? maskChatIdIn(safeError(e), chatId) : safeError(e) })
     } finally {
       try { rmSync(lock, { force: true }) } catch {}
     }

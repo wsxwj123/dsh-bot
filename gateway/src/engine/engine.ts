@@ -464,19 +464,19 @@ export class Engine {
     if (rawChat !== undefined && rawChat !== null) {
       if (typeof rawChat !== 'string') {
         this.log.warn('tool.reply_target_rejected', { turn: at.turnId, reason: 'type', kind: typeof rawChat })
-        return { text: '没有发出：chat_id 必须是字符串（数字也要写成带引号的字符串）。[E_TYPE]', isError: true }
+        return { text: '没有发出：chat_id 必须是字符串（数字也要写成带引号的字符串）。不要告诉对方已经发了。[E_TYPE]', isError: true }
       }
       const c = rawChat.trim()
       if (c && c !== at.chatId) {
         const kind = c.startsWith('-') ? 'group' : 'dm'
         if (!/^-?[1-9]\d{0,19}$/.test(c)) {
           this.log.warn('tool.reply_target_rejected', { turn: at.turnId, reason: 'format', kind })
-          return { text: '没有发出：chat_id 只能是最多 20 位的十进制数字，群号是负数。[E_FORMAT]', isError: true }
+          return { text: '没有发出：chat_id 只能是不带前导 0 的十进制数字（最多 20 位），群号是负数。不要告诉对方已经发了。[E_FORMAT]', isError: true }
         }
         const access = readAccess(this.cfg.channelDir)
         if (!access) {
           this.log.warn('tool.reply_target_rejected', { turn: at.turnId, reason: 'config', kind, dst: maskChatId(c) })
-          return { text: '没有发出：聊天登记表读不出来，暂时不能发到别的聊天（发到当前聊天不受影响）。[E_CONFIG]', isError: true }
+          return { text: '没有发出：聊天登记表读不出来，暂时不能发到别的聊天（发到当前聊天不受影响）。不要告诉对方已经发了。[E_CONFIG]', isError: true }
         }
         const reg = registeredChatTarget(access, c)
         if (!reg) {
@@ -485,7 +485,7 @@ export class Engine {
         }
         if (reg.kind === 'group' && !this.features.groups) {
           this.log.warn('tool.reply_target_rejected', { turn: at.turnId, reason: 'groups_off', kind, dst: maskChatId(c) })
-          return { text: '没有发出：群聊功能现在关着，不能发到群。[E_GROUPS_OFF]', isError: true }
+          return { text: '没有发出：群聊功能现在关着，不能发到群。不要告诉对方已经发了。[E_GROUPS_OFF]', isError: true }
         }
         target = reg.chatId
         cross = true
@@ -531,23 +531,38 @@ export class Engine {
         }
         this.log.info('tool.reply', { turn: at.turnId, parts: results.length, delivered: d.delivered, duplicates: results.filter(r => r.state === 'duplicate').length, ...(cross ? { dst: maskChatId(target) } : {}), ...(voice ? { voice: true } : {}) })
         if (!cross) return { text: d.text, isError: d.isError }
-        // 跨聊天：文案必须让模型知道当前聊天的人看不到，避免它以为这就算回过了
+        // 跨聊天：文案必须让模型知道哪个聊天收到了什么，避免它以为这就算回过了、或者重发已经送达的段
+        const delivered = results.filter(r => r.state === 'sent').length
         const failed = results.some(r => r.state === 'failed' || r.state === 'skipped')
-        let out = `${d.text}\n\n这条发到了另一个聊天（${maskChatId(target)}），当前聊天里的人看不到。`
+        let out = d.text
+        if (delivered === 0) {
+          // 一段都没送达：不能说「发到了另一个聊天」，否则和下一句自相矛盾
+          out += '\n\n目标聊天没有收到，可能是群号不对、被移出或拉黑。不要告诉对方已经发了。'
+        } else {
+          out += `\n\n这条发到了另一个聊天（${maskChatId(target)}），当前聊天里的人看不到。如果当前聊天的人在等回复，可以再回一句。`
+          if (failed) out += '\n有段落发送失败，已经送达的那几段不要重发。'
+        }
         if (wantedReplyTo) out += '\n跨聊天时 reply_to 已忽略（消息编号只属于当前聊天）。'
-        if (failed) out += '\n目标聊天没有收到，可能是群号不对、被移出或拉黑。不要告诉对方已经发了。'
-        return { text: out, isError: d.isError || failed }
+        return { text: out, isError: d.isError }
       })
       .finally(() => { at.toolsInFlight--; at.lastProgressAt = Date.now() })
     // dsh 等一次工具调用最多 60 秒，超时模型会以为没发出去、再发一遍（真机 M4 问题 3）。发得慢就先告诉它"在发了"，后台接着发
     const first = await Promise.race([sending, sleep(this.cfg.gw.replyReturnMs).then(() => null)])
     if (first) return { text: first.text, isError: first.isError }
-    this.log.info('tool.reply_slow', { turn: at.turnId })
-    return { text: '正在发送（图片或语音比较大，需要一点时间），对方会陆续收到。不要再用 reply 重发这些内容；说完了就结束这一轮。' }
+    this.log.info('tool.reply_slow', { turn: at.turnId, ...(cross ? { dst: maskChatId(target) } : {}) })
+    let slow = '正在发送（图片或语音比较大，需要一点时间），对方会陆续收到。不要再用 reply 重发这些内容；说完了就结束这一轮。'
+    if (cross) {
+      slow += `\n这条在发往另一个聊天（${maskChatId(target)}），当前聊天里的人看不到。`
+      if (wantedReplyTo) slow += '\n跨聊天时 reply_to 已忽略（消息编号只属于当前聊天）。'
+    }
+    return { text: slow }
   }
 
   /** 只读：列出这个 bot 登记过的聊天（reply 的 chat_id 只能填这些）。不发送任何消息、不写账本 */
   async toolChats(ctx: { chatId: string; segmentId: number }): Promise<{ text: string; isError?: boolean }> {
+    // 和其它工具一致：写摘要那一轮所有工具都锁住（本工具只读，但保持一致更不容易出错）
+    const at = this.activeFor(ctx.chatId, ctx.segmentId)
+    if (at?.mode === 'summary') return LOCKED
     const access = readAccess(this.cfg.channelDir)
     if (!access) {
       this.log.warn('tool.list_chats', { ok: false, reason: 'config' })
@@ -555,6 +570,8 @@ export class Engine {
     }
     const seen = readSeenGroups(join(this.cfg.stateDir, 'groups-seen.json'))
     const tail = (id: string) => (id.length > 4 ? id.slice(-4) : id)
+    // 群名是别人写的（群管理员可改）＝ 不可信输入：去掉控制字符、截断，避免把提示词注入原样送进模型上下文
+    const cleanName = (s: string) => s.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 40)
     const chats: { chat_id: string; kind: 'group' | 'dm'; name: string; current: boolean }[] = []
     const listed = new Set<string>()
     if (this.features.groups) {
@@ -563,12 +580,14 @@ export class Engine {
         if (!/^-[1-9]\d{0,19}$/.test(id) || listed.has(id)) continue
         listed.add(id)
         const title = seen[id]?.title
-        chats.push({ chat_id: id, kind: 'group', name: title ? title : `群 尾号${tail(id)}`, current: id === ctx.chatId })
+        const name = title ? cleanName(title) : ''
+        chats.push({ chat_id: id, kind: 'group', name: name || `群 尾号${tail(id)}`, current: id === ctx.chatId })
       }
     }
     for (const entry of access.allowFrom) {
       const id = String(entry).trim()
-      if (!/^-?[1-9]\d{0,19}$/.test(id) || listed.has(id)) continue
+      // 私聊号不带负号：allowFrom 里混进的群号不列出来（reply 对它也只查 groups，列了也发不出去）
+      if (!/^[1-9]\d{0,19}$/.test(id) || listed.has(id)) continue
       listed.add(id)
       chats.push({ chat_id: id, kind: 'dm', name: `私聊 尾号${tail(id)}`, current: id === ctx.chatId })
     }

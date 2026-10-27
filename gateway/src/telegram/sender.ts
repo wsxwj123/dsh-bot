@@ -146,8 +146,9 @@ export class Sender {
       shareDirs?: () => readonly string[]
       /** 一次 send 的各段都发完后回调一次（群聊记录用：bot 自己在群里说的话由自己记，一次回复记一行）。
        *  text 是发出的各段按顺序以换行连接（非文字段写占位），messageId 是第一条发出的段，at 是最后一段发出的时刻；
-       *  photos 是这一回复第一张确实送达、且在共享图库内、不超过 8 MiB 的原图真实路径；一段都没发出就不回调 */
-      onSent?: (chatId: string, messageId: number, text: string, at: Date, photos?: string[]) => void
+       *  photos 是这一回复第一张确实送达、且在共享图库内、不超过 8 MiB 的原图真实路径；一段都没发出就不回调。
+       *  logChat 是日志用的脱敏目标（跨聊天时才有值），回调里的任何日志都不要写完整号 */
+      onSent?: (chatId: string, messageId: number, text: string, at: Date, photos?: string[], logChat?: string) => void
     },
   ) {}
 
@@ -268,7 +269,7 @@ export class Sender {
       // 中途抛异常也把已经发出去的段记上（对方已经看到了）
       if (sentTexts.length) {
         // 记群记录失败不能影响已经发出的结果：回调内部再兜一层
-        try { this.o.onSent?.(req.chatId, firstSentId, sentTexts.join('\n'), lastSentAt, sharedPhoto ? [sharedPhoto] : undefined) }
+        try { this.o.onSent?.(req.chatId, firstSentId, sentTexts.join('\n'), lastSentAt, sharedPhoto ? [sharedPhoto] : undefined, crossChat ? logChat : undefined) }
         catch { this.log.warn('send.on_sent_failed', { chat: logChat }) }
       }
     }

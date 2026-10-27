@@ -1,9 +1,9 @@
 // 网关入口：bun src/main.ts --config configs/<bot>.yml
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { ApiServer } from './api/server'
-import { checkCredentialsFile, ConfigError, loadAccess, loadBotConfig, readTelegramToken, type BotConfig } from './config'
+import { checkCredentialsFile, ConfigError, loadAccess, loadBotConfig, readTelegramToken, setAccessFallbackReporter, type BotConfig } from './config'
 import { DshProcess, isAlive, processCommandLine } from './dsh/process'
 import { Engine } from './engine/engine'
 import { GroupTranscript } from './group/transcript'
@@ -59,6 +59,15 @@ async function main(): Promise<void> {
   if (process.platform !== 'win32') chmodSync(cfg.botDir, 0o700)
   for (const d of [cfg.stateDir, cfg.dshHome, cfg.workDir, cfg.homeDir, cfg.logsDir, cfg.mediaDir]) mkdirSync(d, { recursive: true, mode: 0o700 })
   const log = new Logger({ dir: cfg.logsDir, level: cfg.gw.logLevel, console: process.env.DSH_BOT_LOG_CONSOLE === '1' || (process.stderr.isTTY === true && process.env.DSH_BOT_LOG_CONSOLE !== '0'), pretty: process.stderr.isTTY === true, maxBytes: cfg.gw.logMaxBytes, keep: cfg.gw.logKeep, bot: cfg.id })
+  // access.json 读坏时沿用上次白名单（见 config.loadAccess）：每次读坏都回调，这里限频到每分钟一条，别刷屏
+  {
+    let lastAt = 0
+    setAccessFallbackReporter(dir => {
+      if (Date.now() - lastAt < 60_000) return
+      lastAt = Date.now()
+      log.warn('access.fallback_to_last_good', { channel: basename(dir) })
+    })
+  }
 
   const token = readTelegramToken(cfg.channelDir)
   registerSecret(token)
@@ -84,7 +93,7 @@ async function main(): Promise<void> {
   const sender = new Sender(api, ledger, log, {
     allowDirs, maxSendWaitMs: cfg.gw.maxSendWaitMs, access: () => loadAccess(cfg.channelDir),
     shareDirs: () => sharedDirs.write,
-    onSent: (chatId, messageId, text, at, photos) => { if (isGroupChat(chatId)) transcript.sent(chatId, messageId, text, at, photos?.[0]) },
+    onSent: (chatId, messageId, text, at, photos, logChat) => { if (isGroupChat(chatId)) transcript.sent(chatId, messageId, text, at, photos?.[0], logChat) },
   })
   const dsh = new DshProcess(log)
   let engine: Engine | null = null
