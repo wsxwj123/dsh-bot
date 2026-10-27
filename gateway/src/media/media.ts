@@ -139,7 +139,7 @@ export function imageBlock(path: string): { type: 'image'; mimeType: string; dat
   } catch { return null }
 }
 
-/** 群记录里允许读的目录：write 只有共享图库，read 另加 claude 侧启动时已存在的一级子目录及其 telegram-group */
+/** 群记录里允许读的目录：write 只有共享图库，read 另加 claude 侧启动时已存在的一级目录里的 telegram-group */
 export type SharedDirs = { write: readonly string[]; read: readonly string[] }
 
 function realDir(p: string): string | null {
@@ -151,8 +151,8 @@ function realDir(p: string): string | null {
 
 /**
  * 启动时把白名单展开并冻结（之后新出现的目录要重启才生效）。
- * 只收 sharedMediaDir 与 claudeMediaRoot 下已存在的一级目录，不收 cfg.mediaDir / imageDirs，
- * 免得一条被手改的群记录把本 bot 私聊收到的图拉进群回合。
+ * 只收 sharedMediaDir，以及 claudeMediaRoot 下已存在的一级目录里的 telegram-group（群图）。
+ * 一级目录本身（含其 telegram/ 私聊图）不收，免得一条被手改的群记录把私聊图拉进群回合。
  */
 export function collectSharedDirs(o: { sharedMediaDir: string; claudeMediaRoot: string }): SharedDirs {
   const shared = realDir(o.sharedMediaDir)
@@ -164,8 +164,7 @@ export function collectSharedDirs(o: { sharedMediaDir: string; claudeMediaRoot: 
       .filter(e => e.isDirectory()).map(e => e.name).sort()
   } catch {}
   for (const name of names) {
-    const base = realDir(join(o.claudeMediaRoot, name))
-    if (base) read.push(base)
+    // 只到 telegram-group 这一层；<bot>/ 本身和 <bot>/telegram/（私聊）都不在群图白名单里
     const group = realDir(join(o.claudeMediaRoot, name, 'telegram-group'))
     if (group) read.push(group)
   }
