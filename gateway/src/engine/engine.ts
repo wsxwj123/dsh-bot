@@ -6,6 +6,7 @@
 //   已经有回复发出去了 → 不再重试（宁可少回一次，也不重复说话）
 //   卡住 → session/cancel；取消不掉就重启 dsh，按"进程死了"处理
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
+import { homedir } from 'os'
 import { join } from 'path'
 import { expandHome, loadAccess, readAccess, registeredChatTarget, reloadBrain, type Access, type Brain, type BotConfig, type Route } from '../config'
 import { AcpError, AcpExited, AcpTimeout, type SessionUpdate } from '../dsh/acp'
@@ -266,7 +267,15 @@ export class Engine {
     this.actions = new LifeActions({
       botId: cfg.lifeId, imageAgent: cfg.id, configPath: cfg.configPath, log, mediaDir: cfg.mediaDir,
       imageProvider: () => this.imageEngine(),
-      imageSkillDir: e => (e === 'comfyui' ? this.cfg.gw.comfyuiSkillDir : this.cfg.gw.imageSkillDir) ?? join(import.meta.dir, '..', '..', '..', 'skills', `${e}-skill`),
+      imageSkillDir: e => {
+        const configured = e === 'comfyui' ? this.cfg.gw.comfyuiSkillDir : this.cfg.gw.imageSkillDir
+        if (configured) return configured
+        // 本机共享技能目录优先：镜像站的 endpoint/令牌写在它的 .env.local 里，
+        // 仓内副本是给公开版分发的、不含这份配置。2026-10-27：新建的 bot 不配
+        // image_skill_dir 时落到仓内副本，于是「镜像站 token 打官方站」→ 认证失败。
+        const shared = join(homedir(), '.claude', 'skills', `${e}-skill`)
+        return existsSync(shared) ? shared : join(import.meta.dir, '..', '..', '..', 'skills', `${e}-skill`)
+      },
       globalCfg: () => this.cfg.gw.globalCfg,
       stateDb: () => this.cfg.gw.botlifeDb,
       credRef: name => this.credRef(name),

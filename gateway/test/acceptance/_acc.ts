@@ -241,7 +241,7 @@ export function readJsonl<T = any>(file: string): T[] {
   if (!existsSync(file)) return []
   return readFileSync(file, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l) as T)
 }
-export type PromptRec = { pid: number; at: number; sessionId: string; text: string; blocks: number; model: string }
+export type PromptRec = { pid: number; at: number; sessionId: string; text: string; blocks: number; model: string; images?: number }
 export const prompts = (b: BotEnv) => readJsonl<PromptRec>(join(b.acpState, 'prompts.jsonl'))
 /** 交给模型的全部文字（含写摘要那一轮） */
 export const promptsText = (b: BotEnv) => prompts(b).map(p => p.text).join('\n')
