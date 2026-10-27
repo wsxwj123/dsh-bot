@@ -75,8 +75,10 @@ def test_新建_落盘清单齐全(client, sandbox, bun, telegram, launchctl, he
     assert home.is_dir()
     assert (channel / ".env").read_text(encoding="utf-8").strip() == \
         "TELEGRAM_BOT_TOKEN=%s" % u.FAKE_TOKEN
+    # 按空行分段的两个默认值要和老 bot（bot4/wenya）一致：新建的原来没写，
+    # 多句话挤在一个气泡里（2026-10-27 真机）
     assert json.loads((channel / "access.json").read_text(encoding="utf-8")) == \
-        {"allowFrom": [123456789]}
+        {"allowFrom": [123456789], "splitOnParagraph": True, "paragraphDelay": 1200}
     assert "我是小雨的人设正文。" in (channel / "CLAUDE.md").read_text(encoding="utf-8")
     assert (channel / "memory" / "MEMORY.md").is_file()
 

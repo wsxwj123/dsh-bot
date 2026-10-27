@@ -74,6 +74,8 @@ FISH_KEY_RE = re.compile(r"^[\x21-\x7e]{8,256}\Z")
 FISH_KEY_TELEGRAM_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{30,}\Z")
 REQUIRED_FIELDS = ("bot_id", "telegram_token", "dispatcher_port", "chat_id")
 BLANK_TEMPLATE = "_persona_template"
+#: 新建 bot 的 access.json 默认按空行分段、段间隔 1200ms（与 bot4/wenya 一致）
+DEFAULT_PARAGRAPH_DELAY = 1200
 #: 内置的通用人设模板（不需要先有别的 bot）。与空白模板一样用下划线开头，不会和真实编号撞
 PERSONA_TEMPLATE = "_persona_basic"
 PERSONA_TEMPLATE_LABEL = "基础人设（通用模板）"
@@ -967,7 +969,10 @@ def lay_down(fields, port_check=None, place_skills=False):
         if fields.get("fish_api_key"):
             env_lines += "FISH_AUDIO_API_KEY=%s\n" % fields["fish_api_key"]
         _create_file(os.path.join(chan, ".env"), env_lines)
-        access = {"allowFrom": [fields["chat_id"]]}
+        # 按空行分段的两个默认值：老 bot（bot4/wenya）都是 true + 1200，新建的原来没写、
+        # 多句话就挤在一个气泡里（2026-10-27 真机）。「新建 bot 继承所有功能」要求这里默认带上。
+        access = {"allowFrom": [fields["chat_id"]], "splitOnParagraph": True,
+                  "paragraphDelay": DEFAULT_PARAGRAPH_DELAY}
         if fields.get("fish_voice_id"):
             access["voiceId"] = fields["fish_voice_id"]      # 键序 allowFrom 在前、voiceId 在后
         _create_file(os.path.join(chan, "access.json"),
