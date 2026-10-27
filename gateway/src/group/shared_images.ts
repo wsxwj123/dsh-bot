@@ -13,8 +13,6 @@ export const MAX_GROUP_IMAGES_PER_TURN = 2
 export const GROUP_IMAGE_WINDOW_MS = 30 * 60_000
 /** 一次最多扫多少行记录（记录再长也不拖慢回合） */
 export const GROUP_IMAGE_SCAN_LIMIT = 1000
-/** 记录行的时间最多比现在快这么多；更远的"未来时间"当作坏行丢弃，免得水位被推到未来 */
-export const GROUP_IMAGE_FUTURE_TOLERANCE_MS = 5 * 60_000
 
 export type SharedImageSkipReason =
   | 'self' | 'bad_kind' | 'bad_path_value' | 'not_absolute' | 'bad_extension'
@@ -76,7 +74,7 @@ export function consumeSharedImages(o: {
   watermark: SharedImageWatermark
   botUsername: string
   max: number
-  /** 本轮开始时刻（毫秒）：未来时间容差和水位 clamp 都以它为准 */
+  /** 本轮开始时刻（毫秒）：时间在它之后的行一律不消费（避免水位被推到未来、也避免反复附图） */
   now: number
   read: (path: string) => SharedImageRead
   onSkip?: (line: TranscriptLine, reason: SharedImageSkipReason) => void
@@ -93,9 +91,9 @@ export function consumeSharedImages(o: {
     else if (ts === lastTs && !lastIds.includes(line.message_id)) lastIds.push(line.message_id)
   }
   for (const line of o.lines) {
-    // 比 now 快出容差的行整行丢弃：既不附图，也不推进水位
+    // 时间晚于 now 的行整行丢弃：它们还没"发生"，既不附图（否则每回合重复附），也不推进水位
     const rawTs = transcriptTs(line.ts)
-    if (!(rawTs <= o.now + GROUP_IMAGE_FUTURE_TOLERANCE_MS)) continue
+    if (!(rawTs <= o.now)) continue
     if (!afterWatermark(line, o.watermark)) continue
     const info = inspectImageLine(line, o.botUsername)
     if (!info) continue
