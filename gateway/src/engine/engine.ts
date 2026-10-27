@@ -788,7 +788,10 @@ export class Engine {
       if (ownImage(prev)) continue
       if (ownImage(line) || (!hasImage(prev) && hasImage(line))) folded.set(k, line)
     }
-    lines = [...folded.values()]
+    // 折叠后必须重新按 ts 升序：Map.set 覆盖时保留首次插入的位置，而折叠可能把代表行换成
+    // ts 更晚的那行。consumeSharedImages 靠数组顺序推进水位（超过上限的行不推进、下轮继续看），
+    // 数组一失序，水位会被推到比后面那些行更晚的时间点，它们就永久漏了。
+    lines = [...folded.values()].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts))
     const res = consumeSharedImages({
       lines, watermark, botUsername: this.botUsername, max: MAX_GROUP_IMAGES_PER_TURN, now,
       read: path => readSharedImage(path, this.sharedReadDirs, MAX_SHARED_IMAGE_BYTES),
