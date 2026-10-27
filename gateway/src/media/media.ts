@@ -240,7 +240,13 @@ export function readSharedImage(path: string, allowDirs: readonly string[], maxB
   try {
     // 复核已打开的那个文件到底在哪：中间目录被换掉也逃不出白名单
     const actual = fdRealPath(fd)
-    if (actual !== null && !inAllowlist(actual, allowDirs)) return { ok: false, reason: 'outside_allowlist' }
+    if (actual === null) {
+      // macOS/Linux 能按 fd 取真实路径，取不到就拒绝（fail closed），绝不跳过复核；
+      // Windows 没有等价手段，只能退回打开前已做过的 realpath 校验（已知残余风险，见方案）。
+      if (process.platform === 'darwin' || process.platform === 'linux') return { ok: false, reason: 'outside_allowlist' }
+    } else if (!inAllowlist(actual, allowDirs)) {
+      return { ok: false, reason: 'outside_allowlist' }
+    }
     const st = fstatSync(fd)
     if (!st.isFile()) return { ok: false, reason: 'not_file' }
     // 0 字节会变成空 data 的图片块，可能让上游整条拒收：当作读失败
