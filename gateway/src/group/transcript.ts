@@ -23,6 +23,10 @@ export type TranscriptLine = {
   is_bot: boolean
   text: string
   observed_by: string
+  /** 群记录里的附图（约定 5.12.4）：attachment_kind 缺省视为 photo；document 不读 */
+  attachment_kind?: string
+  /** 附图的本机绝对路径（另一个程序写入，读侧当作不可信输入校验） */
+  image_path?: string
   reply_to_text?: string
   reply_to_from?: string | null
 }
@@ -71,12 +75,14 @@ export class GroupTranscript {
     })
   }
 
-  /** 本 bot 在群里的一次回复（各段已由调用方连成一条；messageId 是第一条发出的段，at 是最后一段发出的时刻） */
-  sent(chatId: string, messageId: number, text: string, at: Date = new Date()): void {
+  /** 本 bot 在群里的一次回复（各段已由调用方连成一条；messageId 是第一条发出的段，at 是最后一段发出的时刻）。
+   *  photoPath 是这次回复第一张实际送达、且在共享图库内的原图真实路径；没有就不写图片字段。 */
+  sent(chatId: string, messageId: number, text: string, at: Date = new Date(), photoPath?: string): void {
     const me = this.me()
     this.append({
       ts: at.toISOString(), chat_id: chatId, message_id: messageId, from_id: String(me.id), from_username: me.username,
       from_name: me.name, is_bot: true, text: text.slice(0, 1000), observed_by: me.username,
+      ...(photoPath ? { attachment_kind: 'photo', image_path: photoPath } : {}),
     })
   }
 
@@ -124,23 +130,31 @@ export class GroupTranscript {
     } catch { return '' }
   }
 
-  /** 某个时间之后的群消息（按消息编号去重、时间正序，最多 limit 条）。读 .1 和当前文件各自末尾一段（刚轮转过近况也不丢），记录再长也不慢 */
+  /** 某个时间之后的群消息（按消息编号去重、时间正序，最多 limit 条）。读 .1 和当前文件各自末尾一段（刚轮转过近况也不丢），记录再长也不慢。
+   *  只有图片没有 text 的行也要读出来（群里的纯图片消息）；同一个 id 的重复行合并成一条。 */
   since(chatId: string, afterMs: number, limit: number): TranscriptLine[] {
     const path = this.file(chatId)
     // 中间补一个换行：.1 最后一行万一没换行也不会和当前文件第一行粘在一起
     const text = this.tail(`${path}.1`) + '\n' + this.tail(path)
-    const seen = new Set<number>()
-    const out: TranscriptLine[] = []
+    const byId = new Map<unknown, TranscriptLine>()
     for (const l of text.split('\n')) {
       if (!l) continue
       try {
         const o = JSON.parse(l) as TranscriptLine
-        if (seen.has(o.message_id) || !(Date.parse(o.ts) > afterMs) || !o.text) continue
-        seen.add(o.message_id)
-        out.push(o)
+        if (!(Date.parse(o.ts) > afterMs)) continue
+        if (typeof o.text !== 'string') o.text = ''
+        const prev = byId.get(o.message_id)
+        if (prev) {
+          // 同一个 id 被两份文件各读到一次/两个写方各写一行：补齐缺的字段，不重复交给模型
+          if (!prev.text && o.text) prev.text = o.text
+          if (!prev.attachment_kind && o.attachment_kind) prev.attachment_kind = o.attachment_kind
+          if (!prev.image_path && o.image_path) prev.image_path = o.image_path
+          continue
+        }
+        byId.set(o.message_id, o)
       } catch {}
     }
-    return out.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts)).slice(-limit)
+    return [...byId.values()].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts)).slice(-limit)
   }
 
   private sweep(seen: string): void {
