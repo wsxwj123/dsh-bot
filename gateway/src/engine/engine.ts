@@ -7,15 +7,16 @@
 //   卡住 → session/cancel；取消不掉就重启 dsh，按"进程死了"处理
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
-import { expandHome, loadAccess, reloadBrain, type Access, type Brain, type BotConfig, type Route } from '../config'
+import { expandHome, loadAccess, readAccess, registeredChatTarget, reloadBrain, type Access, type Brain, type BotConfig, type Route } from '../config'
 import { AcpError, AcpExited, AcpTimeout, type SessionUpdate } from '../dsh/acp'
 import { buildDshEnv, defaultDshCommand, type DshProcess, type DshSpec } from '../dsh/process'
 import { buildPatchRows, modelValue, patchText, promptFingerprint, restartFingerprint, skillsDigest, type PatchInput } from '../dsh/profile'
 import type { InboundRow, Ledger, SegmentRow, TurnKind } from '../ledger'
-import { safeError, type Logger } from '../log'
+import { maskChatId, safeError, type Logger } from '../log'
 import type { McpServer, ToolDef } from '../mcp/server'
 import type { TelegramApi } from '../telegram/api'
 import { isGroupChat, parseCommand } from '../telegram/inbound'
+import { readSeenGroups } from '../telegram/groups_seen'
 import type { GroupTranscript, TranscriptLine } from '../group/transcript'
 import { describeResults, normText, planParts, type Sender } from '../telegram/sender'
 import { Backoff, randomToken, sleep } from '../util'
@@ -300,11 +301,12 @@ export class Engine {
     return [
       {
         name: 'reply',
-        description: '给对方发消息。这是对方能看到你说话的唯一方式。text 里用空行分段，会按段依次发出。返回每段是否送达。',
+        description: '给对方发消息。这是对方能看到你说话的唯一方式。text 里用空行分段，会按段依次发出。返回每段是否送达。默认发在当前聊天；要发到别的聊天（比如被要求去某个群说话）就传 chat_id，不知道编号时先调用 list_chats。',
         inputSchema: {
           type: 'object',
           properties: {
             text: { type: 'string', description: '要发的文字' },
+            chat_id: { type: 'string', description: '可选：发到哪个聊天（字符串形式的数字编号，群号是负数）。不传就发在当前聊天。不能发到没登记过的聊天；不知道编号时先调用 list_chats' },
             reply_to: { type: 'number', description: '可选：要引用回复的消息编号（⟦…⟧ 里 # 后面的数字）' },
             files: { type: 'array', items: { type: 'string' }, description: '可选：要一起发的图片或文件的绝对路径' },
             as_voice: { type: 'boolean', description: '可选：同时发语音。每段先发文字，再发这一段的语音' },
@@ -315,6 +317,12 @@ export class Engine {
           required: ['text'],
         },
         call: (args, ctx) => engine().toolReply(args, ctx),
+      },
+      {
+        name: 'list_chats',
+        description: '看看自己能发到哪些聊天：当前聊天的编号、登记过的群和私聊。只读，不会发任何消息。要往别的聊天发消息但不知道 chat_id 时先调这个。',
+        inputSchema: { type: 'object', properties: {} },
+        call: (_args, ctx) => engine().toolChats(ctx),
       },
       {
         name: 'react',
@@ -448,10 +456,49 @@ export class Engine {
     const text = typeof args.text === 'string' ? args.text : ''
     const files = Array.isArray(args.files) ? args.files.filter((f): f is string => typeof f === 'string') : []
     if (!text.trim() && files.length === 0) return { text: 'text 不能为空。', isError: true }
-    const replyTo = Number(args.reply_to)
+    // 跨聊天：chat_id 来自模型输出，属于不可信输入（提示词注入可控）。
+    // 类型、格式、登记表、群开关任一不过都直接拒绝，且零副作用（不发送、不写账本、不写群记录、不动轮次计数）。
+    const rawChat = args.chat_id
+    let target = at.chatId
+    let cross = false
+    if (rawChat !== undefined && rawChat !== null) {
+      if (typeof rawChat !== 'string') {
+        this.log.warn('tool.reply_target_rejected', { turn: at.turnId, reason: 'type', kind: typeof rawChat })
+        return { text: '没有发出：chat_id 必须是字符串（数字也要写成带引号的字符串）。[E_TYPE]', isError: true }
+      }
+      const c = rawChat.trim()
+      if (c && c !== at.chatId) {
+        const kind = c.startsWith('-') ? 'group' : 'dm'
+        if (!/^-?[1-9]\d{0,19}$/.test(c)) {
+          this.log.warn('tool.reply_target_rejected', { turn: at.turnId, reason: 'format', kind })
+          return { text: '没有发出：chat_id 只能是最多 20 位的十进制数字，群号是负数。[E_FORMAT]', isError: true }
+        }
+        const access = readAccess(this.cfg.channelDir)
+        if (!access) {
+          this.log.warn('tool.reply_target_rejected', { turn: at.turnId, reason: 'config', kind, dst: maskChatId(c) })
+          return { text: '没有发出：聊天登记表读不出来，暂时不能发到别的聊天（发到当前聊天不受影响）。[E_CONFIG]', isError: true }
+        }
+        const reg = registeredChatTarget(access, c)
+        if (!reg) {
+          this.log.warn('tool.reply_target_rejected', { turn: at.turnId, reason: 'not_registered', kind, dst: maskChatId(c) })
+          return { text: `没有发出：${maskChatId(c)} 不在登记过的聊天里，不能发过去。不要告诉对方已经发了。[E_NOT_REGISTERED]`, isError: true }
+        }
+        if (reg.kind === 'group' && !this.features.groups) {
+          this.log.warn('tool.reply_target_rejected', { turn: at.turnId, reason: 'groups_off', kind, dst: maskChatId(c) })
+          return { text: '没有发出：群聊功能现在关着，不能发到群。[E_GROUPS_OFF]', isError: true }
+        }
+        target = reg.chatId
+        cross = true
+      }
+    }
+    const replyToRaw = Number(args.reply_to)
+    const wantedReplyTo = Number.isInteger(replyToRaw) && replyToRaw > 0
+    // 跨聊天时 reply_to 没有意义（消息编号只属于当前聊天），忽略并在成功文案里说明
+    const replyTo = cross ? undefined : (wantedReplyTo ? replyToRaw : undefined)
     // 模型偶尔会在同一轮里把刚说过的话再发一遍（真机验收里见过）。这里拦住：
     // 大半段落和这一轮已发出的相同，就整次不发；只有个别段相同，就只跳过那几段。
-    const already = new Set(this.ledger.sentTextsInChain(at.rootId).map(normText))
+    // 去重按目标聊天隔离：同一轮先往 A 发「好」再往 B 发「好」，两次都要发出
+    const already = new Set(this.ledger.sentTextsInChain(at.rootId, cross ? target : undefined).map(normText))
     if (already.size > 0 && files.length === 0) {
       const texts = planParts(text, [], this.access()).flatMap(i => (i.kind === 'text' ? [normText(i.text)] : []))
       const dup = texts.filter(t => already.has(t)).length
@@ -473,14 +520,23 @@ export class Engine {
     const s1 = voiceAccess !== undefined && this.voiceModel(voiceAccess) === 's1'
     const voice = voiceId ? (t: string) => this.media.synthesize(t, voiceId, s1 ? undefined : str(args.voice_emotion), s1 ? undefined : str(args.voice_instruct), voiceAccess?.voiceModel) : undefined
     const voiceTexts = voice && typeof args.voice_text === 'string' && args.voice_text.trim() ? args.voice_text.split(/\n\s*\n/).map(x => x.trim()) : undefined
-    const skipFiles = new Set(this.ledger.sentFilesInChain(at.rootId))
-    const sending = this.sender.send({ chatId: at.chatId, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo: Number.isInteger(replyTo) && replyTo > 0 ? replyTo : undefined, skipTexts: already, skipFiles, voice, voiceTexts })
+    const skipFiles = new Set(this.ledger.sentFilesInChain(at.rootId, cross ? target : undefined))
+    const sending = this.sender.send({ chatId: target, turnId: at.turnId, callSeq: at.replyCalls, text, files, replyTo, skipTexts: already, skipFiles, voice, voiceTexts, ...(cross ? { logChat: maskChatId(target) } : {}) })
       .then(results => {
         const d = describeResults(results)
-        at.delivered += d.delivered
-        if (d.delivered > 0 && at.silent) { this.ledger.clearSilent(at.rootId); at.silent = false }
-        this.log.info('tool.reply', { turn: at.turnId, parts: results.length, delivered: d.delivered, duplicates: results.filter(r => r.state === 'duplicate').length, ...(voice ? { voice: true } : {}) })
-        return d
+        // 跨聊天送达不算「回复了当前聊天」：不累加当前轮的已回复计数，也不清沉默标记
+        if (!cross) {
+          at.delivered += d.delivered
+          if (d.delivered > 0 && at.silent) { this.ledger.clearSilent(at.rootId); at.silent = false }
+        }
+        this.log.info('tool.reply', { turn: at.turnId, parts: results.length, delivered: d.delivered, duplicates: results.filter(r => r.state === 'duplicate').length, ...(cross ? { dst: maskChatId(target) } : {}), ...(voice ? { voice: true } : {}) })
+        if (!cross) return { text: d.text, isError: d.isError }
+        // 跨聊天：文案必须让模型知道当前聊天的人看不到，避免它以为这就算回过了
+        const failed = results.some(r => r.state === 'failed' || r.state === 'skipped')
+        let out = `${d.text}\n\n这条发到了另一个聊天（${maskChatId(target)}），当前聊天里的人看不到。`
+        if (wantedReplyTo) out += '\n跨聊天时 reply_to 已忽略（消息编号只属于当前聊天）。'
+        if (failed) out += '\n目标聊天没有收到，可能是群号不对、被移出或拉黑。不要告诉对方已经发了。'
+        return { text: out, isError: d.isError || failed }
       })
       .finally(() => { at.toolsInFlight--; at.lastProgressAt = Date.now() })
     // dsh 等一次工具调用最多 60 秒，超时模型会以为没发出去、再发一遍（真机 M4 问题 3）。发得慢就先告诉它"在发了"，后台接着发
@@ -488,6 +544,36 @@ export class Engine {
     if (first) return { text: first.text, isError: first.isError }
     this.log.info('tool.reply_slow', { turn: at.turnId })
     return { text: '正在发送（图片或语音比较大，需要一点时间），对方会陆续收到。不要再用 reply 重发这些内容；说完了就结束这一轮。' }
+  }
+
+  /** 只读：列出这个 bot 登记过的聊天（reply 的 chat_id 只能填这些）。不发送任何消息、不写账本 */
+  async toolChats(ctx: { chatId: string; segmentId: number }): Promise<{ text: string; isError?: boolean }> {
+    const access = readAccess(this.cfg.channelDir)
+    if (!access) {
+      this.log.warn('tool.list_chats', { ok: false, reason: 'config' })
+      return { text: '聊天登记表读不出来（access.json 缺失或格式坏了），现在没法列出可发送的聊天。[E_CONFIG]', isError: true }
+    }
+    const seen = readSeenGroups(join(this.cfg.stateDir, 'groups-seen.json'))
+    const tail = (id: string) => (id.length > 4 ? id.slice(-4) : id)
+    const chats: { chat_id: string; kind: 'group' | 'dm'; name: string; current: boolean }[] = []
+    const listed = new Set<string>()
+    if (this.features.groups) {
+      for (const key of Object.keys(access.groups)) {
+        const id = key.trim()
+        if (!/^-[1-9]\d{0,19}$/.test(id) || listed.has(id)) continue
+        listed.add(id)
+        const title = seen[id]?.title
+        chats.push({ chat_id: id, kind: 'group', name: title ? title : `群 尾号${tail(id)}`, current: id === ctx.chatId })
+      }
+    }
+    for (const entry of access.allowFrom) {
+      const id = String(entry).trim()
+      if (!/^-?[1-9]\d{0,19}$/.test(id) || listed.has(id)) continue
+      listed.add(id)
+      chats.push({ chat_id: id, kind: 'dm', name: `私聊 尾号${tail(id)}`, current: id === ctx.chatId })
+    }
+    this.log.info('tool.list_chats', { ok: true, groups_enabled: this.features.groups, count: chats.length })
+    return { text: JSON.stringify({ groups_enabled: this.features.groups, chats }) }
   }
 
   async toolReact(args: Record<string, unknown>, ctx: { chatId: string; segmentId: number }) {
