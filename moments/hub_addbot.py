@@ -74,6 +74,18 @@ FISH_KEY_RE = re.compile(r"^[\x21-\x7e]{8,256}\Z")
 FISH_KEY_TELEGRAM_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{30,}\Z")
 REQUIRED_FIELDS = ("bot_id", "telegram_token", "dispatcher_port", "chat_id")
 BLANK_TEMPLATE = "_persona_template"
+#: 内置的通用人设模板（不需要先有别的 bot）。与空白模板一样用下划线开头，不会和真实编号撞
+PERSONA_TEMPLATE = "_persona_basic"
+PERSONA_TEMPLATE_LABEL = "基础人设（通用模板）"
+
+
+def _persona_template_text():
+    """内置基础人设模板的正文（仓内 templates/persona.md）。读不到按空白模板处理，不能让新建卡在这里。"""
+    try:
+        with open(os.path.join(REPO_ROOT, "templates", "persona.md"), encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
 MEMORY_SEED = "# 记忆\n\n（还没聊过，记忆会自己长出来。）\n"
 #: S4 分档：207（C 段有一步没 done）待补的动作都属「让 bot 跑起来」面；
 #: 201（register 已把网关拉起并等活通过）没有待补动作。`moments_web` 两档都 false ——
@@ -258,8 +270,10 @@ def templates():
         pass
     labels = {b["id"]: b["display_name"]
               for b in _registry().bots(include_disabled=True, dirs=_config_dirs())}
-    return [{"id": n, "display_name": "空白模板" if n == BLANK_TEMPLATE else labels.get(n) or n}
-            for n in sorted(names)]
+    out = [{"id": n, "display_name": "空白模板" if n == BLANK_TEMPLATE else labels.get(n) or n}
+           for n in sorted(names) if n != PERSONA_TEMPLATE]
+    out.insert(0, {"id": PERSONA_TEMPLATE, "display_name": PERSONA_TEMPLATE_LABEL})
+    return out
 
 
 def _need(body, name):
@@ -276,6 +290,24 @@ def _need(body, name):
 def _is_int(value):
     """bool 是 int 的子类，`True` 当端口用会一路走到 bind —— 这里必须把它挡掉。"""
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+# 只用 ASCII 数字：Python 的 \d 默认匹配全角等 Unicode 数字，"１２３" 会被悄悄当成 123
+_INT_STR_RE = re.compile(r"-?[0-9]{1,20}")
+
+
+def _int_like(value):
+    """整数，或「纯十进制数字的字符串」→ int；其余 → None。
+
+    网页的输入框读出来天生是字符串，前端虽然会转数字，但浏览器缓存旧页面、复制粘贴
+    带不可见字符等情况下会漏过来（2026-10-27 真机：dsh 新建页反复报「chat_id 要是整数」）。
+    校验仍以 int 为准，只是把「字符串形态的数字」在服务端再收一次；解析后照常过范围检查。
+    """
+    if _is_int(value):
+        return value
+    if isinstance(value, str) and _INT_STR_RE.fullmatch(value.strip()):
+        return int(value.strip())
+    return None
 
 
 def _optional(body, name):
@@ -573,6 +605,8 @@ def _persona(body):
         _bad("人设来源二选一：persona_template 或 persona_text，给一个")
     if has_text:
         return _persona_text(text)
+    if tmpl == PERSONA_TEMPLATE:
+        return _persona_text(_persona_template_text())
     if tmpl not in {t["id"] for t in templates()}:
         # 只认扫出来的目录名，`../` 这类穿越串自然落不进集合里
         _bad("没有这个人设模板：%s" % tmpl[:64])
@@ -656,11 +690,15 @@ def _validate(body):
     bot_id, port, chat_id = fields["bot_id"], fields["dispatcher_port"], fields["chat_id"]
     if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
         _bad("bot_id 只能是小写字母开头的 2-32 位小写字母/数字/下划线")
-    if not _is_int(port) or not 1024 <= port <= 65535:
+    port_num = _int_like(port)
+    if port_num is None or not 1024 <= port_num <= 65535:
         _bad("dispatcher_port 必须是 1024-65535 的整数")
+    port = port_num
     name = _display_name(body.get("display_name"))      # 落盘用去掉首尾空白之后的值
-    if not _is_int(chat_id):
+    chat_id_num = _int_like(chat_id)
+    if chat_id_num is None:
         _bad("chat_id 必须是整数")
+    chat_id = chat_id_num
     persona = _persona(body)
     # §6b 两个可选字段：判序在人设二选一之后、环境与冲突错（409）之前；两个字段各判各的
     # （四个组合独立落盘，不做成对约束）。
