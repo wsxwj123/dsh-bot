@@ -18,6 +18,7 @@ import type { McpServer, ToolDef } from '../mcp/server'
 import type { TelegramApi } from '../telegram/api'
 import { isGroupChat, parseCommand } from '../telegram/inbound'
 import { readSeenGroups } from '../telegram/groups_seen'
+import { dedupTranscriptLines } from '../group/transcript'
 import type { GroupTranscript, TranscriptLine } from '../group/transcript'
 import { describeResults, normText, planParts, type Sender } from '../telegram/sender'
 import { Backoff, randomToken, sleep } from '../util'
@@ -752,11 +753,8 @@ export class Engine {
     // 否则模型只会凭空编（2026-10-27 真机：私聊里编出「白瓷小杯子装草莓冻」）。
     // 同一条群消息可能有两行（本 bot 的 observe 行 + 对端 bot 补写的带图行，observed_by 不同、
     // since 按写方分开保留），近况里同一句只说一次。
-    const seenMsg = new Set<string>()
-    const rows = Object.keys(this.access().groups).map(k => k.trim()).flatMap(g => this.groups!.since(g, after, 8))
-      .filter(r => r.text.trim() || typeof r.image_path === 'string')
-      .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts))
-      .filter(r => { const k = `${r.chat_id}\u0000${r.message_id}`; if (seenMsg.has(k)) return false; seenMsg.add(k); return true })
+    const rows = dedupTranscriptLines(Object.keys(this.access().groups).map(k => k.trim()).flatMap(g => this.groups!.since(g, after, 8))
+      .filter(r => r.text.trim() || typeof r.image_path === 'string'))
       .slice(-8)
     if (rows.length === 0) return null
     this.ledger.setMeta(key, String(Math.max(...rows.map(r => Date.parse(r.ts)))))
@@ -800,24 +798,10 @@ export class Engine {
       const chats = dm ? Object.keys(this.access().groups).map(k => k.trim()).filter(Boolean) : [chatId]
       lines = chats.flatMap(g => this.groups!.since(g, after - 1, GROUP_IMAGE_SCAN_LIMIT))
     } catch { return [] }
-    // 同一条群消息可能有多行（本 bot 自取行 + 对端 bot 补写行）：按 (chat_id, message_id) 折叠成一行再喂水位，
-    // 优先本 bot 自取行（observed_by 是自己且带 image_path），其次任意带 image_path 的行。
-    // 同一轮内按 id 只喂一行；跨回合若对端行晚于本 bot 自取行写入，仍可能各附一次（过渡期双写风险，
-    // 停补写后消失）；普通群两个系统的 message_id 不同，折叠不了，同上。
-    const folded = new Map<string, TranscriptLine>()
-    const ownImage = (l: TranscriptLine): boolean => !!this.botUsername && l.observed_by === this.botUsername && typeof l.image_path === 'string'
-    const hasImage = (l: TranscriptLine): boolean => typeof l.image_path === 'string'
-    for (const line of lines) {
-      const k = `${line.chat_id}\u0000${line.message_id}`
-      const prev = folded.get(k)
-      if (!prev) { folded.set(k, line); continue }
-      if (ownImage(prev)) continue
-      if (ownImage(line) || (!hasImage(prev) && hasImage(line))) folded.set(k, line)
-    }
-    // 折叠后必须重新按 ts 升序：Map.set 覆盖时保留首次插入的位置，而折叠可能把代表行换成
-    // ts 更晚的那行。consumeSharedImages 靠数组顺序推进水位（超过上限的行不推进、下轮继续看），
-    // 数组一失序，水位会被推到比后面那些行更晚的时间点，它们就永久漏了。
-    lines = [...folded.values()].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts))
+    // v1.4：同一条真人消息可能被多只 bot 各记一遍，读侧统一用 dedupTranscriptLines 收敛
+    // （chat_id + ts取整 + from_id 分组，组内按 observed_by 取行数最多那组）。
+    // 它返回的结果已按 ts 升序——consumeSharedImages 靠数组顺序推进水位，顺序必须对。
+    lines = dedupTranscriptLines(lines)
     const res = consumeSharedImages({
       lines, watermark, botUsername: this.botUsername, max: MAX_GROUP_IMAGES_PER_TURN, now,
       read: path => readSharedImage(path, this.sharedReadDirs, MAX_SHARED_IMAGE_BYTES),

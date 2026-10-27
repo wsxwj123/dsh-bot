@@ -11,7 +11,7 @@ import { Ledger } from './ledger'
 import { Logger, registerSecret, safeError } from './log'
 import { collectSharedDirs, fetchGroupPhoto } from './media/media'
 import { McpServer } from './mcp/server'
-import { TelegramApi, type TgMessage, type TgUser } from './telegram/api'
+import { TelegramApi, type TgUser } from './telegram/api'
 import { isGroupChat } from './telegram/inbound'
 import { GroupsSeen } from './telegram/groups_seen'
 import { Poller } from './telegram/poller'
@@ -161,22 +161,9 @@ async function main(): Promise<void> {
   writeAtomic(join(cfg.stateDir, 'bot.json'), JSON.stringify({ id: me.id, username: me.username ?? '', name: cfg.displayName }))
   log.info('gateway.starting', { bot: cfg.id, telegram_bot: me.username ?? null, pid: process.pid })
 
-  // 群图自取：每个群一条串行链（一次刷屏几十张也不会同时打爆 Telegram），失败只降级为"没有图"。
-  // 不 await：下载不拖慢 observe 行落盘，也不阻断群消息处理；停机不等下载链（明确接受）。
-  const photoChain = new Map<string, Promise<void>>()
-  const queueGroupPhoto = (msg: TgMessage): void => {
-    const chatId = String(msg.chat.id)
-    const prev = photoChain.get(chatId) ?? Promise.resolve()
-    const next = prev.catch(() => {}).then(async () => {
-      const r = await fetchGroupPhoto({ api, msg, dir: groupMediaDir })
-      if (r.ok) transcript.appendPhoto(msg, r.path)
-      else log.warn('group_photo.failed', { chat: chatId, message_id: msg.message_id, reason: r.reason })
-    }).catch(() => {
-      // 兜底：任何意外都不外抛；日志仍只记固定枚举，不记路径/file_id/原始错误串
-      log.warn('group_photo.failed', { chat: chatId, message_id: msg.message_id, reason: 'download_failed' })
-    }).finally(() => { if (photoChain.get(chatId) === next) photoChain.delete(chatId) })
-    photoChain.set(chatId, next)
-  }
+  // 群图自取（v1.4）：带图消息在写群记录之前下载，图和消息写成同一行；
+  // 最长等 5 秒（与 claude 侧对齐），超时/失败照样写这一行（不带 image_path）。
+  const GROUP_PHOTO_WAIT_MS = 5_000
 
   const poller = new Poller(api, ledger, log, {
     channelDir: cfg.channelDir, botId: me.id, pollTimeoutS: cfg.gw.pollTimeoutS,
@@ -190,11 +177,28 @@ async function main(): Promise<void> {
     onMyChatMember: u => groupsSeen.onMember(u),
     groupsOn: () => engine?.features.groups ?? true,
     onGroupDropped: m => groupsSeen.onDropped(m),
-    onHumanMessage: (msg, observed) => {
+    onHumanMessage: async (msg, observed) => {
       if (observed) {
-        transcript.observe(msg)
-        // 群里的真人图：observe 行先落盘，后台串行下载，成功后追加同一 message_id 的带图行
-        if (isGroupChat(msg.chat.id) && msg.photo?.length) queueGroupPhoto(msg)
+        // v1.4（约定第 22 节）：一条消息一行；带图的先下载再写，图和消息同一行。
+        // poller 会 await 这个回调——串行保证「写入顺序 == 消息顺序」，否则晚到的带图行
+        // 会被导演按 ts 判成旧消息、永久跳过。
+        if (isGroupChat(msg.chat.id) && msg.photo?.length) {
+          let path: string | undefined
+          try {
+            const r = await Promise.race([
+              fetchGroupPhoto({ api, msg, dir: groupMediaDir }),
+              sleep(GROUP_PHOTO_WAIT_MS).then(() => ({ ok: false as const, reason: 'timeout' as const })),
+            ])
+            if (r.ok) path = r.path
+            else log.warn('group_photo.failed', { chat: String(msg.chat.id), message_id: msg.message_id, reason: r.reason })
+          } catch {
+            // 兜底：任何意外都不外抛，照样写这一行（无图）
+            log.warn('group_photo.failed', { chat: String(msg.chat.id), message_id: msg.message_id, reason: 'download_failed' })
+          }
+          transcript.observe(msg, path)
+        } else {
+          transcript.observe(msg)
+        }
         return
       }
       // 主人私聊的"刚聊过"标记（INTERFACE-适配服务 10.5）：写中立目录，导演不点正在私聊的 bot 去群里说话。

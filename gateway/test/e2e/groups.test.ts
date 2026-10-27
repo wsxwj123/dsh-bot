@@ -52,9 +52,10 @@ const director = (g: Gateway, text: string) => g.api('/v1/inject', {
 test('群消息只记一次、不直接触发回复；导演点名后才说话，说的话记进群聊记录；私聊带一次群里近况', async () => {
   const { ta, tb, a, b, ga } = await setup()
   groupSay('大家晚上好')
-  await until(() => transcript(a).length === 1, 'human line recorded once')
+  await until(() => transcript(a).length >= 2, 'human line recorded by both')
   await Bun.sleep(500)
-  expect(transcript(a)).toHaveLength(1) // 两个网关都收到了，只记了一次
+  // v1.3 靠 .seen 抢锁只记 1 行；v1.4 起每只都写自己的一行、读侧去重（约定第 22 节）
+  expect(transcript(a)).toHaveLength(2)
   expect(transcript(a)[0]).toMatchObject({ is_bot: false, from_id: String(OWNER), text: '大家晚上好' })
   expect(prompts(a).length + prompts(b).length).toBe(0) // 没有点名就不说话
 

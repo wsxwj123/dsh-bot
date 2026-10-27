@@ -106,14 +106,17 @@ test('清单2 配了 groups_dir：写进该目录，缺省目录不存在', asyn
 
 // ───────── 清单 3：去重 ─────────
 
-test('清单3 真人一句话两只 bot 都收到：群记录只有一行', async () => {
+test('清单3 真人一句话两只 bot 都收到：v1.4 起每只各写一行（不再抢 .seen），读侧负责去重', async () => {
   const { a } = await setup({ n: 2 })
   groupSay('大家晚上好')
-  expect(await waitTrue(() => existsSync(tfile(a)) && rows(a).length >= 1)).toBe(true)
+  expect(await waitTrue(() => existsSync(tfile(a)) && rows(a).length >= 2)).toBe(true)
   await sleep(700)
   const got = rows(a)
-  expect(got).toHaveLength(1)
-  expect(got[0]).toMatchObject({ is_bot: false, from_id: String(OWNER), text: '大家晚上好' })
+  // v1.3 是 .seen 抢锁，只留 1 行；v1.4 约定第 22 节：普通群 message_id 每个 bot 视角不同，
+  // 抢锁挡不住跨侧重复，改成每只都写、读侧按 chat_id + ts + from_id 去重。
+  expect(got).toHaveLength(2)
+  for (const r of got) expect(r).toMatchObject({ is_bot: false, from_id: String(OWNER), text: '大家晚上好' })
+  expect(new Set(got.map(r => r.observed_by)).size).toBe(2)   // 两个不同写方
 })
 
 // ───────── 清单 4、5、6、7、8：bot 的话怎么记 ─────────

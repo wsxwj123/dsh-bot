@@ -29,7 +29,7 @@ function setup(hooks: Partial<ConstructorParameters<typeof Poller>[3]> = {}) {
   const human: TgMessage[] = []
   const poller = new Poller(new TelegramApi(tg.token, tg.url, 5_000), ledger, log, {
     channelDir: dir, botId: tg.bot.id, pollTimeoutS: 1, onInbound: c => inbound.push(c), onFatal: () => {},
-    onHumanMessage: m => human.push(m), ...hooks,
+    onHumanMessage: m => { human.push(m) }, ...hooks,
   })
   poller.start()
   cleanups.push(() => { tg.stop(); rmSync(dir, { recursive: true, force: true }) }, () => poller.stop())

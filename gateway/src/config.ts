@@ -227,7 +227,8 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
   const g = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const owners = Array.isArray(g.owners) ? g.owners.map(String).filter(Boolean)
     : access?.allowFrom?.[0] ? [String(access.allowFrom[0])] : []
-  const stallCancelMs = num(g.turn_stall_cancel_ms, 180_000, 'gateway.turn_stall_cancel_ms')
+  // 用户 2026-10-27 定：180 秒改 300 秒。32 次卡死里有 9 次是「生图或回复成功后模型不结束回合」，最坏是生图成功但回复没发出；多等 2 分钟给模型收尾。告警阈值（60 秒）不变。
+  const stallCancelMs = num(g.turn_stall_cancel_ms, 300_000, 'gateway.turn_stall_cancel_ms')
   const backoff = Array.isArray(g.retry_backoff_ms) ? g.retry_backoff_ms.map((v, i) => num(v, 0, `gateway.retry_backoff_ms[${i}]`)) : [5_000, 20_000]
   const cmd = Array.isArray(g.dsh_command) && g.dsh_command.length > 0 ? g.dsh_command.map(String) : undefined
   const level = str(g.log_level, 'info')

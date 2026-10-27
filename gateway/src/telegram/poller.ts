@@ -29,7 +29,8 @@ export class Poller {
     private readonly o: {
       channelDir: string; botId: number | null; pollTimeoutS: number; onInbound: (chatId: string) => void; onFatal: (why: string) => void
       /** 真人发来的消息：群消息（记进群聊记录）和私聊消息（记"刚聊过"，导演据此不点正在私聊的 bot） */
-      onHumanMessage?: (msg: TgMessage, observed: boolean) => void
+      /** v1.4：允许返回 Promise —— poller 会 await 它，保证「群记录写入顺序 == 消息顺序」 */
+      onHumanMessage?: (msg: TgMessage, observed: boolean) => void | Promise<void>
       /** 闸门之前（任何聊天、任何人）：`/provider add` 含密钥，排在闸门和群聊"只记录"之前（方案 3.6） */
       interceptBeforeGate?: InterceptHook
       /** 闸门放行之后、入账之前：引导进行中、迟到密钥防护、/provider /model /cancel（方案 3.3.1） */
@@ -94,11 +95,13 @@ export class Poller {
         await this.pause(wait)
         continue
       }
-      for (const u of updates) this.handle(u)
+      for (const u of updates) await this.handle(u)
     }
   }
 
-  private handle(u: TgUpdate): void {
+  // v1.4：群消息的 observe 分支要 await 图下载（串行保序），所以整个处理器改成 async，
+  // 调用方在循环里 await 它
+  private async handle(u: TgUpdate): Promise<void> {
     if (u.my_chat_member) {
       this.ledger.recordUpdate(u.update_id, null)
       try { this.o.onMyChatMember?.(u.my_chat_member) } catch (e) { this.log.error('groups.seen_failed', { err: safeError(e) }) }
@@ -133,7 +136,7 @@ export class Poller {
     if (g.deliver === 'observe') {
       this.ledger.recordUpdate(u.update_id, null)
       this.log.info('inbound.observed', { chat: msg.chat.id })
-      this.o.onHumanMessage?.(redactMessage(msg), true)
+      await this.o.onHumanMessage?.(redactMessage(msg), true)
       return
     }
     if (this.intercepted(this.o.intercept, msg, u.update_id)) return

@@ -396,7 +396,7 @@ test('读取-同 message_id 双写 本 bot 行无图、对方 bot 行有图：�
   expect(tg.sentTo(GROUP).some(s => (s.text ?? '').includes('轮双写'))).toBe(true)
 })
 
-test('读取-同 message_id 双写 本 bot 自取行与对端补写行都带图：折叠成一行只附一张，回复照常产生', async () => {
+test('读取-同一消息被两个写方各记一行（都带图）：v1.4 读侧按 observed_by 取一份只附一张', async () => {
   let selfImg = ''
   let otherImg = ''
   const { tg, b, gw } = await setup({
@@ -406,16 +406,17 @@ test('读取-同 message_id 双写 本 bot 自取行与对端补写行都带图�
     },
   })
   const SAME_ID = 990002
-  // 本 bot 自取行：真人发图，observed_by 是自己、带 image_path（新语义下不再按"自己写的"排除）
+  // v1.4 的分组键是 chat_id + ts取整 + from_id：真实场景里同一条 Telegram 消息被两个 bot 各记一行，
+  // ts（消息自带 date）和 from_id（发信人）都相同，只有 observed_by 不同。
+  const SAME_TS = Date.now() - 2000
   seed(b, {
-    message_id: SAME_ID, ts: Date.now() - 2000, text: '同 id 双写带图',
+    message_id: SAME_ID, ts: SAME_TS, text: '同 id 双写带图',
     from_username: 'friend_user', from_id: String(FRIEND), is_bot: false, observed_by: A_NAME,
     attachment_kind: 'photo', image_path: selfImg,
   })
-  // 对端（claude 侧）补写的同一 message_id、不同 observed_by 的行
   seed(b, {
-    message_id: SAME_ID, ts: Date.now() - 1000, text: '同 id 双写带图',
-    from_username: 'bot_b_other', from_id: '900002', is_bot: true, observed_by: 'bot_b_other',
+    message_id: SAME_ID, ts: SAME_TS, text: '同 id 双写带图',
+    from_username: 'friend_user', from_id: String(FRIEND), is_bot: false, observed_by: 'bot_b_other',
     attachment_kind: 'photo', image_path: otherImg,
   })
   const p = await groupTurn({ tg, b, gw }, '轮双写二')

@@ -6,7 +6,7 @@
 // - bot 自己发出的话：Telegram 不把 bot 的消息投给别的 bot，所以由发出它的网关自己记（不再需要旧系统的 bot 互推）；
 //   一次回复记一行（导演每行算一次发言，分段记会吃掉额度）
 // - 轮转（约定 v1.2 5.12.4）：文件超过阈值，抢到锁的写方把它改名成 <群 id>.jsonl.1（只留一份旧的）；读方读当前 + .1
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, renameSync, rmSync, statSync, writeSync } from 'fs'
 import { join } from 'path'
 import { maskChatIdIn, safeError, type Logger } from '../log'
 import { retryWhenBusy } from '../util'
@@ -42,6 +42,52 @@ export function transcriptTs(v: unknown): number {
   return NaN
 }
 
+/**
+ * v1.4 读侧去重（约定第 22 节）：同一批群记录行里，把「同一条真人消息被多只 bot 各记一遍」的那些
+ * 收敛成一份。
+ *
+ * 分组：`chat_id + ts取整到秒 + from_id`——**ts 必须取整**，因为 bot 自己发言那类行的 ts 是本地
+ * 发出时刻、带毫秒，而 peer 记的是 Telegram 的秒级 date，不取整同一句话会被分进两个组。
+ *
+ * 组内再按 `observed_by` 分组，取**行数最多**的那组（并列时取 observed_by 字典序最小，保证各读方
+ * 结果一致）。这样「同秒同人发两条」不会被误合并，「某只 bot 漏收」也能取到完整那份。
+ * `ts` 或 `from_id` 缺失/解析不出来的行不参与分组，原样保留。
+ */
+export function dedupTranscriptLines(lines: TranscriptLine[]): TranscriptLine[] {
+  const keyOf = (l: TranscriptLine): string | null => {
+    if (typeof l.ts !== 'string' || typeof l.from_id !== 'string' || !l.from_id) return null
+    const t = Date.parse(l.ts)
+    if (!Number.isFinite(t)) return null
+    return `${l.chat_id}\u0000${Math.floor(t / 1000)}\u0000${l.from_id}`
+  }
+  const groups = new Map<string, TranscriptLine[]>()
+  const loose: TranscriptLine[] = []
+  for (const l of lines) {
+    const k = keyOf(l)
+    if (k === null) { loose.push(l); continue }
+    const g = groups.get(k)
+    if (g) g.push(l)
+    else groups.set(k, [l])
+  }
+  const picked: TranscriptLine[] = [...loose]
+  for (const g of groups.values()) {
+    const byWriter = new Map<string, TranscriptLine[]>()
+    for (const l of g) {
+      const w = typeof l.observed_by === 'string' ? l.observed_by : ''
+      const arr = byWriter.get(w)
+      if (arr) arr.push(l)
+      else byWriter.set(w, [l])
+    }
+    let best: TranscriptLine[] | null = null
+    let bestW = ''
+    for (const [w, arr] of byWriter) {
+      if (!best || arr.length > best.length || (arr.length === best.length && w < bestW)) { best = arr; bestW = w }
+    }
+    if (best) picked.push(...best)
+  }
+  return picked.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts))
+}
+
 export class GroupTranscript {
   constructor(
     private readonly dir: string,
@@ -74,29 +120,20 @@ export class GroupTranscript {
     }
   }
 
-  /** 群里真人说的话（每个网关都会收到，谁先抢到标记谁记） */
-  observe(msg: TgMessage): void {
-    const chatId = String(msg.chat.id)
-    const seen = join(this.dir, '.seen')
-    try {
-      mkdirSync(seen, { recursive: true, mode: 0o700 })
-      writeFileSync(join(seen, `${chatId}_${msg.message_id}`), '', { flag: 'wx' })
-    } catch { return } // 别的网关已经记了
-    if (Math.random() < 0.02) this.sweep(seen)
+  /**
+   * 群里真人说的话。**v1.4（约定第 22 节）**：每只 bot 看到就写自己的一行，不再抢 `.seen` 标记——
+   * 普通群的 message_id 每个 bot 视角不同，抢锁挡不住跨侧重复，而改成新键（chat_id+ts+from_id）
+   * 又会把「同一人同一秒的两条」算成同一个文件名、第二条永远不落盘。用文件体积换一条不丢。
+   *
+   * 带图消息由调用方先下载、把路径传进来，**图和消息写在同一行**（v1.3 的「observe 行 + 图行」两行
+   * 形状不再产生）。下载失败/超时传 undefined，照样写这一行。
+   */
+  observe(msg: TgMessage, photoPath?: string): void {
     const r = msg.reply_to_message
     this.append({
       ...this.rowFor(msg, { ts: new Date(msg.date * 1000), text: toInbound(msg, null).text.slice(0, 1000) }),
+      ...(photoPath ? { attachment_kind: 'photo', image_path: photoPath } : {}),
       ...(r ? { reply_to_text: (r.text ?? r.caption ?? '').slice(0, 200), reply_to_from: r.from?.username ?? null } : {}),
-    })
-  }
-
-  /** 群里真人发图、本 bot 自己下载完成后追加的第二行：同一写方、同一 message_id，带图片字段。
-   *  ts 用**完成时刻**（不是消息时间）：下载跨过一轮时，用消息时间会被水位过滤掉、图永久漏。
-   *  不写 text：没抢到 observe 行的 bot 不能因此多出一条"路人：[图片]"的发言。 */
-  appendPhoto(msg: TgMessage, path: string): void {
-    this.append({
-      ...this.rowFor(msg, { ts: new Date(), text: '' }),
-      attachment_kind: 'photo', image_path: path,
     })
   }
 
@@ -189,13 +226,4 @@ export class GroupTranscript {
     return [...byLine.values()].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts)).slice(-limit)
   }
 
-  private sweep(seen: string): void {
-    const cutoff = Date.now() - 24 * 3600_000
-    try {
-      for (const f of readdirSync(seen)) {
-        const p = join(seen, f)
-        try { if (statSync(p).mtimeMs < cutoff) rmSync(p, { force: true }) } catch {}
-      }
-    } catch {}
-  }
 }

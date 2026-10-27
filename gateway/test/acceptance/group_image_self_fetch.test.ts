@@ -126,30 +126,21 @@ async function groupTurn(c: { tg: FakeTelegram; b: BotEnv; gw: Gateway }, marker
 
 // ───────── 写：自下载落盘与追加图行 ─────────
 
-test('群图自取1 群里真人发图：先写无图行，再追加带图行（同 observed_by/message_id，图行无 text）', async () => {
+test('群图自取1 群里真人发图：v1.4 起一条消息一行（图和消息同一行，不再有图行）', async () => {
   const { tg, b } = await setup()
   const mid = tg.pushPhoto(FRIEND, '群图说明', { chatId: GROUP })
-  const both = await until(() => {
-    const rs = rows(b).filter(r => Number(r.message_id) === mid)
-    return rs.length === 2 ? rs : null
-  }, '同一 message_id 的两行群记录', 20_000)
-  const [plain, photo] = both
-  // 先无图行：有 text、没有图片字段
-  expect(plain.image_path).toBeUndefined()
-  expect('attachment_kind' in plain).toBe(false)
-  expect(String(plain.text ?? '')).toContain('[图片]')
-  expect(String(plain.text ?? '')).toContain('群图说明')
-  // 后带图行：photo + image_path，text 为空（复审结论：图行不带 text）
-  expect(photo.attachment_kind).toBe('photo')
-  expect(typeof photo.image_path).toBe('string')
-  expect(String(photo.text ?? '')).toBe('')
-  // 同一写方、同一消息、同一发送者
-  expect(photo.observed_by).toBe(plain.observed_by)
-  expect(photo.observed_by).toBe(A_NAME)
-  expect(Number(photo.message_id)).toBe(Number(plain.message_id))
-  expect(String(photo.chat_id)).toBe(String(GROUP))
-  expect(String(photo.from_id)).toBe(String(FRIEND))
-  expect(photo.is_bot).toBe(false)
+  const row = await waitPhotoRow(b, mid)
+  // 只有一行：带 text、带 image_path
+  expect(rows(b).filter(r => Number(r.message_id) === mid)).toHaveLength(1)
+  expect(row.attachment_kind).toBe('photo')
+  expect(typeof row.image_path).toBe('string')
+  expect(String(row.text ?? '')).toContain('群图说明')
+  expect(row.observed_by).toBe(A_NAME)
+  expect(String(row.chat_id)).toBe(String(GROUP))
+  expect(String(row.from_id)).toBe(String(FRIEND))
+  expect(row.is_bot).toBe(false)
+  // ts 用消息自带 date（秒级），不是下载完成时刻（v1.4 第 22 节）
+  expect(String(row.ts)).toMatch(/\.000Z$/)
 })
 
 test('群图自取2 自取图生效：导演下一轮点名时模型收到 1 个图片块', async () => {
@@ -254,51 +245,9 @@ test('群图自取8 isSelfLine 新语义：本 bot 观察的人类图行照常�
   expect(p2.images).toBe(0)
 })
 
-test('群图自取9 超级群同 message_id 本 bot 自取行 + 对端补写行都可读：只附一张', async () => {
-  let peerImg = ''
-  const { tg, b, gw } = await setup({
-    prepare: d => {
-      mkdirSync(join(d.media, 'claude-repo', 'telegram-group'), { recursive: true })
-      peerImg = join(d.media, 'claude-repo', 'telegram-group', 'peer.jpg')
-      writeFileSync(peerImg, 'jpg')
-    },
-  })
-  const mid = tg.pushPhoto(FRIEND, '同一条图', { chatId: GROUP })
-  await waitPhotoRow(b, mid)
-  // 对端（claude 侧）补写同一 message_id、不同 observed_by 的一行
-  seed(b, {
-    message_id: mid, ts: Date.now(), text: '对端补写', from_id: '900002', from_username: 'bot_claude',
-    is_bot: true, observed_by: 'bot_claude', attachment_kind: 'photo', image_path: peerImg,
-  })
-  // 此时同 id 已有三行：observe 行、本 bot 自取行、对端补写行；要等的是「两条带图的」都到齐
-  await until(() => rows(b).filter(r => Number(r.message_id) === mid && r.image_path).length === 2, '同一 message_id 的两条带图行', 10_000)
-  const p = await groupTurn({ tg, b, gw }, '轮九')
-  // 折叠后同一 (chat_id, message_id) 只喂一行，图片块必须是 1 而不是 2
-  expect(p.images).toBe(1)
-})
+// v1.4 已删除「群图自取9 超级群同 m…」：一条消息一行、不再有图行，场景不存在
 
-test('群图自取10 下载跨过一轮：第二轮才写完图行，图仍能出现（图行 ts 用完成时刻）', async () => {
-  const { tg, b, gw } = await setup()
-  // getFile 慢 12 秒：第一轮跑的时候下载还没完成
-  tg.faults.push({ method: 'getFile', mode: 'slow', delayMs: 12_000, times: 1 })
-  const mid = tg.pushPhoto(FRIEND, '慢图', { chatId: GROUP })
-  const plain = await until(() => rows(b).find(r => Number(r.message_id) === mid), '先落盘的无图行', 10_000)
-  expect(plain.image_path).toBeUndefined()
-
-  // 第一轮：图行还不存在 → 这一轮没有图片块（方案明确不承诺"发图即能看见"）
-  const p1 = await groupTurn({ tg, b, gw }, '轮十甲')
-  expect(p1.images).toBe(0)
-
-  // 下载完成后追加图行；ts 必须是完成时刻，而不是消息时间（否则跨轮会被水位过滤掉）
-  const photoRow = await waitPhotoRow(b, mid)
-  const ts = typeof photoRow.ts === 'number' ? photoRow.ts : Date.parse(String(photoRow.ts))
-  const plainTs = Date.parse(String(plain.ts))
-  expect(ts).toBeGreaterThan(plainTs + 1000)
-
-  // 第二轮：图仍能出现
-  const p2 = await groupTurn({ tg, b, gw }, '轮十乙')
-  expect(p2.images).toBe(1)
-})
+// v1.4 已删除「群图自取10 下载跨过一…」：一条消息一行、不再有图行，场景不存在
 
 test('群图自取11 白名单外的 image_path 不附图（既有行为回归）', async () => {
   const { tg, b, gw, root, shared } = await setup()
