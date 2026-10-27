@@ -775,6 +775,20 @@ export class Engine {
     const after = Math.min(Math.max(watermark.after, now - GROUP_IMAGE_WINDOW_MS), now)
     let lines: TranscriptLine[]
     try { lines = this.groups.since(chatId, after - 1, GROUP_IMAGE_SCAN_LIMIT) } catch { return [] }
+    // 同一条群消息可能有多行（本 bot 自取行 + 对端 bot 补写行）：按 (chat_id, message_id) 折叠成一行再喂水位，
+    // 优先本 bot 自取行（observed_by 是自己且带 image_path），其次任意带 image_path 的行。
+    // 跨回合天然不重复；普通群两个系统 message_id 不同折叠不了，是过渡期风险（靠 claude 侧停补写消除）。
+    const folded = new Map<string, TranscriptLine>()
+    const ownImage = (l: TranscriptLine): boolean => !!this.botUsername && l.observed_by === this.botUsername && typeof l.image_path === 'string'
+    const hasImage = (l: TranscriptLine): boolean => typeof l.image_path === 'string'
+    for (const line of lines) {
+      const k = `${line.chat_id}\u0000${line.message_id}`
+      const prev = folded.get(k)
+      if (!prev) { folded.set(k, line); continue }
+      if (ownImage(prev)) continue
+      if (ownImage(line) || (!hasImage(prev) && hasImage(line))) folded.set(k, line)
+    }
+    lines = [...folded.values()]
     const res = consumeSharedImages({
       lines, watermark, botUsername: this.botUsername, max: MAX_GROUP_IMAGES_PER_TURN, now,
       read: path => readSharedImage(path, this.sharedReadDirs, MAX_SHARED_IMAGE_BYTES),

@@ -65,6 +65,15 @@ export class GroupTranscript {
     }
   }
 
+  /** 一行群记录的公共字段（observe / appendPhoto 共用；差别只在 ts、text 与附图字段） */
+  private rowFor(msg: TgMessage, o: { ts: Date; text: string }): TranscriptLine {
+    return {
+      ts: o.ts.toISOString(), chat_id: String(msg.chat.id), message_id: msg.message_id,
+      from_id: String(msg.from?.id ?? ''), from_username: msg.from?.username ?? null, from_name: senderName(msg.from),
+      is_bot: msg.from?.is_bot === true, text: o.text, observed_by: this.me().username,
+    }
+  }
+
   /** 群里真人说的话（每个网关都会收到，谁先抢到标记谁记） */
   observe(msg: TgMessage): void {
     const chatId = String(msg.chat.id)
@@ -76,10 +85,18 @@ export class GroupTranscript {
     if (Math.random() < 0.02) this.sweep(seen)
     const r = msg.reply_to_message
     this.append({
-      ts: new Date(msg.date * 1000).toISOString(), chat_id: chatId, message_id: msg.message_id,
-      from_id: String(msg.from?.id ?? ''), from_username: msg.from?.username ?? null, from_name: senderName(msg.from),
-      is_bot: msg.from?.is_bot === true, text: toInbound(msg, null).text.slice(0, 1000), observed_by: this.me().username,
+      ...this.rowFor(msg, { ts: new Date(msg.date * 1000), text: toInbound(msg, null).text.slice(0, 1000) }),
       ...(r ? { reply_to_text: (r.text ?? r.caption ?? '').slice(0, 200), reply_to_from: r.from?.username ?? null } : {}),
+    })
+  }
+
+  /** 群里真人发图、本 bot 自己下载完成后追加的第二行：同一写方、同一 message_id，带图片字段。
+   *  ts 用**完成时刻**（不是消息时间）：下载跨过一轮时，用消息时间会被水位过滤掉、图永久漏。
+   *  不写 text：没抢到 observe 行的 bot 不能因此多出一条"路人：[图片]"的发言。 */
+  appendPhoto(msg: TgMessage, path: string): void {
+    this.append({
+      ...this.rowFor(msg, { ts: new Date(), text: '' }),
+      attachment_kind: 'photo', image_path: path,
     })
   }
 
@@ -154,8 +171,8 @@ export class GroupTranscript {
         // 下游（私聊近况、群图水位）都按 ISO 字符串比较：数字时间戳在这里统一归一
         o.ts = new Date(ts).toISOString()
         if (typeof o.text !== 'string') o.text = ''
-        // 只合并同一个写方（observed_by）写的重复行：不同写方各看到一次同一消息时保留两行，
-        // 否则别人的图片会被并到本 bot 的 observe 行上，随后按"自己写的"被排除掉
+        // 只合并同一个写方（observed_by）写的重复行：observe 行与 appendPhoto 行就是靠这里并成一行带图的。
+        // 不同写方（本 bot 自取行 + 对端 bot 补写行）保留两行，去重交给读侧按 (chat_id, message_id) 折叠
         const writer = typeof o.observed_by === 'string' ? o.observed_by : ''
         const key = `${writer}\u0000${o.message_id}`
         const prev = byLine.get(key)

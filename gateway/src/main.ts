@@ -9,9 +9,9 @@ import { Engine } from './engine/engine'
 import { GroupTranscript } from './group/transcript'
 import { Ledger } from './ledger'
 import { Logger, registerSecret, safeError } from './log'
-import { collectSharedDirs } from './media/media'
+import { collectSharedDirs, fetchGroupPhoto } from './media/media'
 import { McpServer } from './mcp/server'
-import { TelegramApi, type TgUser } from './telegram/api'
+import { TelegramApi, type TgMessage, type TgUser } from './telegram/api'
 import { isGroupChat } from './telegram/inbound'
 import { GroupsSeen } from './telegram/groups_seen'
 import { Poller } from './telegram/poller'
@@ -88,8 +88,12 @@ async function main(): Promise<void> {
   // 群聊记录：bot 自己在群里发出的话由自己记（Telegram 不把 bot 的消息投给别的 bot）
   let me: TgUser | null = null
   const transcript = new GroupTranscript(cfg.groupsDir, () => ({ id: me?.id ?? 0, username: me?.username ?? '', name: me?.first_name ?? cfg.displayName }), log, () => cfg.gw.groupsRotateBytes)
+  // 群图自取的落盘目录：必须在收集读白名单之前建好（白名单启动时冻结），否则第一张图要重启才可读。
+  // 只入 read，不入 write / 发送白名单。
+  const groupMediaDir = join(cfg.botDir, 'group-media', 'telegram-group')
+  mkdirSync(groupMediaDir, { recursive: true, mode: 0o700 })
   // 群聊共享图：写侧只认 sharedMediaDir；读侧目录已在启动时展开并冻结（之后新目录要重启）
-  const sharedDirs = collectSharedDirs(cfg.gw)
+  const sharedDirs = collectSharedDirs({ sharedMediaDir: cfg.gw.sharedMediaDir, claudeMediaRoot: cfg.gw.claudeMediaRoot, ownGroupMediaDir: groupMediaDir })
   const sender = new Sender(api, ledger, log, {
     allowDirs, maxSendWaitMs: cfg.gw.maxSendWaitMs, access: () => loadAccess(cfg.channelDir),
     shareDirs: () => sharedDirs.write,
@@ -155,6 +159,23 @@ async function main(): Promise<void> {
   writeAtomic(join(cfg.stateDir, 'bot.json'), JSON.stringify({ id: me.id, username: me.username ?? '', name: cfg.displayName }))
   log.info('gateway.starting', { bot: cfg.id, telegram_bot: me.username ?? null, pid: process.pid })
 
+  // 群图自取：每个群一条串行链（一次刷屏几十张也不会同时打爆 Telegram），失败只降级为"没有图"。
+  // 不 await：下载不拖慢 observe 行落盘，也不阻断群消息处理；停机不等下载链（明确接受）。
+  const photoChain = new Map<string, Promise<void>>()
+  const queueGroupPhoto = (msg: TgMessage): void => {
+    const chatId = String(msg.chat.id)
+    const prev = photoChain.get(chatId) ?? Promise.resolve()
+    const next = prev.catch(() => {}).then(async () => {
+      const r = await fetchGroupPhoto({ api, msg, dir: groupMediaDir })
+      if (r.ok) transcript.appendPhoto(msg, r.path)
+      else log.warn('group_photo.failed', { chat: chatId, message_id: msg.message_id, reason: r.reason })
+    }).catch(() => {
+      // 兜底：任何意外都不外抛；日志仍只记固定枚举，不记路径/file_id/原始错误串
+      log.warn('group_photo.failed', { chat: chatId, message_id: msg.message_id, reason: 'download_failed' })
+    }).finally(() => { if (photoChain.get(chatId) === next) photoChain.delete(chatId) })
+    photoChain.set(chatId, next)
+  }
+
   const poller = new Poller(api, ledger, log, {
     channelDir: cfg.channelDir, botId: me.id, pollTimeoutS: cfg.gw.pollTimeoutS,
     onInbound: chatId => engine!.onInbound(chatId),
@@ -168,7 +189,12 @@ async function main(): Promise<void> {
     groupsOn: () => engine?.features.groups ?? true,
     onGroupDropped: m => groupsSeen.onDropped(m),
     onHumanMessage: (msg, observed) => {
-      if (observed) { transcript.observe(msg); return }
+      if (observed) {
+        transcript.observe(msg)
+        // 群里的真人图：observe 行先落盘，后台串行下载，成功后追加同一 message_id 的带图行
+        if (isGroupChat(msg.chat.id) && msg.photo?.length) queueGroupPhoto(msg)
+        return
+      }
       // 主人私聊的"刚聊过"标记（INTERFACE-适配服务 10.5）：写中立目录，导演不点正在私聊的 bot 去群里说话。
       // 群里的、别人的私聊不记；写失败只记一条警告，不影响收消息
       if (isGroupChat(msg.chat.id) || !cfg.gw.owners.includes(String(msg.chat.id))) return

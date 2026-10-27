@@ -1,4 +1,4 @@
-// 群记录里别人发的图：水位、排除本 bot 自己写的行、按行序消费、每回合上限。
+// 群记录里别人发的图：水位、排除本 bot 自己发出的消息、按行序消费、每回合上限。
 // 读目录白名单与真正的 open/fstat/read 在 media.readSharedImage 里；这里只负责"该看哪几行、水位推到哪"，
 // 另外为了判重和上限只对路径做 realpath（不读文件内容）。
 import { realpathSync } from 'fs'
@@ -33,10 +33,9 @@ export function watermarkJson(w: SharedImageWatermark): string {
   return JSON.stringify({ after: w.after, ids: w.ids })
 }
 
+/** 只排除本 bot 自己发出的消息。真人消息行哪怕由本 bot observe（observed_by 是自己）也算别人的图。 */
 function isSelfLine(line: TranscriptLine, botUsername: string): boolean {
-  if (!botUsername) return false
-  const me = botUsername.toLowerCase()
-  return [line.from_username, line.observed_by].some(v => typeof v === 'string' && v.toLowerCase() === me)
+  return !!botUsername && String(line.from_username ?? '').toLowerCase() === botUsername.toLowerCase()
 }
 
 type LineInfo = { kind: 'skip'; reason: SharedImageSkipReason } | { kind: 'image'; path: string }

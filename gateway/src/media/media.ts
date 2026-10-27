@@ -6,7 +6,7 @@ import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSyn
 import { basename, extname, isAbsolute, join, relative } from 'path'
 import type { InboundRow, Ledger } from '../ledger'
 import { safeError, type Logger } from '../log'
-import type { TelegramApi } from '../telegram/api'
+import { TgApiError, type TelegramApi, type TgMessage } from '../telegram/api'
 
 export type MediaMeta = { kind: 'voice' | 'photo'; file_id: string; path?: string; done?: boolean; transcript?: string | null }
 
@@ -32,6 +32,65 @@ const TRANSCRIBE_TIMEOUT_MS = 60_000
 export const MAX_SHARED_IMAGE_BYTES = 8 * 1024 * 1024
 /** 群记录里允许转给模型的图片扩展名 */
 export const SHARED_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
+
+/** 群图自取失败的原因（日志只记这个枚举，不记路径、file_id、原始错误串） */
+export type GroupPhotoFailure = 'bad_photo_shape' | 'too_large' | 'get_file_failed' | 'download_failed' | 'write_failed' | 'empty'
+export type GroupPhotoFetch = { ok: true; path: string } | { ok: false; reason: GroupPhotoFailure }
+
+/** photo 数组里挑面积最大的一张；形状不合格（含 file_id 超长）返回 null */
+function largestPhoto(photos: TgMessage['photo']): { fileId: string; fileSize?: number } | null {
+  let best: { fileId: string; area: number; fileSize?: number } | null = null
+  if (!Array.isArray(photos)) return null
+  for (const p of photos) {
+    if (!p || typeof p.file_id !== 'string') continue
+    const fileId = p.file_id
+    // file_id 由 Telegram 下发，仍按不可信输入校验形状
+    if (fileId.length === 0 || fileId.length > 256) continue
+    const w = typeof p.width === 'number' && Number.isFinite(p.width) && p.width > 0 ? p.width : 0
+    const h = typeof p.height === 'number' && Number.isFinite(p.height) && p.height > 0 ? p.height : 0
+    const area = w * h
+    if (!best || area > best.area) best = { fileId, area, fileSize: typeof p.file_size === 'number' ? p.file_size : undefined }
+  }
+  return best
+}
+
+/**
+ * 群消息里的真人图：挑面积最大的一张，getFile 后下载，落到 <dir>/<chat_id>/<message_id>.jpg。
+ * photo 来自 Telegram 推送（按不可信输入处理）：形状、大小、数字范围都校验，失败静默返回固定原因；
+ * 路径只由数字 chat_id/message_id 拼成（群号保留负号），不接受任何外部字符串。
+ */
+export async function fetchGroupPhoto(o: { api: TelegramApi; msg: TgMessage; dir: string }): Promise<GroupPhotoFetch> {
+  const chatId = o.msg.chat?.id
+  const messageId = o.msg.message_id
+  // 群号可能为负（-100…），负号原样保留；0 和超出安全整数的值都不接受
+  if (!Number.isSafeInteger(chatId) || chatId === 0 || !Number.isSafeInteger(messageId) || messageId <= 0) {
+    return { ok: false, reason: 'bad_photo_shape' }
+  }
+  const best = largestPhoto(o.msg.photo)
+  if (!best) return { ok: false, reason: 'bad_photo_shape' }
+  // 先用消息里带的 file_size 预判，超限连 getFile 都不发
+  if (best.fileSize !== undefined && best.fileSize > MAX_SHARED_IMAGE_BYTES) return { ok: false, reason: 'too_large' }
+  let file: { file_path?: string; file_size?: number }
+  try { file = await o.api.getFile(best.fileId) } catch { return { ok: false, reason: 'get_file_failed' } }
+  if (!file || typeof file.file_path !== 'string' || file.file_path.length === 0) return { ok: false, reason: 'get_file_failed' }
+  if (typeof file.file_size === 'number' && file.file_size > MAX_SHARED_IMAGE_BYTES) return { ok: false, reason: 'too_large' }
+  let bytes: Uint8Array
+  try {
+    // 显式传上限：超限时 download 抛 413，不把超大内容写盘
+    bytes = await o.api.download(file.file_path, MAX_SHARED_IMAGE_BYTES)
+  } catch (e) {
+    return { ok: false, reason: e instanceof TgApiError && e.status === 413 ? 'too_large' : 'download_failed' }
+  }
+  if (!bytes || bytes.byteLength === 0) return { ok: false, reason: 'empty' }
+  // photo 通道都是 JPEG：固定 .jpg，不从 file_path 取扩展名
+  const dir = join(o.dir, String(chatId))
+  const path = join(dir, `${messageId}.jpg`)
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    writeFileSync(path, bytes, { mode: 0o600 })
+  } catch { return { ok: false, reason: 'write_failed' } }
+  return { ok: true, path }
+}
 
 export function rowMedia(r: InboundRow): MediaMeta | null {
   try {
@@ -165,14 +224,19 @@ function insideDir(root: string, p: string): boolean {
 
 /**
  * 启动时把白名单展开并冻结（之后新出现的目录要重启才生效）。
- * 只收 sharedMediaDir，以及 claudeMediaRoot 下已存在的一级目录里的 telegram-group（群图）。
+ * write 只收 sharedMediaDir；read 另加 claudeMediaRoot 下已存在的一级目录里的 telegram-group（群图），
+ * 以及本 bot 自己下载群图的目录 ownGroupMediaDir——它**只入 read**，不入 write / 发送白名单，
+ * 免得模型把 A 群的图发到 B 群或私聊。
  * 一级目录本身（含其 telegram/ 私聊图）不收，免得一条被手改的群记录把私聊图拉进群回合；
  * telegram-group 必须是真目录（软链不收），且解析后仍落在 claudeMediaRoot 内。
  */
-export function collectSharedDirs(o: { sharedMediaDir: string; claudeMediaRoot: string }): SharedDirs {
+export function collectSharedDirs(o: { sharedMediaDir: string; claudeMediaRoot: string; ownGroupMediaDir: string }): SharedDirs {
   const shared = realDir(o.sharedMediaDir)
   const write = shared ? [shared] : []
   const read = [...write]
+  // 本 bot 自取群图的目录：启动时已由 main 建好；软链不收
+  const own = realDirNoLink(o.ownGroupMediaDir)
+  if (own) read.push(own)
   let root: string | null = null
   try { root = realpathSync(o.claudeMediaRoot) } catch {}
   let names: string[] = []
