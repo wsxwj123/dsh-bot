@@ -296,13 +296,14 @@ test('清单18 群记录写入失败（目录只读）：已发出的群消息�
   expect(readFileSync(join(root, 'groups-ro', `${GROUP}.jsonl`), 'utf8')).toBe('')
 })
 
-test('清单19 私聊回合即使群记录里有图片字段也不附图', async () => {
+test('清单19 私聊回合也附群记录里的图（2026-10-27 用户口径变更：私聊里被问群图不能凭空编）', async () => {
   let img = ''
   const { tg, b } = await setup({ prepare: d => { img = join(d.shared, 'group-only.png'); writeFileSync(img, 'png') } })
   seed(b, { text: '群里的图', attachment_kind: 'photo', image_path: img })
   tg.pushText(OWNER, '私聊一句轮十九')
   const p = (await until(() => promptWith(b, '私聊一句轮十九'), '私聊这一轮提示', 15_000))!
-  expect(p.images).toBe(0)
+  // 旧口径是 0（私聊不附图）；用户 2026-10-27 定「私聊也要知道群里有什么图片」后改成 1
+  expect(p.images).toBe(1)
   expect(p.text).not.toContain(img)
   expect(tg.sentTo(OWNER).some(s => (s.text ?? '').includes('私聊一句轮十九'))).toBe(true)
 })
