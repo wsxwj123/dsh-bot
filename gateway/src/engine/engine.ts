@@ -631,7 +631,9 @@ export class Engine {
     if (!this.groups || !this.features.groups || isGroupChat(chatId)) return null
     const key = `group_recap:${chatId}`
     const after = Math.max(Number(this.ledger.getMeta(key) || 0), Date.now() - 12 * 3600_000)
+    // since 也会返回纯图片/无文本的行（群图要用）；近况只需要文字，空 text 不进摘要
     const rows = Object.keys(this.access().groups).flatMap(g => this.groups!.since(g, after, 8))
+      .filter(r => r.text.trim())
       .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts)).slice(-8)
     if (rows.length === 0) return null
     this.ledger.setMeta(key, String(Math.max(...rows.map(r => Date.parse(r.ts)))))
