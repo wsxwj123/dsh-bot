@@ -322,6 +322,53 @@ test('清单20 启动后新增的 claudeMediaRoot 子目录不在允许清单内
   expect(p.text).not.toContain(late)
 })
 
+test('白名单边界 claudeMediaRoot 一级目录本身（<bot>/ 而非 <bot>/telegram-group/）不可读：该行不附图，同回合合法图仍附上', async () => {
+  let disallowed = ''
+  let legit = ''
+  const { tg, b, gw } = await setup({
+    prepare: d => {
+      // 同级合法目录：启动时已存在的 <bot>/telegram-group/，用于证明这一轮确实在读图
+      mkdirSync(join(d.media, 'somerepo', 'telegram-group'), { recursive: true })
+      legit = join(d.media, 'somerepo', 'telegram-group', 'ok-boundary.jpg')
+      writeFileSync(legit, 'jpg')
+      // 不允许：<claudeMediaRoot>/somerepo/ 这一级目录本身
+      disallowed = join(d.media, 'somerepo', 'photo.jpg')
+      writeFileSync(disallowed, 'jpg')
+    },
+  })
+  const t = Date.now()
+  seed(b, { ts: t - 2000, text: '一级目录图', attachment_kind: 'photo', image_path: disallowed })
+  seed(b, { ts: t - 1000, text: '合法目录图', attachment_kind: 'photo', image_path: legit })
+  const p = await groupTurn({ tg, b, gw }, '轮边界一')
+  expect(p.images).toBe(1)
+  expect(p.text).not.toContain(disallowed)
+  expect(tg.sentTo(GROUP).some(s => (s.text ?? '').includes('轮边界一'))).toBe(true)
+})
+
+test('白名单边界 claudeMediaRoot 一级子目录下的其他子目录（<bot>/telegram/ 私聊目录）不可读：该行不附图，同回合合法图仍附上', async () => {
+  let disallowed = ''
+  let legit = ''
+  const { tg, b, gw } = await setup({
+    prepare: d => {
+      // 同级合法目录：启动时已存在的 <bot>/telegram-group/
+      mkdirSync(join(d.media, 'somerepo', 'telegram-group'), { recursive: true })
+      legit = join(d.media, 'somerepo', 'telegram-group', 'ok-sibling.jpg')
+      writeFileSync(legit, 'jpg')
+      // 不允许：<claudeMediaRoot>/somerepo/telegram/（私聊图目录）
+      mkdirSync(join(d.media, 'somerepo', 'telegram'), { recursive: true })
+      disallowed = join(d.media, 'somerepo', 'telegram', 'photo.jpg')
+      writeFileSync(disallowed, 'jpg')
+    },
+  })
+  const t = Date.now()
+  seed(b, { ts: t - 2000, text: '私聊目录图', attachment_kind: 'photo', image_path: disallowed })
+  seed(b, { ts: t - 1000, text: '合法目录图', attachment_kind: 'photo', image_path: legit })
+  const p = await groupTurn({ tg, b, gw }, '轮边界二')
+  expect(p.images).toBe(1)
+  expect(p.text).not.toContain(disallowed)
+  expect(tg.sentTo(GROUP).some(s => (s.text ?? '').includes('轮边界二'))).toBe(true)
+})
+
 // ───────── 错误契约：不满足的行静默当没有图 ─────────
 
 test('契约 非字符串 / 空串 / 超长 / 含 NUL 的 image_path：都不附图，回复照常', async () => {
