@@ -3489,6 +3489,13 @@ def main():
         return 3
     # 访问日志会把整条请求行（含查询串）记下来，有人把令牌拼进地址就落盘了：只留错误级别。
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
+    # 本服务自己的日志：默认没有任何 handler，INFO 全被丢掉（等空闲重启这类后台动作事后查不到）。
+    # 只给 dsh.adapter 挂输出到 stderr 的 handler（launchd 已重定向进日志文件），不动 root，免得 Flask/urllib3 跟着吵。
+    if not _log.handlers:
+        _handler = logging.StreamHandler()
+        _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        _log.addHandler(_handler)
+        _log.setLevel(logging.INFO)
     create_app().run(host=host, port=port, debug=False, load_dotenv=False)
     return 0
 
