@@ -651,7 +651,13 @@ export class Engine {
     const key = `group_images:${chatId}`
     const now = Date.now()
     const watermark = parseWatermark(this.ledger.getMeta(key))
-    // 水位可能被旧数据推到未来：clamp 到 now，否则之后的行永远在"水位之前"取不到
+    if (watermark.after > now) {
+      // 旧版本可能把水位推到了未来：一次性重置到窗口起点并写回。
+      // 只 clamp 不写回的话，after=now 取不到行、advanced=false 又不落盘，这个群会永久不可读
+      watermark.after = now - GROUP_IMAGE_WINDOW_MS
+      watermark.ids = []
+      this.ledger.setMeta(key, watermarkJson(watermark))
+    }
     const after = Math.min(Math.max(watermark.after, now - GROUP_IMAGE_WINDOW_MS), now)
     let lines: TranscriptLine[]
     try { lines = this.groups.since(chatId, after - 1, GROUP_IMAGE_SCAN_LIMIT) } catch { return [] }
