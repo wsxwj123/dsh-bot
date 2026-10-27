@@ -2,7 +2,7 @@
 //   收：语音先下载再交给 voice-bridge 转写，图片下载到媒体目录。都放在处理这一轮之前做，不卡收消息；
 //       失败也不挡聊天（语音留一句"没转成文字"）。
 //   发：reply 带 as_voice 时，文字交给 voice-bridge 合成，网关自己用 sendVoice 发。Telegram 令牌不离开网关。
-import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs'
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs'
 import { basename, extname, isAbsolute, join, relative } from 'path'
 import type { InboundRow, Ledger } from '../ledger'
 import { safeError, type Logger } from '../log'
@@ -149,24 +149,43 @@ function realDir(p: string): string | null {
   } catch { return null }
 }
 
+/** 只认真正的目录（lstat 判断）：本身是软链就不收，免得白名单被链接扩到别处 */
+function realDirNoLink(p: string): string | null {
+  try {
+    if (!lstatSync(p).isDirectory()) return null
+    return realpathSync(p)
+  } catch { return null }
+}
+
+/** p 是否在 root 之下（不含 root 本身） */
+function insideDir(root: string, p: string): boolean {
+  const rel = relative(root, p)
+  return !!rel && !rel.startsWith('..') && !isAbsolute(rel)
+}
+
 /**
  * 启动时把白名单展开并冻结（之后新出现的目录要重启才生效）。
  * 只收 sharedMediaDir，以及 claudeMediaRoot 下已存在的一级目录里的 telegram-group（群图）。
- * 一级目录本身（含其 telegram/ 私聊图）不收，免得一条被手改的群记录把私聊图拉进群回合。
+ * 一级目录本身（含其 telegram/ 私聊图）不收，免得一条被手改的群记录把私聊图拉进群回合；
+ * telegram-group 必须是真目录（软链不收），且解析后仍落在 claudeMediaRoot 内。
  */
 export function collectSharedDirs(o: { sharedMediaDir: string; claudeMediaRoot: string }): SharedDirs {
   const shared = realDir(o.sharedMediaDir)
   const write = shared ? [shared] : []
   const read = [...write]
+  let root: string | null = null
+  try { root = realpathSync(o.claudeMediaRoot) } catch {}
   let names: string[] = []
-  try {
-    names = readdirSync(o.claudeMediaRoot, { withFileTypes: true })
-      .filter(e => e.isDirectory()).map(e => e.name).sort()
-  } catch {}
+  if (root) {
+    try {
+      names = readdirSync(o.claudeMediaRoot, { withFileTypes: true })
+        .filter(e => e.isDirectory()).map(e => e.name).sort()
+    } catch {}
+  }
   for (const name of names) {
     // 只到 telegram-group 这一层；<bot>/ 本身和 <bot>/telegram/（私聊）都不在群图白名单里
-    const group = realDir(join(o.claudeMediaRoot, name, 'telegram-group'))
-    if (group) read.push(group)
+    const group = realDirNoLink(join(o.claudeMediaRoot, name, 'telegram-group'))
+    if (group && root && insideDir(root, group)) read.push(group)
   }
   return { write: Object.freeze([...new Set(write)]), read: Object.freeze([...new Set(read)]) }
 }
