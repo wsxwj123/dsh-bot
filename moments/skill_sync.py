@@ -25,12 +25,17 @@ import sys
 import tempfile
 
 from moments import handoff, skill_templates
+from moments.config_sources import dsh_home
 
 #: image 技能里外貌块的位置标记（模板圈内结尾："照片里的你：" 后面是外貌）
 APPEARANCE_MARK = "照片里的你："
 #: 备份文件后缀（与接口约定一致）
 BACKUP_SUFFIX = ".bak-before-skill-sync"
-DEFAULT_BOTS_ROOT = os.path.join(os.path.expanduser("~"), ".dsh-bot", "bots")
+
+
+def _default_bots_root():
+    """``<DSH_BOT_HOME>/bots``（默认 ``~/.dsh-bot/bots``），跟项目统一入口走。"""
+    return os.path.join(str(dsh_home()), "bots")
 
 
 def _skill_path(bot_dir, generic):
@@ -92,8 +97,11 @@ def _read_skill(path):
 
     这两种文件按接口约定当作没有成对标记跳过：不猜内容、不写盘。
     """
-    with open(path, "rb") as f:
-        raw = f.read(handoff.MAX_BYTES + 1)
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(handoff.MAX_BYTES + 1)
+    except OSError:
+        return None, "io_error"
     if len(raw) > handoff.MAX_BYTES:
         return None, "no_marker"
     try:
@@ -213,7 +221,10 @@ def _check_one(path, generic):
         return {"state": "missing", "diff_lines": 0}
     text, problem = _read_skill(path)
     if problem:
-        return {"state": "no_marker", "diff_lines": 0}
+        item = {"state": "no_marker", "diff_lines": 0}
+        if problem == "io_error":
+            item["reason"] = "io_error"
+        return item
     old_inner = handoff.inner(_to_lf(text))
     if old_inner is None:
         return {"state": "no_marker", "diff_lines": 0}
@@ -254,30 +265,43 @@ def _write_with_backup(path, text, backup):
         raise
 
 
+def _prepare_sync(bot_dir, generic, persona=None):
+    """算出要写成什么，不落盘。
+
+    → ``((path, text, crlf, old_inner, new_inner), None)``，或 ``(None, 失败结果)``。
+    ``sync_bot`` 与 ``sync --all`` 的执行前预演共用这一份判断，免得两处逻辑走偏。
+    """
+    bot_dir = os.fspath(bot_dir)
+    if generic not in _template_generics():
+        return None, {"ok": False, "reason": "template_missing"}
+    path = _skill_path(bot_dir, generic)
+    if not os.path.isfile(path):
+        return None, {"ok": False, "reason": "missing"}
+    text, problem = _read_skill(path)
+    if problem:
+        return None, {"ok": False, "reason": problem}
+    crlf = _has_crlf(text)
+    text = _to_lf(text)
+    old_inner = handoff.inner(text)
+    if old_inner is None:
+        return None, {"ok": False, "reason": "no_marker"}
+    new_inner = _render_inner(generic, old_inner, persona)
+    if new_inner is None:
+        return None, {"ok": False, "reason": "template_missing"}
+    return (path, text, crlf, old_inner, new_inner), None
+
+
 def sync_bot(bot_dir, generic, *, persona=None, backup_suffix=BACKUP_SUFFIX):
     """把这只 bot 这个技能的圈内换成模板渲染结果，圈外逐字节不动。
 
     ``persona`` 是这只 bot 的人设文本（有就传给 nsfw 重新提取例句段；没有就从旧圈内取）。
     返回 ``{"ok": True, "changed": bool, "backup": str | None}`` 或
-    ``{"ok": False, "reason": "no_marker" | "missing" | "template_missing"}``。
+    ``{"ok": False, "reason": "no_marker" | "missing" | "template_missing" | "io_error"}``。
     """
-    bot_dir = os.fspath(bot_dir)
-    if generic not in _template_generics():
-        return {"ok": False, "reason": "template_missing"}
-    path = _skill_path(bot_dir, generic)
-    if not os.path.isfile(path):
-        return {"ok": False, "reason": "missing"}
-    text, problem = _read_skill(path)
-    if problem:
-        return {"ok": False, "reason": problem}
-    crlf = _has_crlf(text)
-    text = _to_lf(text)
-    old_inner = handoff.inner(text)
-    if old_inner is None:
-        return {"ok": False, "reason": "no_marker"}
-    new_inner = _render_inner(generic, old_inner, persona)
-    if new_inner is None:
-        return {"ok": False, "reason": "template_missing"}
+    prepared, failure = _prepare_sync(bot_dir, generic, persona)
+    if failure is not None:
+        return failure
+    path, text, crlf, old_inner, new_inner = prepared
     if new_inner == old_inner:
         return {"ok": True, "changed": False, "backup": None}
     new_text = handoff.replace(text, new_inner)
@@ -291,11 +315,44 @@ def sync_bot(bot_dir, generic, *, persona=None, backup_suffix=BACKUP_SUFFIX):
 
 
 def _sync_one(bot_dir, generic, options):
-    """sync_all 用：单个技能的磁盘错误只记这一项失败，不打断整批。"""
+    """单个技能的磁盘错误只记这一项失败，不打断整批。"""
     try:
         return sync_bot(bot_dir, generic, **options)
     except OSError:
         return {"ok": False, "reason": "io_error"}
+
+
+def _bot_options(bot_dir, kw):
+    """同一只 bot 的调用选项；没给 persona 时现读它的人设，供 nsfw 重新提取例句段。"""
+    options = dict(kw)
+    if "persona" not in options:
+        persona = _bot_persona(bot_dir)
+        if persona is not None:
+            options["persona"] = persona
+    return options
+
+
+def _plan_one(bot_dir, generic, persona=None):
+    """执行前预演：只算这个技能会不会改，不写盘。"""
+    try:
+        prepared, failure = _prepare_sync(bot_dir, generic, persona)
+    except OSError:
+        return {"ok": False, "reason": "io_error"}
+    if failure is not None:
+        return failure
+    _path, _text, _crlf, old_inner, new_inner = prepared
+    return {"ok": True, "changed": new_inner != old_inner, "backup": None}
+
+
+def _plan_all(bots_root, **kw):
+    """不写盘地算一遍 ``sync_all`` 会改哪些项，结构同 ``sync_all``。"""
+    bots_root = os.fspath(bots_root)
+    result = {}
+    for bot_id, bot_dir in _bot_dirs(bots_root):
+        options = _bot_options(bot_dir, kw)
+        result[bot_id] = {generic: _plan_one(bot_dir, generic, options.get("persona"))
+                          for generic in _existing_generics(bot_dir)}
+    return result
 
 
 def sync_all(bots_root, **kw):
@@ -308,11 +365,7 @@ def sync_all(bots_root, **kw):
     bots_root = os.fspath(bots_root)
     result = {}
     for bot_id, bot_dir in _bot_dirs(bots_root):
-        options = dict(kw)
-        if "persona" not in options:
-            persona = _bot_persona(bot_dir)
-            if persona is not None:
-                options["persona"] = persona
+        options = _bot_options(bot_dir, kw)
         result[bot_id] = {generic: _sync_one(bot_dir, generic, options)
                           for generic in _existing_generics(bot_dir)}
     return result
@@ -326,7 +379,8 @@ def _build_parser():
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_check = sub.add_parser("check", help="只报告，不写盘")
-    p_check.add_argument("--bots-root", default=DEFAULT_BOTS_ROOT, help="bot 根目录（默认 ~/.dsh-bot/bots）")
+    p_check.add_argument("--bots-root", default=_default_bots_root(),
+                         help="bot 根目录（默认 <DSH_BOT_HOME>/bots）")
     p_check.add_argument("--verbose", action="store_true", default=argparse.SUPPRESS)
 
     p_sync = sub.add_parser("sync", help="按模板刷新圈内")
@@ -334,7 +388,10 @@ def _build_parser():
     which.add_argument("--bot", metavar="BOT_ID", help="只刷新这只 bot")
     which.add_argument("--all", action="store_true", help="刷新全部 bot")
     p_sync.add_argument("--skill", metavar="通用名", help="只刷新这一个技能（配合 --bot）")
-    p_sync.add_argument("--bots-root", default=DEFAULT_BOTS_ROOT, help="bot 根目录（默认 ~/.dsh-bot/bots）")
+    p_sync.add_argument("--yes", action="store_true",
+                        help="确认执行 --all（会改写所有 bot 的技能文件圈内）")
+    p_sync.add_argument("--bots-root", default=_default_bots_root(),
+                        help="bot 根目录（默认 <DSH_BOT_HOME>/bots）")
     return parser
 
 
@@ -374,12 +431,19 @@ def _diff_line_numbers(path, generic):
 
 
 #: check 里跳过项的 --verbose 说明（不打印任何技能正文）
-_REASON_TEXT = {"template_missing": "模板不存在", "template_no_marker": "模板缺成对标记"}
+_REASON_TEXT = {"template_missing": "模板不存在", "template_no_marker": "模板缺成对标记",
+                "io_error": "文件读不了"}
 
 
 def _cli_check(args):
     bots_root = os.fspath(args.bots_root)
     result = check(bots_root)
+    if not result["bots"]:
+        # 根目录写错或 DSH_BOT_HOME 没对上时别假绿：把扫描根说出来，退出码仍按契约
+        if os.path.isdir(bots_root):
+            print("警告：%s 下没有 bot 目录" % bots_root, file=sys.stderr)
+        else:
+            print("警告：bot 根目录不存在：%s" % bots_root, file=sys.stderr)
     verbose = getattr(args, "verbose", False)
     for bot_id, info in result["bots"].items():
         for generic, item in info["skills"].items():
@@ -404,6 +468,16 @@ def _cli_sync(args, parser):
     if args.all and args.skill:
         parser.error("--skill 只能和 --bot 一起用")
     if args.all:
+        # --all 会覆盖所有 bot 的圈内：先预演，确实有东西要改且没 --yes 就拒绝执行
+        plan = _plan_all(args.bots_root)
+        pending = [(bot_id, generic) for bot_id, skills in plan.items()
+                   for generic, item in skills.items() if item["ok"] and item["changed"]]
+        if pending and not args.yes:
+            for bot_id, generic in pending:
+                print("%s  %s  changed" % (bot_id, generic))
+            print("未执行：以上 %d 个技能的圈内会被模板覆盖。先跑 check 核对；确认后加 --yes"
+                  % len(pending))
+            return 2
         results = sync_all(args.bots_root)
     else:
         bot_id = args.bot
@@ -411,12 +485,11 @@ def _cli_sync(args, parser):
                 or os.path.isabs(bot_id) or (len(bot_id) > 1 and bot_id[1] == ":"):
             parser.error("bot_id 不合法：%r" % bot_id)
         bot_dir = os.path.join(args.bots_root, bot_id)
-        persona = _bot_persona(bot_dir)
-        options = {"persona": persona} if persona is not None else {}
+        options = _bot_options(bot_dir, {})
         if args.skill:
-            results = {bot_id: {args.skill: sync_bot(bot_dir, args.skill, **options)}}
+            results = {bot_id: {args.skill: _sync_one(bot_dir, args.skill, options)}}
         else:
-            results = {bot_id: {generic: sync_bot(bot_dir, generic, **options)
+            results = {bot_id: {generic: _sync_one(bot_dir, generic, options)
                                 for generic in _existing_generics(bot_dir)}}
 
     changed = unchanged = failed = 0
@@ -436,6 +509,14 @@ def _cli_sync(args, parser):
 
 
 def main(argv=None):
+    # Windows 非中文代码页下重定向输出会 UnicodeEncodeError；统一按 UTF-8 写
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.cmd == "check":
