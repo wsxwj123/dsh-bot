@@ -3,11 +3,11 @@
 // 本机 /v1/inject 触发群回合、读写 access.json 与群记录文件、读网关日志。
 // 注释里的「清单 N」对应接口文件第 3 节编号；错误契约单独标「契约」。
 import { expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { FakeTelegram } from '../fakes/fake-telegram'
-import { logEvents, OWNER, FRIEND, readJsonl, sleep, until, withBot, type BotEnv } from './_acc'
+import { chatLog, logEvents, OWNER, FRIEND, q, readJsonl, sleep, until, withBot, type BotEnv } from './_acc'
 
 const GROUP = -1001777
 const GROUP2 = -1002666
@@ -383,5 +383,57 @@ test('契约 拒绝类错误（E_TYPE / E_FORMAT / E_GROUPS_OFF / E_NOT_REGISTER
     for (const r of got) expect(r.isError).toBe(true)
     const files = existsSync(groupsDir(b)) ? readdirSync(groupsDir(b)).filter(f => f.endsWith('.jsonl')) : []
     expect(files).toEqual([])
+  })
+})
+
+// ───────── 裁判补测：成功路径日志、群名分支、账本零副作用 ─────────
+
+test('补充 跨聊天成功路径：日志里没有完整目标号，chat.log 不写跨聊正文', async () => {
+  await withBot({ access: accessWith([GROUP]), gw: { burst_window_ms: 0 }, before: b => setFeatures(b, { groups: true }) }, async ({ tg, b }) => {
+    const got = await userTurn(b, tg, `补充一 ${replyTool('补充一跨聊正文', { chat_id: String(GROUP) })}`, r => r.args?.text === '补充一跨聊正文')
+    expect(got).toHaveLength(1)
+    expect(got[0]!.isError).toBe(false)
+    expect(tg.sentTo(GROUP)).toHaveLength(1)
+    await sleep(500)
+    const logs = logEvents(b).map(e => JSON.stringify(e)).join('\n')
+    expect(logs).toContain('***')
+    expect(logs).not.toContain(String(GROUP))
+    // 用户自己那条消息本来就带这段文字（对话流会原样记），只要求 bot 没有把它作为「已发送」再记一遍
+    expect(chatLog(b)).not.toContain('bot: 补充一跨聊正文')
+  })
+})
+
+test('补充 list_chats 群名取 groups-seen.json 的 title：控制字符清洗、超长截断到 40 字', async () => {
+  await withBot({ access: accessWith([GROUP]), gw: { burst_window_ms: 0 }, before: b => setFeatures(b, { groups: true }) }, async ({ tg, b }) => {
+    const stateDir = join(b.botDir, 'state')
+    mkdirSync(stateDir, { recursive: true })
+    const long = '测'.repeat(60)
+    writeFileSync(join(stateDir, 'groups-seen.json'), JSON.stringify({
+      [String(GROUP)]: {
+        title: `${long}\u0007尾`, type: 'supergroup', status: 'member',
+        added_by_owner: true, first_seen: '2026-10-01T00:00:00.000Z', last_seen: '2026-10-27T00:00:00.000Z',
+      },
+    }))
+    const got = await userTurn(b, tg, `补充二 ${listChatsTool}`, r => r.name === 'list_chats')
+    expect(got).toHaveLength(1)
+    const out = JSON.parse(got[0]!.text)
+    const g = out.chats.find((c: any) => c.chat_id === String(GROUP))
+    expect(g).toBeTruthy()
+    expect(g.name).toBe(long.slice(0, 40))
+    expect(g.name).not.toContain('\u0007')
+  })
+})
+
+test('补充 拒绝时账本里没有任何出站记录（零副作用补全）', async () => {
+  await withBot({ access: accessWith([GROUP]), gw: { burst_window_ms: 0 }, before: b => setFeatures(b, { groups: true }) }, async ({ tg, b }) => {
+    const got = await userTurn(b, tg, `补充三 ${replyTool('补充三正文', { chat_id: String(UNREG_GROUP) })}`, r => r.args?.text === '补充三正文')
+    expect(got).toHaveLength(1)
+    expect(got[0]!.isError).toBe(true)
+    // 这一轮本身有一条正常回复（假 ACP 的自动应答），所以不能断言总数为 0；
+    // 只要求被拒绝的正文没有进账本、也没有发往目标群
+    await sleep(300)
+    // 被拒绝的目标聊天在账本里不能有任何出站（这一轮本身的正常回复是发往当前聊天的，不算）
+    expect(q<Record<string, unknown>>(b, 'SELECT * FROM outbound WHERE chat_id = ?', String(UNREG_GROUP))).toEqual([])
+    expect(tg.sentTo(UNREG_GROUP)).toHaveLength(0)
   })
 })

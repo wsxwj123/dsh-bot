@@ -28,10 +28,10 @@ test('登记表：首尾空白先 trim；未登记、空串、前缀/数值形�
   expect(registeredChatTarget({ allowFrom: ['ABC'], groups: {} }, 'abc')).toBeNull()
 })
 
-test('登记表：群里登记的是原始键，发送与群记录都用它', () => {
+test('登记表：配置键带空白也返回规范形态（校验用哪个值，发送就用哪个值）', () => {
   const odd = { allowFrom: [], groups: { ' -1001777 ': { allowFrom: [] } } }
   const got = registeredChatTarget(odd, '-1001777')
-  expect(got).toEqual({ chatId: ' -1001777 ', kind: 'group' })
+  expect(got).toEqual({ chatId: '-1001777', kind: 'group' })
 })
 
 test('登记表：同一编号同时出现在私聊和群里时按形状（负号）选群', () => {
