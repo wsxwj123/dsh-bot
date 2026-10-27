@@ -16,6 +16,7 @@ nsfw 的成人例句段）保留，写盘前备份原文件。
 默认只输出摘要数字与状态，不打印技能正文（技能文件可能含成人内容）。
 """
 import argparse
+import datetime
 import difflib
 import os
 import shutil
@@ -145,7 +146,9 @@ def _render_inner(generic, old_inner, persona=None):
         rendered = skill_templates.render(generic, persona=persona)
     else:
         rendered = skill_templates.render(generic)
-    return handoff.inner(rendered)
+    inner = handoff.inner(rendered)
+    # 模板文件可能是 CRLF；按原文风格写回时假定圈内是 LF，不然会写出 \r\r\n
+    return None if inner is None else inner.replace("\r\n", "\n")
 
 
 def _diff_lines(old_inner, new_inner):
@@ -181,16 +184,19 @@ def check(bots_root):
     LF（刷新会按原文风格写回 CRLF，不统一的话刷新完会永远报差异）。
     """
     bots_root = os.fspath(bots_root)
-    generics = _template_generics()
+    templates = set(_template_generics())
     bots = {}
     totals = {"same": 0, "diff": 0, "skipped": 0}
     for bot_id, bot_dir in _bot_dirs(bots_root):
         skills = {}
         if os.path.isdir(os.path.join(bot_dir, "channel", "skills")):
-            for generic in generics:
-                item = _check_one(_skill_path(bot_dir, generic), generic)
-                if item is not None:
-                    skills[generic] = item
+            # bot 里可能有模板已经删掉的技能：也要列出来计入 skipped，不能静默丢掉
+            for generic in sorted(templates.union(_existing_generics(bot_dir))):
+                if generic not in templates:
+                    skills[generic] = {"state": "missing", "diff_lines": 0,
+                                       "reason": "template_missing"}
+                else:
+                    skills[generic] = _check_one(_skill_path(bot_dir, generic), generic)
         same = sum(1 for item in skills.values() if item["state"] == "same")
         diff = sum(1 for item in skills.values() if item["state"] == "diff")
         skipped = sum(1 for item in skills.values() if item["state"] in ("no_marker", "missing"))
@@ -202,7 +208,7 @@ def check(bots_root):
 
 
 def _check_one(path, generic):
-    """一个 bot 一个技能的比对结果；模板自身没有成对标记时回 None（不报这一项）。"""
+    """一个 bot 一个技能的比对结果；跳过的情况带 ``reason`` 供 --verbose 说明。"""
     if not os.path.isfile(path):
         return {"state": "missing", "diff_lines": 0}
     text, problem = _read_skill(path)
@@ -213,10 +219,15 @@ def _check_one(path, generic):
         return {"state": "no_marker", "diff_lines": 0}
     new_inner = _render_inner(generic, old_inner)
     if new_inner is None:
-        return None
+        return {"state": "no_marker", "diff_lines": 0, "reason": "template_no_marker"}
     if old_inner == new_inner:
         return {"state": "same", "diff_lines": 0}
     return {"state": "diff", "diff_lines": _diff_lines(old_inner, new_inner)}
+
+
+def _backup_path(path, suffix):
+    """``<原路径><suffix>-<YYYYMMDD>``：同一天重复刷新覆盖当天那一份。"""
+    return path + suffix + "-" + datetime.date.today().strftime("%Y%m%d")
 
 
 def _write_with_backup(path, text, backup):
@@ -274,16 +285,25 @@ def sync_bot(bot_dir, generic, *, persona=None, backup_suffix=BACKUP_SUFFIX):
         return {"ok": False, "reason": "no_marker"}
     if crlf:
         new_text = new_text.replace("\n", "\r\n")
-    backup = path + backup_suffix
+    backup = _backup_path(path, backup_suffix)
     _write_with_backup(path, new_text, backup)
     return {"ok": True, "changed": True, "backup": backup}
+
+
+def _sync_one(bot_dir, generic, options):
+    """sync_all 用：单个技能的磁盘错误只记这一项失败，不打断整批。"""
+    try:
+        return sync_bot(bot_dir, generic, **options)
+    except OSError:
+        return {"ok": False, "reason": "io_error"}
 
 
 def sync_all(bots_root, **kw):
     """刷新 ``bots_root`` 下每只 bot 的每个已有技能，返回 ``{bot_id: {通用名: sync_bot 的结果}}``。
 
     ``kw`` 原样传给 ``sync_bot``（``backup_suffix`` 等）；没给 ``persona`` 时按每只 bot 的
-    ``channel/CLAUDE.md`` 现读，供 nsfw 重新提取例句段。
+    ``channel/CLAUDE.md`` 现读，供 nsfw 重新提取例句段。单个技能失败（含写盘 ``OSError``）
+    不影响其余，``OSError`` 记作 ``{"ok": False, "reason": "io_error"}``。
     """
     bots_root = os.fspath(bots_root)
     result = {}
@@ -293,7 +313,7 @@ def sync_all(bots_root, **kw):
             persona = _bot_persona(bot_dir)
             if persona is not None:
                 options["persona"] = persona
-        result[bot_id] = {generic: sync_bot(bot_dir, generic, **options)
+        result[bot_id] = {generic: _sync_one(bot_dir, generic, options)
                           for generic in _existing_generics(bot_dir)}
     return result
 
@@ -318,12 +338,62 @@ def _build_parser():
     return parser
 
 
+def _inner_content_start(text):
+    """圈内第一行内容在 ``text`` 里的下标（跳过紧挨 START 的换行，与 ``handoff.inner`` 一致）。"""
+    at = text.index(handoff.START) + len(handoff.START)
+    while at < len(text) and text[at] in "\r\n":
+        at += 1
+    return at
+
+
+def _diff_line_numbers(path, generic):
+    """这只 bot 这个技能里有差异的行的文件行号（1 起）；读不出来就回空列表。"""
+    try:
+        text, problem = _read_skill(path)
+    except OSError:
+        return []
+    if problem:
+        return []
+    text = _to_lf(text)
+    old_inner = handoff.inner(text)
+    if old_inner is None:
+        return []
+    new_inner = _render_inner(generic, old_inner)
+    if new_inner is None:
+        return []
+    old_lines, new_lines = old_inner.splitlines(), new_inner.splitlines()
+    offsets = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old_lines, new_lines).get_opcodes():
+        if tag == "equal":
+            continue
+        # 新旧两侧受影响的都列出来：改前的行号与刷新后会变的位置
+        offsets.extend(range(i1, i2))
+        offsets.extend(range(j1, j2))
+    base = text.count("\n", 0, _inner_content_start(text)) + 1
+    return sorted(set(base + offset for offset in offsets))
+
+
+#: check 里跳过项的 --verbose 说明（不打印任何技能正文）
+_REASON_TEXT = {"template_missing": "模板不存在", "template_no_marker": "模板缺成对标记"}
+
+
 def _cli_check(args):
-    result = check(args.bots_root)
-    if getattr(args, "verbose", False):
-        for bot_id, info in result["bots"].items():
-            for generic, item in info["skills"].items():
-                print("%s  %s  %s  %d 行" % (bot_id, generic, item["state"], item["diff_lines"]))
+    bots_root = os.fspath(args.bots_root)
+    result = check(bots_root)
+    verbose = getattr(args, "verbose", False)
+    for bot_id, info in result["bots"].items():
+        for generic, item in info["skills"].items():
+            line = "%s  %s  %s  %d 行" % (bot_id, generic, item["state"], item["diff_lines"])
+            if verbose:
+                reason = _REASON_TEXT.get(item.get("reason"))
+                if reason:
+                    line += "  （%s）" % reason
+                if item["state"] == "diff":
+                    numbers = _diff_line_numbers(
+                        _skill_path(os.path.join(bots_root, bot_id), generic), generic)
+                    if numbers:
+                        line += "  第 " + "、".join(str(n) for n in numbers) + " 行"
+            print(line)
     totals = result["totals"]
     print("检查完成：%d 只 bot；一致 %d，有差异 %d，跳过 %d" % (
         len(result["bots"]), totals["same"], totals["diff"], totals["skipped"]))
@@ -337,7 +407,8 @@ def _cli_sync(args, parser):
         results = sync_all(args.bots_root)
     else:
         bot_id = args.bot
-        if not bot_id or bot_id in (".", "..") or "/" in bot_id or "\\" in bot_id:
+        if not bot_id or bot_id in (".", "..") or "/" in bot_id or "\\" in bot_id \
+                or os.path.isabs(bot_id) or (len(bot_id) > 1 and bot_id[1] == ":"):
             parser.error("bot_id 不合法：%r" % bot_id)
         bot_dir = os.path.join(args.bots_root, bot_id)
         persona = _bot_persona(bot_dir)
