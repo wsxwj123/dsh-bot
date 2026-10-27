@@ -111,7 +111,9 @@ def test_shell_guide_noninteractive_prints_where_and_how(sandbox):
     for name in ("setup_keys.sh", "setup_keys.py"):
         (repo / "scripts" / name).write_bytes((ROOT / "scripts" / name).read_bytes())
     r = subprocess.run(["bash", str(repo / "scripts" / "setup_keys.sh"), "--check"],
-                       capture_output=True, text=True, env={**os.environ, "HOME": str(home)}, stdin=subprocess.DEVNULL)
+                       capture_output=True, text=True,
+                       env={**os.environ, "HOME": str(home), "USERPROFILE": str(home)},
+                       stdin=subprocess.DEVNULL)
     assert r.returncode == 0, r.stderr
     out = r.stdout
     for must in ("@BotFather", "@userinfobot", "platform.deepseek.com", "TELEGRAM_BOT_TOKEN", "allowFrom", "jiwen.delta_llm.api_key"):

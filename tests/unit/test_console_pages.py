@@ -29,7 +29,7 @@ def client(tmp_path, monkeypatch):
     token_file = tmp_path / "adapter.token"
     token_file.write_text(TOKEN, encoding="utf-8")
     monkeypatch.setenv("DSH_CONSOLE_TOKEN_FILE", str(token_file))
-    for name, sub in (("HOME", "home"), ("DSH_BOT_HOME", "dsh-home"),
+    for name, sub in (("HOME", "home"), ("USERPROFILE", "home"), ("DSH_BOT_HOME", "dsh-home"),
                       ("HUB_CONFIGS_DSH_DIR", "dsh-configs"), ("HUB_CONFIGS_DIR", "legacy-configs")):
         monkeypatch.setenv(name, str(tmp_path / sub))
     monkeypatch.delenv("HUB_TELEGRAM_API_BASE", raising=False)

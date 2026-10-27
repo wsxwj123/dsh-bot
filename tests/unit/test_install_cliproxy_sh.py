@@ -64,7 +64,8 @@ def _run(repo, tmp_path, pkg, extra=None):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     env = dict(os.environ)
-    env.update({"HOME": str(home), "CLAUDE_TGBOT_HOME": str(home / ".claude-tgbot"),
+    env.update({"HOME": str(home), "USERPROFILE": str(home),
+                "CLAUDE_TGBOT_HOME": str(home / ".claude-tgbot"),
                 "HUB_SKIP_AUTOSTART": "1", "HUB_CLIPROXY_LOCAL_PKG": str(pkg)})
     env.pop("CLIPROXY_PORT", None)
     env.update(extra or {})
