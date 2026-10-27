@@ -1,7 +1,7 @@
 // 网关入口：bun src/main.ts --config configs/<bot>.yml
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'fs'
 import { homedir } from 'os'
-import { basename, join } from 'path'
+import { join } from 'path'
 import { ApiServer } from './api/server'
 import { checkCredentialsFile, ConfigError, loadAccess, loadBotConfig, readTelegramToken, setAccessFallbackReporter, type BotConfig } from './config'
 import { DshProcess, isAlive, processCommandLine } from './dsh/process'
@@ -62,10 +62,10 @@ async function main(): Promise<void> {
   // access.json 读坏时沿用上次白名单（见 config.loadAccess）：每次读坏都回调，这里限频到每分钟一条，别刷屏
   {
     let lastAt = 0
-    setAccessFallbackReporter(dir => {
+    setAccessFallbackReporter(() => {
       if (Date.now() - lastAt < 60_000) return
       lastAt = Date.now()
-      log.warn('access.fallback_to_last_good', { channel: basename(dir) })
+      log.warn('access.fallback_to_last_good')
     })
   }
 

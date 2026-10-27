@@ -536,8 +536,10 @@ export class Engine {
         const failed = results.some(r => r.state === 'failed' || r.state === 'skipped')
         let out = d.text
         if (delivered === 0) {
-          // 一段都没送达：不能说「发到了另一个聊天」，否则和下一句自相矛盾
-          out += '\n\n目标聊天没有收到，可能是群号不对、被移出或拉黑。不要告诉对方已经发了。'
+          // 「没收到」只在确实有段失败时说。ambiguous（可能已送达）和 duplicate（这一轮已经发过）
+          // 都不是「没收到」，d.text 已经写清楚了，再补一句跨聊天断言就会自相矛盾
+          if (failed) out += '\n\n目标聊天没有收到，可能是群号不对、被移出或拉黑。不要告诉对方已经发了。'
+          else if (results.length > 0 && results.every(r => r.state === 'duplicate')) out += `\n\n目标聊天（${maskChatId(target)}）这一轮已经收到过这些内容，没有重复发送。`
         } else {
           out += `\n\n这条发到了另一个聊天（${maskChatId(target)}），当前聊天里的人看不到。如果当前聊天的人在等回复，可以再回一句。`
           if (failed) out += '\n有段落发送失败，已经送达的那几段不要重发。'
@@ -737,7 +739,7 @@ export class Engine {
     const key = `group_recap:${chatId}`
     const after = Math.max(Number(this.ledger.getMeta(key) || 0), Date.now() - 12 * 3600_000)
     // since 也会返回纯图片/无文本的行（群图要用）；近况只需要文字，空 text 不进摘要
-    const rows = Object.keys(this.access().groups).flatMap(g => this.groups!.since(g, after, 8))
+    const rows = Object.keys(this.access().groups).map(k => k.trim()).flatMap(g => this.groups!.since(g, after, 8))
       .filter(r => r.text.trim())
       .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts)).slice(-8)
     if (rows.length === 0) return null
