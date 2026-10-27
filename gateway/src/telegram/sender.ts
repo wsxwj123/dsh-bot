@@ -133,6 +133,9 @@ export class Sender {
   private halted = false
   halt(): void { this.halted = true }
 
+  /** 每个聊天最近一轮的第一张共享图：同一轮后面再发的文字也算这次回复，群记录行照样带上它（仍只记第一张） */
+  private turnPhotos = new Map<string, { turnId: number; path: string }>()
+
   constructor(
     private readonly api: TelegramApi,
     private readonly ledger: Ledger,
@@ -262,11 +265,25 @@ export class Sender {
       // 中途抛异常也把已经发出去的段记上（对方已经看到了）
       if (sentTexts.length) {
         // 记群记录失败不能影响已经发出的结果：回调内部再兜一层
-        try { this.o.onSent?.(req.chatId, firstSentId, sentTexts.join('\n'), lastSentAt, sharedPhoto ? [sharedPhoto] : undefined) }
+        const photos = this.turnPhoto(req, sharedPhoto)
+        try { this.o.onSent?.(req.chatId, firstSentId, sentTexts.join('\n'), lastSentAt, photos) }
         catch { this.log.warn('send.on_sent_failed', { chat: req.chatId }) }
       }
     }
     return results
+  }
+
+  /** 这次 send 要记进群记录的图片：这一条自己发的共享图；没有就看同一轮前面发过的（一次回复只记第一张） */
+  private turnPhoto(req: SendRequest, sharedPhoto: string | null): string[] | undefined {
+    if (req.turnId === null) return sharedPhoto ? [sharedPhoto] : undefined
+    if (sharedPhoto) {
+      this.turnPhotos.set(req.chatId, { turnId: req.turnId, path: sharedPhoto })
+      return [sharedPhoto]
+    }
+    const prev = this.turnPhotos.get(req.chatId)
+    if (!prev) return undefined
+    if (prev.turnId !== req.turnId) { this.turnPhotos.delete(req.chatId); return undefined }
+    return [prev.path]
   }
 
   /** 文字段发出后补发语音（文字已经在了，语音失败只记日志，不影响这一段算送达） */
