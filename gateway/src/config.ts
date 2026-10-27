@@ -235,8 +235,10 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
   return {
     timezone: str(g.timezone, 'Asia/Shanghai'),
     owners,
-    burstWindowMs: num(g.burst_window_ms, 5_000, 'gateway.burst_window_ms'),
-    burstMaxMs: num(g.burst_max_ms, 12_000, 'gateway.burst_max_ms'),
+    // 合并窗口的默认值就是用户 2026-10-27 定的口径：纯滑动、8 秒静默、无总上限。
+    // 新建 bot 不写 gateway 段时要落到这里，不能沿用历史的 5s/12s（真机上新建 bot 的合并窗口会不对）。
+    burstWindowMs: num(g.burst_window_ms, 8_000, 'gateway.burst_window_ms'),
+    burstMaxMs: num(g.burst_max_ms, 0, 'gateway.burst_max_ms'),
     maxConcurrentTurns: Math.max(1, num(g.max_concurrent_turns, 2, 'gateway.max_concurrent_turns')),
     stallCancelMs,
     stallWarnMs: num(g.turn_stall_warn_ms, Math.min(60_000, stallCancelMs), 'gateway.turn_stall_warn_ms'),
