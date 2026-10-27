@@ -1,5 +1,5 @@
 // 网关入口：bun src/main.ts --config configs/<bot>.yml
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { ApiServer } from './api/server'
@@ -92,6 +92,8 @@ async function main(): Promise<void> {
   // 只入 read，不入 write / 发送白名单。
   const groupMediaDir = join(cfg.botDir, 'group-media', 'telegram-group')
   mkdirSync(groupMediaDir, { recursive: true, mode: 0o700 })
+  // 软链不会被收进读白名单（realDirNoLink 只收真目录），图会写进链接目标却永远读不到——启动时说一声
+  try { if (lstatSync(groupMediaDir).isSymbolicLink()) log.warn('group_media.symlink_dir') } catch {}
   // 群聊共享图：写侧只认 sharedMediaDir；读侧目录已在启动时展开并冻结（之后新目录要重启）
   const sharedDirs = collectSharedDirs({ sharedMediaDir: cfg.gw.sharedMediaDir, claudeMediaRoot: cfg.gw.claudeMediaRoot, ownGroupMediaDir: groupMediaDir })
   const sender = new Sender(api, ledger, log, {

@@ -777,7 +777,8 @@ export class Engine {
     try { lines = this.groups.since(chatId, after - 1, GROUP_IMAGE_SCAN_LIMIT) } catch { return [] }
     // 同一条群消息可能有多行（本 bot 自取行 + 对端 bot 补写行）：按 (chat_id, message_id) 折叠成一行再喂水位，
     // 优先本 bot 自取行（observed_by 是自己且带 image_path），其次任意带 image_path 的行。
-    // 跨回合天然不重复；普通群两个系统 message_id 不同折叠不了，是过渡期风险（靠 claude 侧停补写消除）。
+    // 同一轮内按 id 只喂一行；跨回合若对端行晚于本 bot 自取行写入，仍可能各附一次（过渡期双写风险，
+    // 停补写后消失）；普通群两个系统的 message_id 不同，折叠不了，同上。
     const folded = new Map<string, TranscriptLine>()
     const ownImage = (l: TranscriptLine): boolean => !!this.botUsername && l.observed_by === this.botUsername && typeof l.image_path === 'string'
     const hasImage = (l: TranscriptLine): boolean => typeof l.image_path === 'string'
