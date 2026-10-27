@@ -30,7 +30,7 @@
 |---|---|
 | `GET /meta` | 版本与能力清单（壳据此决定显示哪些功能） |
 | `GET /bots` | 本系统全部 bot：状态、启用开关、网关在不在收消息、Telegram 用户名、当前模型、朋友圈里记的名字（`person`）、是否已迁到另一种底层、同一账号两边同时在跑的提示 |
-| `POST /bots`、`GET /bots/templates` | 新建一只 bot（可以先建好不启动）；列出可用的人设模板。新建时可以带 `features`（九个功能键的数组，省略等于全不勾），勾了就写好配置、放对应技能，缺就绪条件的（音色、生图令牌）不打开、列在 `features_skipped`。新建时会在生活设定目录生成 `<bot_id>.yml` 并写进 `life_config`，之后就能用 `/bots/{id}/life` 读写；该目录已有同名文件时回 409 `exists` |
+| `POST /bots`、`GET /bots/templates` | 新建一只 bot（可以先建好不启动）；列出可用的人设模板（列表首位是内置的「基础人设（通用模板）」`_persona_basic`，不依赖别的 bot；`_persona_template` 是空白模板）。新建时可以带 `features`（九个功能键的数组，省略等于全不勾），勾了就写好配置、放对应技能，缺就绪条件的（音色、生图令牌）不打开、列在 `features_skipped`。**`chat_id` 与 `port` 接受整数，也接受 ASCII 纯数字字符串**（8767 的契约是字符串，原样转发到这里）。新建时会在生活设定目录生成 `<bot_id>.yml` 并写进 `life_config`，之后就能用 `/bots/{id}/life` 读写；该目录已有同名文件时回 409 `exists` |
 | `GET /providers`、`POST /bots/{id}/provider` | 看可选的供应商和模型；给一只 bot 换供应商、模型、思考强度，或带 `{"reset": true}` 回到配置文件里那一组。bot 停着时只存进配置，下次启用生效 |
 | `POST /bots/{id}/restart` | 重启一只 bot。不带 `force` 时等它这一轮回完再重启：正忙就立刻回 `queued` 并在后台等，空闲或问不到网关就立即重启；`{"force": true}` 立刻重启、打断当前回合 |
 | `POST /bots/{id}/enabled` | 启用或停用；从旧系统切过来时可顺带导入旧的私聊记录与没到点的约定。停用时可记下「已迁到另一种底层」，有这个标记就不许再启用。真正启动（停用后再启用）成功后还会异步触发一次日志看板重建（launchd 任务 `com.dsh-bot.tmux-logs`）；触发失败只记日志，不影响回包与耗时 |
