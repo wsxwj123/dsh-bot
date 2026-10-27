@@ -415,3 +415,18 @@ test('群图自取15 折叠后仍按 ts 升序：超过上限的那张下一轮�
   const p2 = await groupTurn({ tg, b, gw }, '轮十五乙')
   expect(p2.images).toBe(1)
 })
+
+test('群图自取16 私聊回合也附群图：被问「群里那张图是什么」时不用凭空编', async () => {
+  let img = ''
+  const { tg, b } = await setup({
+    prepare: d => { img = join(d.shared, 'dm-group.png'); writeFileSync(img, 'png') },
+  })
+  // 群里有一张别人发的图（本 bot 或对端写的都行），私聊回合要能拿到它
+  seed(b, {
+    message_id: 80001, ts: Date.now() - 1000, text: '', from_username: 'friend', is_bot: false,
+    observed_by: 'bot_other', attachment_kind: 'photo', image_path: img,
+  })
+  tg.pushText(OWNER, '群里刚才那张图是什么')
+  const p = await until(() => prompts(b).find(x => x.text.includes('群里刚才那张图是什么')), '私聊回合的提示', 15_000)
+  expect(p!.images).toBe(1)
+})

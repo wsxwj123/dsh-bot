@@ -334,3 +334,19 @@ test('清单16 同一条群消息两行（本 bot 观察行 + 对端 bot 补写�
   // 两行 observed_by 不同，since 会保留两行；近况里同一句只能出现一次
   expect(p.split('同一条消息只说一次').length - 1).toBe(1)
 })
+
+test('清单17 私聊近况里带群图片占位并写明看不到内容（防止模型凭空编图）', async () => {
+  const { ta, a } = await setup()
+  const now = new Date().toISOString()
+  mkdirSync(groupsDir(a), { recursive: true })
+  // 只有带图行、没有文字行（本 bot 没抢到 observe，或对端补写的空 text 行）
+  writeFileSync(tfile(a), JSON.stringify({
+    ts: now, chat_id: String(GROUP), message_id: 70002, from_id: String(OWNER), from_username: 'someone',
+    from_name: '某人', is_bot: false, text: '', observed_by: A_NAME, attachment_kind: 'photo', image_path: '/tmp/x.jpg',
+  }) + '\n')
+  ta.pushText(OWNER, '在吗')
+  expect(await waitTrue(() => prompts(a).some(p => p.text.includes('在吗')))).toBe(true)
+  const p = prompts(a).find(p => p.text.includes('在吗'))!.text
+  expect(p).toContain('⟦群里近况')
+  expect(p).toContain('[发了一张图片，这里看不到内容]')
+})
