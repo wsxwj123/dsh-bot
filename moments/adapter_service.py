@@ -2350,6 +2350,9 @@ def _create_persona(body, bots):
             return hub_addbot._persona_text(text)
         if not _text(tmpl) or tmpl.strip() == hub_addbot.BLANK_TEMPLATE:
             return ""
+        # 内置「基础人设（通用模板）」：正文在仓内 templates/persona.md，不依赖别的 bot
+        if tmpl.strip() == hub_addbot.PERSONA_TEMPLATE:
+            return hub_addbot._persona_text(hub_addbot._persona_template_text(), "这个人设模板超过 65536 个字符")
         source = next((bot for bot in bots if bot["id"] == tmpl.strip()), None)
         path = _channel_file(source, "CLAUDE.md") if source else None
         if path is None:
@@ -2376,10 +2379,15 @@ def _create_fields(body, bots):
         raise _invalid("bot_id 只能是小写字母开头的 2 到 32 位小写字母、数字、下划线，也不能是保留名")
     if not isinstance(token, str) or not hub_addbot.TOKEN_RE.match(token):
         raise _invalid("telegram_token 的形状不对")      # 不带原值
-    if not hub_addbot._is_int(chat_id):
+    # 8767 的契约（adapters/base.py）规定 chat_id 是「字符串形式的正整数」，它的 create 原样转发，
+    # 所以这里要收字符串形态的数字；只认 ASCII（Python 的 \d 会匹配全角）。见 hub_addbot._int_like。
+    chat_id = hub_addbot._int_like(chat_id)
+    if chat_id is None:
         raise _invalid("chat_id 要是整数（主人的私聊编号）")
-    if port is not None and not (hub_addbot._is_int(port) and 1024 <= port <= 65535):
-        raise _invalid("port 要是 1024 到 65535 的整数")
+    if port is not None:
+        port = hub_addbot._int_like(port)
+        if port is None or not 1024 <= port <= 65535:
+            raise _invalid("port 要是 1024 到 65535 的整数")
     # 13.3 的几个可选字段
     enabled, person = body.get("enabled", True), body.get("person")
     username, user_id = body.get("telegram_username"), body.get("telegram_user_id")
@@ -3138,7 +3146,7 @@ def _archived_ports():
 def _templates():
     """13.3：本系统的人设模板 ``[{"id", "label"}]``——频道目录（落点、软链同 10.2）下有人设文件的本系统 bot，
     新建时 ``persona_template`` 给它的编号就用它的人设。另一套系统的频道目录在归属边界外，不列。"""
-    items = []
+    items = [{"id": hub_addbot.PERSONA_TEMPLATE, "label": hub_addbot.PERSONA_TEMPLATE_LABEL}]
     for bot in _own_bots():
         path = _channel_file(bot, "CLAUDE.md")
         if path is not None and os.path.isfile(path):
