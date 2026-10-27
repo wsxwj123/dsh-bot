@@ -9,6 +9,7 @@ import { Engine } from './engine/engine'
 import { GroupTranscript } from './group/transcript'
 import { Ledger } from './ledger'
 import { Logger, registerSecret, safeError } from './log'
+import { collectSharedDirs } from './media/media'
 import { McpServer } from './mcp/server'
 import { TelegramApi, type TgUser } from './telegram/api'
 import { isGroupChat } from './telegram/inbound'
@@ -78,9 +79,12 @@ async function main(): Promise<void> {
   // 群聊记录：bot 自己在群里发出的话由自己记（Telegram 不把 bot 的消息投给别的 bot）
   let me: TgUser | null = null
   const transcript = new GroupTranscript(cfg.groupsDir, () => ({ id: me?.id ?? 0, username: me?.username ?? '', name: me?.first_name ?? cfg.displayName }), log, () => cfg.gw.groupsRotateBytes)
+  // 群聊共享图：写侧只认 sharedMediaDir；读侧目录已在启动时展开并冻结（之后新目录要重启）
+  const sharedDirs = collectSharedDirs(cfg.gw)
   const sender = new Sender(api, ledger, log, {
     allowDirs, maxSendWaitMs: cfg.gw.maxSendWaitMs, access: () => loadAccess(cfg.channelDir),
-    onSent: (chatId, messageId, text, at) => { if (isGroupChat(chatId)) transcript.sent(chatId, messageId, text, at) },
+    shareDirs: () => sharedDirs.write,
+    onSent: (chatId, messageId, text, at, photos) => { if (isGroupChat(chatId)) transcript.sent(chatId, messageId, text, at, photos?.[0]) },
   })
   const dsh = new DshProcess(log)
   let engine: Engine | null = null
