@@ -232,8 +232,9 @@ export function readSharedImage(path: string, allowDirs: readonly string[], maxB
   if (!inAllowlist(real, allowDirs)) return { ok: false, reason: 'outside_allowlist' }
   let fd: number
   try {
-    // 最后一段若是 realpath 之后被换成的符号链接，O_NOFOLLOW 会让 open 失败
-    const flags = (fsConstants.O_RDONLY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0)
+    // 最后一段若是 realpath 之后被换成的符号链接，O_NOFOLLOW 会让 open 失败；
+    // O_NONBLOCK 防止白名单目录里被放进 FIFO 时只读 open 阻塞整个事件循环（普通文件不受影响）
+    const flags = (fsConstants.O_RDONLY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0)
     fd = openSync(real, flags)
   } catch { return { ok: false, reason: 'read_failed' } }
   try {
