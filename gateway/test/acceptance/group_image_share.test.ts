@@ -142,7 +142,7 @@ test('清单4 群里发超过 8 MiB 的 .png：发送照常成功（sendPhoto）
   expect('image_path' in row).toBe(false)
 })
 
-test('清单5 群里一次回复两张图：只记第一张的路径', async () => {
+test('清单5 群里一次回复两张图：本轮所有 bot 行恰好一行记 attachment_kind=photo，且 image_path 是第一张图的真实路径', async () => {
   let p1 = ''
   let p2 = ''
   const { tg, b, gw } = await setup({
@@ -154,10 +154,16 @@ test('清单5 群里一次回复两张图：只记第一张的路径', async () 
   // 一次回复里带两个文件：走 reply 工具的 files 数组
   const extra = `\n!tool:reply|${JSON.stringify({ text: '两张图', files: [p1, p2] })}`
   await groupTurn({ tg, b, gw }, '两张', extra)
-  const row = (await until(() => botRow(b, '两张'), '群记录里的 bot 行'))!
+  // 两张图都确实发出去了
+  await until(() => tg.sentTo(GROUP).filter(s => s.method === 'sendPhoto').length === 2, '两张图都发出', 20_000)
   expect(tg.sentTo(GROUP).filter(s => s.method === 'sendPhoto')).toHaveLength(2)
-  expect(row.attachment_kind).toBe('photo')
-  expect(row.image_path).toBe(realpathSync(p1))
+  // 等本轮回复落盘后再统一核对（本用例没有预置记录，记录里的 bot 行都属于这一轮）
+  await until(() => botRow(b, '两张'), '群记录里的本轮 bot 行')
+  await sleep(300)
+  const photoRows = rows(b).filter(r => r.from_username === A_NAME && r.attachment_kind === 'photo')
+  expect(photoRows).toHaveLength(1)
+  expect(photoRows[0].image_path).toBe(realpathSync(p1))
+  expect(photoRows[0].image_path).not.toBe(realpathSync(p2))
 })
 
 // ───────── 读：群记录里的图片交给模型 ─────────
