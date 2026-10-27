@@ -375,6 +375,52 @@ test('白名单边界 claudeMediaRoot 一级子目录下的其他子目录（<bo
   expect(tg.sentTo(GROUP).some(s => (s.text ?? '').includes('轮边界二'))).toBe(true)
 })
 
+test('读取-同 message_id 双写 本 bot 行无图、对方 bot 行有图：图片块为 1 且回复照常产生（图不因挂到本 bot 行被自排除）', async () => {
+  let img = ''
+  const { tg, b, gw } = await setup({ prepare: d => { img = join(d.shared, 'dual-write.png'); writeFileSync(img, 'png') } })
+  const SAME_ID = 990001
+  // 第一行：本 bot 网关记下的别人消息，observed_by 是自己、无 image_path
+  seed(b, {
+    message_id: SAME_ID, ts: Date.now() - 2000, text: '同 id 双写',
+    from_username: 'friend_user', from_id: String(FRIEND), is_bot: false, observed_by: A_NAME,
+  })
+  // 第二行：另一个 bot 写的同一 message_id，带图
+  seed(b, {
+    message_id: SAME_ID, ts: Date.now() - 1000, text: '同 id 双写',
+    from_username: 'bot_b_other', from_id: '900002', is_bot: true, observed_by: 'bot_b_other',
+    attachment_kind: 'photo', image_path: img,
+  })
+  const p = await groupTurn({ tg, b, gw }, '轮双写')
+  expect(p.images).toBe(1)
+  expect(tg.sentTo(GROUP).some(s => (s.text ?? '').includes('轮双写'))).toBe(true)
+})
+
+test('读取-同 message_id 双写 两行都带图（自己与对方各一张）：只附对方那张，图片块为 1', async () => {
+  let selfImg = ''
+  let otherImg = ''
+  const { tg, b, gw } = await setup({
+    prepare: d => {
+      selfImg = join(d.shared, 'dual-self.png'); writeFileSync(selfImg, 'png')
+      otherImg = join(d.shared, 'dual-other.png'); writeFileSync(otherImg, 'png')
+    },
+  })
+  const SAME_ID = 990002
+  seed(b, {
+    message_id: SAME_ID, ts: Date.now() - 2000, text: '同 id 双写带图',
+    from_username: 'friend_user', from_id: String(FRIEND), is_bot: false, observed_by: A_NAME,
+    attachment_kind: 'photo', image_path: selfImg,
+  })
+  seed(b, {
+    message_id: SAME_ID, ts: Date.now() - 1000, text: '同 id 双写带图',
+    from_username: 'bot_b_other', from_id: '900002', is_bot: true, observed_by: 'bot_b_other',
+    attachment_kind: 'photo', image_path: otherImg,
+  })
+  const p = await groupTurn({ tg, b, gw }, '轮双写二')
+  expect(p.images).toBe(1)
+  expect(p.text).not.toContain(selfImg)
+  expect(tg.sentTo(GROUP).some(s => (s.text ?? '').includes('轮双写二'))).toBe(true)
+})
+
 // ───────── 错误契约：不满足的行静默当没有图 ─────────
 
 test('契约 非字符串 / 空串 / 超长 / 含 NUL 的 image_path：都不附图，回复照常', async () => {
