@@ -494,8 +494,8 @@ def test_chat_id_and_port_accept_numeric_strings():
     """根因（2026-10-27 真机）：8767 的 adapters/base.py 规定 chat_id 是「字符串形式的正整数」，
     dsh_http.create 原样转发，dsh 侧原来只认 JSON 整数 → 从 8767 建 dsh bot 必报
     「chat_id 要是整数」。这里锁住「字符串形态的数字也收、解析成 int」这条对齐口径。"""
-    out = ab._validate(_body(chat_id="5331715732", dispatcher_port="17971"))
-    assert out["chat_id"] == 5331715732 and isinstance(out["chat_id"], int)
+    out = ab._validate(_body(chat_id="123456789", dispatcher_port="17971"))
+    assert out["chat_id"] == 123456789 and isinstance(out["chat_id"], int)
     assert out["port"] == 17971 and isinstance(out["port"], int)
 
 

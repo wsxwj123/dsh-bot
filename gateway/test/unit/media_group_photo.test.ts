@@ -128,7 +128,7 @@ test('chat.id 为 0 或非安全整数、message_id <= 0：拒绝', async () => 
 test('负数群号保留负号作目录名', async () => {
   const dir = tmp()
   const { api } = fakeApi()
-  const r = await fetchGroupPhoto({ api, dir, msg: msg({ chat: { id: -5316971372, type: 'group' } as TgMessage['chat'] }) })
+  const r = await fetchGroupPhoto({ api, dir, msg: msg({ chat: { id: -1001234567890, type: 'group' } as TgMessage['chat'] }) })
   expect(r.ok).toBe(true)
-  if (r.ok) expect(r.path).toBe(join(dir, '-5316971372', '7.jpg'))
+  if (r.ok) expect(r.path).toBe(join(dir, '-1001234567890', '7.jpg'))
 })
