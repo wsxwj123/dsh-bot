@@ -2,7 +2,7 @@
 //   收：语音先下载再交给 voice-bridge 转写，图片下载到媒体目录。都放在处理这一轮之前做，不卡收消息；
 //       失败也不挡聊天（语音留一句"没转成文字"）。
 //   发：reply 带 as_voice 时，文字交给 voice-bridge 合成，网关自己用 sendVoice 发。Telegram 令牌不离开网关。
-import { closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs'
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs'
 import { basename, extname, isAbsolute, join, relative } from 'path'
 import type { InboundRow, Ledger } from '../ledger'
 import { safeError, type Logger } from '../log'
@@ -181,22 +181,46 @@ function mimeOf(path: string): string {
   return ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg'
 }
 
+function inAllowlist(real: string, dirs: readonly string[]): boolean {
+  for (const d of dirs) {
+    const rel = relative(d, real)
+    if (rel && !rel.startsWith('..') && !isAbsolute(rel)) return true
+  }
+  return false
+}
+
+/** 已打开 fd 的真实路径（打开后再复核一次，防 realpath 与 open 之间被换掉）；拿不到返回 null */
+function fdRealPath(fd: number): string | null {
+  try {
+    if (process.platform === 'darwin') return realpathSync(`/dev/fd/${fd}`)
+    if (process.platform === 'linux') {
+      const p = readlinkSync(`/proc/self/fd/${fd}`)
+      // 打开后被删掉的文件读出来会带这个后缀，不再当作白名单内的文件
+      return p.endsWith(' (deleted)') ? null : p
+    }
+  } catch {}
+  return null
+}
+
 /**
- * 校验并读出一张群记录图片：realpath → 白名单 → 同一个 fd 上 fstat + read（关闭 TOCTOU）。
+ * 校验并读出一张群记录图片：realpath → 白名单 → O_NOFOLLOW 打开 → 按 fd 复核真实路径 →
+ * 同一个 fd 上 fstat + read（关闭 TOCTOU）。
  * 任何一步不满足都返回原因，调用方静默降级（日志只记原因，不记路径）。
  */
 export function readSharedImage(path: string, allowDirs: readonly string[], maxBytes = MAX_SHARED_IMAGE_BYTES): SharedImageRead {
   let real: string
   try { real = realpathSync(path) } catch { return { ok: false, reason: 'realpath_failed' } }
-  let allowed = false
-  for (const d of allowDirs) {
-    const rel = relative(d, real)
-    if (rel && !rel.startsWith('..') && !isAbsolute(rel)) { allowed = true; break }
-  }
-  if (!allowed) return { ok: false, reason: 'outside_allowlist' }
+  if (!inAllowlist(real, allowDirs)) return { ok: false, reason: 'outside_allowlist' }
   let fd: number
-  try { fd = openSync(real, 'r') } catch { return { ok: false, reason: 'read_failed' } }
   try {
+    // 最后一段若是 realpath 之后被换成的符号链接，O_NOFOLLOW 会让 open 失败
+    const flags = (fsConstants.O_RDONLY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0)
+    fd = openSync(real, flags)
+  } catch { return { ok: false, reason: 'read_failed' } }
+  try {
+    // 复核已打开的那个文件到底在哪：中间目录被换掉也逃不出白名单
+    const actual = fdRealPath(fd)
+    if (actual !== null && !inAllowlist(actual, allowDirs)) return { ok: false, reason: 'outside_allowlist' }
     const st = fstatSync(fd)
     if (!st.isFile()) return { ok: false, reason: 'not_file' }
     if (st.size > maxBytes) return { ok: false, reason: 'too_large' }
