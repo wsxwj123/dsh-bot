@@ -406,15 +406,16 @@ export class Ledger {
       `SELECT COUNT(*) AS n FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind IN ('text','photo','document','animation','sticker') AND o.state IN ('sent','ambiguous','pending')`).get(rootId)
     return r?.n ?? 0
   }
-  /** 这一串里已经发出（或可能发出）的文字段，用来拦住模型把同样的话再发一遍 */
-  sentTextsInChain(rootId: number): string[] {
-    return this.db.query<{ text: string }, [number]>(
-      `SELECT o.text FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind = 'text' AND o.state IN ('sent','ambiguous','pending') AND o.text IS NOT NULL`).all(rootId).map(r => r.text)
+  /** 这一串里已经发出（或可能发出）的文字段，用来拦住模型把同样的话再发一遍。
+   *  缺省只看"发到本轮所在聊天"的段（改动前就是这样）；给 chatId 时只看发到那个聊天的段（跨聊天去重按目标隔离） */
+  sentTextsInChain(rootId: number, chatId?: string): string[] {
+    return this.db.query<{ text: string }, [number, string | null]>(
+      `SELECT o.text FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.chat_id = COALESCE(?, t.chat_id) AND o.kind = 'text' AND o.state IN ('sent','ambiguous','pending') AND o.text IS NOT NULL`).all(rootId, chatId ?? null).map(r => r.text)
   }
-  /** 这一轮（含重试、提醒）已经发出、可能发出或正在发的文件 */
-  sentFilesInChain(rootId: number): string[] {
-    return this.db.query<{ file: string }, [number]>(
-      `SELECT o.file FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind IN ('photo','document','animation','sticker') AND o.state IN ('sent','ambiguous','pending') AND o.file IS NOT NULL`).all(rootId).map(r => r.file)
+  /** 这一轮（含重试、提醒）已经发出、可能发出或正在发的文件。缺省只看本轮所在聊天，给了 chatId 只看那个聊天 */
+  sentFilesInChain(rootId: number, chatId?: string): string[] {
+    return this.db.query<{ file: string }, [number, string | null]>(
+      `SELECT o.file FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.chat_id = COALESCE(?, t.chat_id) AND o.kind IN ('photo','document','animation','sticker') AND o.state IN ('sent','ambiguous','pending') AND o.file IS NOT NULL`).all(rootId, chatId ?? null).map(r => r.file)
   }
   clearSilent(rootId: number): void {
     this.db.query('UPDATE turns SET silent = 0 WHERE root_id = ?').run(rootId)
