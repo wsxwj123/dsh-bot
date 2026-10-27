@@ -402,9 +402,18 @@ export function readAccess(channelDir: string): Access | null {
   }
 }
 
-/** 每次用时重读（和旧系统一样支持热改）；读坏了按"全部拒绝"处理，不会放陌生人进来。 */
+/**
+ * 每次用时重读（和旧系统一样支持热改）。
+ * 文件不存在 → 全部拒绝；文件在但读坏了 → 沿用本进程上次成功读到的白名单
+ * （配置损坏不该把已经放行的人踢掉，也不会放陌生人进来）；从没读成功过 → 全部拒绝。
+ */
+const lastGoodAccess = new Map<string, Access>()
+
 export function loadAccess(channelDir: string): Access {
-  return readAccess(channelDir) ?? { dmPolicy: 'disabled', allowFrom: [], groups: {} }
+  if (!existsSync(join(channelDir, 'access.json'))) return { dmPolicy: 'disabled', allowFrom: [], groups: {} }
+  const a = readAccess(channelDir)
+  if (a) { lastGoodAccess.set(channelDir, a); return a }
+  return lastGoodAccess.get(channelDir) ?? { dmPolicy: 'disabled', allowFrom: [], groups: {} }
 }
 
 /** 跨聊天发送的目标：chatId 是实际要发的编号，kind 决定是否写群记录 */
