@@ -223,6 +223,8 @@ export function readSharedImage(path: string, allowDirs: readonly string[], maxB
     if (actual !== null && !inAllowlist(actual, allowDirs)) return { ok: false, reason: 'outside_allowlist' }
     const st = fstatSync(fd)
     if (!st.isFile()) return { ok: false, reason: 'not_file' }
+    // 0 字节会变成空 data 的图片块，可能让上游整条拒收：当作读失败
+    if (st.size <= 0) return { ok: false, reason: 'read_failed' }
     if (st.size > maxBytes) return { ok: false, reason: 'too_large' }
     const buf = Buffer.alloc(st.size)
     let off = 0
