@@ -2,8 +2,8 @@
 //   收：语音先下载再交给 voice-bridge 转写，图片下载到媒体目录。都放在处理这一轮之前做，不卡收消息；
 //       失败也不挡聊天（语音留一句"没转成文字"）。
 //   发：reply 带 as_voice 时，文字交给 voice-bridge 合成，网关自己用 sendVoice 发。Telegram 令牌不离开网关。
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
-import { basename, join } from 'path'
+import { closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs'
+import { basename, extname, isAbsolute, join, relative } from 'path'
 import type { InboundRow, Ledger } from '../ledger'
 import { safeError, type Logger } from '../log'
 import type { TelegramApi } from '../telegram/api'
@@ -27,6 +27,11 @@ export type MediaDeps = {
 export const VOICE_UNHEARD = '[语音消息，没转成文字：你没听清这条语音，照实告诉对方]'
 
 const TRANSCRIBE_TIMEOUT_MS = 60_000
+
+/** 群聊共享图：读写同一上限（写侧超限不记字段，读侧超限当没有图） */
+export const MAX_SHARED_IMAGE_BYTES = 8 * 1024 * 1024
+/** 群记录里允许转给模型的图片扩展名 */
+export const SHARED_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
 
 export function rowMedia(r: InboundRow): MediaMeta | null {
   try {
@@ -132,4 +137,81 @@ export function imageBlock(path: string): { type: 'image'; mimeType: string; dat
     const mimeType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg'
     return { type: 'image', mimeType, data: readFileSync(path).toString('base64') }
   } catch { return null }
+}
+
+/** 群记录里允许读的目录：write 只有共享图库，read 另加 claude 侧启动时已存在的一级子目录及其 telegram-group */
+export type SharedDirs = { write: readonly string[]; read: readonly string[] }
+
+function realDir(p: string): string | null {
+  try {
+    const real = realpathSync(p)
+    return statSync(real).isDirectory() ? real : null
+  } catch { return null }
+}
+
+/**
+ * 启动时把白名单展开并冻结（之后新出现的目录要重启才生效）。
+ * 只收 sharedMediaDir 与 claudeMediaRoot 下已存在的一级目录，不收 cfg.mediaDir / imageDirs，
+ * 免得一条被手改的群记录把本 bot 私聊收到的图拉进群回合。
+ */
+export function collectSharedDirs(o: { sharedMediaDir: string; claudeMediaRoot: string }): SharedDirs {
+  const shared = realDir(o.sharedMediaDir)
+  const write = shared ? [shared] : []
+  const read = [...write]
+  let names: string[] = []
+  try {
+    names = readdirSync(o.claudeMediaRoot, { withFileTypes: true })
+      .filter(e => e.isDirectory()).map(e => e.name).sort()
+  } catch {}
+  for (const name of names) {
+    const base = realDir(join(o.claudeMediaRoot, name))
+    if (base) read.push(base)
+    const group = realDir(join(o.claudeMediaRoot, name, 'telegram-group'))
+    if (group) read.push(group)
+  }
+  return { write: Object.freeze([...new Set(write)]), read: Object.freeze([...new Set(read)]) }
+}
+
+export type SharedImageReason = 'realpath_failed' | 'not_file' | 'outside_allowlist' | 'too_large' | 'read_failed'
+export type SharedImageRead =
+  | { ok: true; real: string; mimeType: string; data: string }
+  | { ok: false; reason: SharedImageReason }
+
+function mimeOf(path: string): string {
+  const ext = extname(path).toLowerCase()
+  return ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg'
+}
+
+/**
+ * 校验并读出一张群记录图片：realpath → 白名单 → 同一个 fd 上 fstat + read（关闭 TOCTOU）。
+ * 任何一步不满足都返回原因，调用方静默降级（日志只记原因，不记路径）。
+ */
+export function readSharedImage(path: string, allowDirs: readonly string[], maxBytes = MAX_SHARED_IMAGE_BYTES): SharedImageRead {
+  let real: string
+  try { real = realpathSync(path) } catch { return { ok: false, reason: 'realpath_failed' } }
+  let allowed = false
+  for (const d of allowDirs) {
+    const rel = relative(d, real)
+    if (rel && !rel.startsWith('..') && !isAbsolute(rel)) { allowed = true; break }
+  }
+  if (!allowed) return { ok: false, reason: 'outside_allowlist' }
+  let fd: number
+  try { fd = openSync(real, 'r') } catch { return { ok: false, reason: 'read_failed' } }
+  try {
+    const st = fstatSync(fd)
+    if (!st.isFile()) return { ok: false, reason: 'not_file' }
+    if (st.size > maxBytes) return { ok: false, reason: 'too_large' }
+    const buf = Buffer.alloc(st.size)
+    let off = 0
+    while (off < buf.length) {
+      const n = readSync(fd, buf, off, buf.length - off, off)
+      if (n <= 0) return { ok: false, reason: 'read_failed' }
+      off += n
+    }
+    return { ok: true, real, mimeType: mimeOf(real), data: buf.toString('base64') }
+  } catch {
+    return { ok: false, reason: 'read_failed' }
+  } finally {
+    try { closeSync(fd) } catch {}
+  }
 }

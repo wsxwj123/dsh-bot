@@ -97,6 +97,10 @@ export type GatewayOpts = {
   globalCfg?: string
   /** 生图结果所在目录（允许 reply 发出去），默认 ~/resource/media */
   imageDirs: string[]
+  /** 群聊共享图库：两只 bot 唯一共享的生图目录。写侧只认这里的图（默认 ~/resource/media，gateway.sharedMediaDir 可改） */
+  sharedMediaDir: string
+  /** claude 侧的媒体根目录：只读这里启动时已存在的一级子目录及其 telegram-group（默认 ~/.claude/channels/media） */
+  claudeMediaRoot: string
   /** 朋友圈数据库；不设就用仓库里的 state.db */
   botlifeDb?: string
   logLevel: 'debug' | 'info' | 'warn' | 'error'
@@ -256,6 +260,8 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     comfyuiSkillDir: typeof g.comfyui_skill_dir === 'string' && g.comfyui_skill_dir ? g.comfyui_skill_dir : undefined,
     globalCfg: typeof g.global_cfg === 'string' && g.global_cfg ? g.global_cfg : undefined,
     imageDirs: Array.isArray(g.image_dirs) ? g.image_dirs.map(String) : ['~/resource/media'],
+    sharedMediaDir: resolve(expandHome(str(g.sharedMediaDir ?? g.shared_media_dir, join(homedir(), 'resource', 'media')))),
+    claudeMediaRoot: resolve(expandHome(str(g.claudeMediaRoot ?? g.claude_media_root, join(homedir(), '.claude', 'channels', 'media')))),
     botlifeDb: typeof g.botlife_db === 'string' && g.botlife_db ? g.botlife_db : undefined,
     situationTtlMs: num(g.situation_ttl_ms, 5 * 60_000, 'gateway.situation_ttl_ms'),
     replyReturnMs: num(g.reply_return_ms, 45_000, 'gateway.reply_return_ms'),
