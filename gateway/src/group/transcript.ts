@@ -138,12 +138,12 @@ export class GroupTranscript {
   }
 
   /** 某个时间之后的群消息（按消息编号去重、时间正序，最多 limit 条）。读 .1 和当前文件各自末尾一段（刚轮转过近况也不丢），记录再长也不慢。
-   *  只有图片没有 text 的行也要读出来（群里的纯图片消息）；同一个 id 的重复行合并成一条。 */
+   *  只有图片没有 text 的行也要读出来（群里的纯图片消息）；去重只合并**同一写方**的重复行。 */
   since(chatId: string, afterMs: number, limit: number): TranscriptLine[] {
     const path = this.file(chatId)
     // 中间补一个换行：.1 最后一行万一没换行也不会和当前文件第一行粘在一起
     const text = this.tail(`${path}.1`) + '\n' + this.tail(path)
-    const byId = new Map<unknown, TranscriptLine>()
+    const byLine = new Map<string, TranscriptLine>()
     for (const l of text.split('\n')) {
       if (!l) continue
       try {
@@ -153,18 +153,22 @@ export class GroupTranscript {
         // 下游（私聊近况、群图水位）都按 ISO 字符串比较：数字时间戳在这里统一归一
         o.ts = new Date(ts).toISOString()
         if (typeof o.text !== 'string') o.text = ''
-        const prev = byId.get(o.message_id)
+        // 只合并同一个写方（observed_by）写的重复行：不同写方各看到一次同一消息时保留两行，
+        // 否则别人的图片会被并到本 bot 的 observe 行上，随后按"自己写的"被排除掉
+        const writer = typeof o.observed_by === 'string' ? o.observed_by : ''
+        const key = `${writer}\u0000${o.message_id}`
+        const prev = byLine.get(key)
         if (prev) {
-          // 同一个 id 被两份文件各读到一次/两个写方各写一行：补齐缺的字段，不重复交给模型
+          // 同一个 id 被两份文件各读到一次/同一写方各写一行：补齐缺的字段，不重复交给模型
           if (!prev.text && o.text) prev.text = o.text
           if (!prev.attachment_kind && o.attachment_kind) prev.attachment_kind = o.attachment_kind
           if (!prev.image_path && o.image_path) prev.image_path = o.image_path
           continue
         }
-        byId.set(o.message_id, o)
+        byLine.set(key, o)
       } catch {}
     }
-    return [...byId.values()].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts)).slice(-limit)
+    return [...byLine.values()].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts)).slice(-limit)
   }
 
   private sweep(seen: string): void {
