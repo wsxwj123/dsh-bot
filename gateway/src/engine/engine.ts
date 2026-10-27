@@ -738,10 +738,15 @@ export class Engine {
     if (!this.groups || !this.features.groups || isGroupChat(chatId)) return null
     const key = `group_recap:${chatId}`
     const after = Math.max(Number(this.ledger.getMeta(key) || 0), Date.now() - 12 * 3600_000)
-    // since 也会返回纯图片/无文本的行（群图要用）；近况只需要文字，空 text 不进摘要
+    // since 也会返回纯图片/无文本的行（群图要用）；近况只需要文字，空 text 不进摘要。
+    // 同一条群消息可能有两行（本 bot 的 observe 行 + 对端 bot 补写的带图行，observed_by 不同、
+    // since 按写方分开保留），近况里同一句只说一次。
+    const seenMsg = new Set<string>()
     const rows = Object.keys(this.access().groups).map(k => k.trim()).flatMap(g => this.groups!.since(g, after, 8))
       .filter(r => r.text.trim())
-      .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts)).slice(-8)
+      .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts))
+      .filter(r => { const k = `${r.chat_id}\u0000${r.message_id}`; if (seenMsg.has(k)) return false; seenMsg.add(k); return true })
+      .slice(-8)
     if (rows.length === 0) return null
     this.ledger.setMeta(key, String(Math.max(...rows.map(r => Date.parse(r.ts)))))
     const who = (r: TranscriptLine) => r.is_bot && r.from_username === this.botUsername ? '你' : !r.is_bot && r.from_id === chatId ? '对方' : (r.from_name || r.from_username || '群友')

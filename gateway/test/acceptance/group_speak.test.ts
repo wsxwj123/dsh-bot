@@ -316,3 +316,21 @@ test('清单15 群记录刚轮转过：私聊提示里的群里近况包含 .1 �
   expect(p).toContain('旧文件里的那句')
   expect(p).toContain('新文件里的别的一句')
 })
+
+test('清单16 同一条群消息两行（本 bot 观察行 + 对端 bot 补写的带图行）：近况里只说一次', async () => {
+  const { ta, a } = await setup()
+  const base = {
+    ts: new Date().toISOString(), chat_id: String(GROUP), message_id: 90001, from_id: String(OWNER),
+    from_username: 'someone', from_name: '某人', is_bot: false, text: '同一条消息只说一次',
+  }
+  mkdirSync(groupsDir(a), { recursive: true })
+  writeFileSync(tfile(a),
+    JSON.stringify({ ...base, observed_by: A_NAME }) + '\n'
+    + JSON.stringify({ ...base, observed_by: 'tuniang_bot', attachment_kind: 'photo', image_path: '/tmp/x.jpg' }) + '\n')
+  ta.pushText(OWNER, '在吗')
+  expect(await waitTrue(() => prompts(a).some(p => p.text.includes('在吗')))).toBe(true)
+  const p = prompts(a).find(p => p.text.includes('在吗'))!.text
+  expect(p).toContain('⟦群里近况')
+  // 两行 observed_by 不同，since 会保留两行；近况里同一句只能出现一次
+  expect(p.split('同一条消息只说一次').length - 1).toBe(1)
+})
