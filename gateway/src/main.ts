@@ -140,6 +140,8 @@ async function main(): Promise<void> {
   engine.botCaps = { canReadAll: me.can_read_all_group_messages ?? null, canJoinGroups: me.can_join_groups ?? null }
   const groupsSeen = new GroupsSeen(join(cfg.stateDir, 'groups-seen.json'), () => loadAccess(cfg.channelDir).allowFrom.map(String), log)
   engine.groups = transcript
+  // 群记录里能读的图片目录：启动时展开并冻结，之后新出现的目录要重启网关才生效
+  engine.sharedReadDirs = sharedDirs.read
   // 导演按这个文件认出群里哪条是哪个 bot 说的
   writeAtomic(join(cfg.stateDir, 'bot.json'), JSON.stringify({ id: me.id, username: me.username ?? '', name: cfg.displayName }))
   log.info('gateway.starting', { bot: cfg.id, telegram_bot: me.username ?? null, pid: process.pid })

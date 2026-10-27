@@ -20,7 +20,8 @@ import type { GroupTranscript, TranscriptLine } from '../group/transcript'
 import { describeResults, normText, planParts, type Sender } from '../telegram/sender'
 import { Backoff, randomToken, sleep } from '../util'
 import { MemoryStore } from '../memory'
-import { imageBlock, Media, rowMedia } from '../media/media'
+import { imageBlock, MAX_SHARED_IMAGE_BYTES, Media, readSharedImage, rowMedia } from '../media/media'
+import { consumeSharedImages, GROUP_IMAGE_SCAN_LIMIT, GROUP_IMAGE_WINDOW_MS, MAX_GROUP_IMAGES_PER_TURN, parseWatermark, watermarkJson } from '../group/shared_images'
 import { Commitments } from '../commit/service'
 import { situLine, SituationBridge } from '../life/situation'
 import { createHangRuntime, takeHangArchive, type HangRuntime } from '../life/hang_runtime'
@@ -62,13 +63,13 @@ function hangText(t: string): string {
   return t.replace(/^\[hang-check\]\s*/, '⟦系统·被晾⟧ ')
 }
 
-/** 发给模型的一块内容：文字，或者一张图片（文件路径） */
-type Block = string | { image: string }
+/** 发给模型的一块内容：文字、一张图片（文件路径由引擎自己读），或已经读好的图片字节（群记录里的图） */
+type Block = string | { image: string } | { imageData: string; mimeType: string }
 
 function promptItems(blocks: Block[], noImages: boolean): object[] {
   return blocks.map(b => {
     if (typeof b === 'string') return { type: 'text', text: b }
-    const img = noImages ? null : imageBlock(b.image)
+    const img = noImages ? null : 'image' in b ? imageBlock(b.image) : { type: 'image', mimeType: b.mimeType, data: b.imageData }
     return img ?? { type: 'text', text: '⟦对方发来一张图片，但你现在用的模型看不到图片内容。可以如实告诉对方，或者请对方描述一下⟧' }
   })
 }
@@ -224,6 +225,10 @@ export class Engine {
   botCaps: { canReadAll: boolean | null; canJoinGroups: boolean | null } = { canReadAll: null, canJoinGroups: null }
   /** 群聊记录（main 里设置）：私聊时取"群里近况" */
   groups: GroupTranscript | null = null
+  /** 群记录里允许读的图片目录（main 启动时收集并冻结）；空 = 不读 */
+  sharedReadDirs: readonly string[] = []
+  /** 拿不到自己的用户名时 self 检查不可用，每个群只提醒一次 */
+  private selfCheckNoted = new Set<string>()
   readonly memory: MemoryStore
   readonly situation: SituationBridge
   readonly commitments: Commitments
@@ -636,6 +641,32 @@ export class Engine {
     return `⟦群里近况：你在的群里，上次之后说了这些。只是让你知道，不用逐条回应⟧\n${lines.join('\n')}`
   }
 
+  /**
+   * 群记录里别人发的图：水位之后、30 分钟内，最多 2 张，附在这一轮文字之后。
+   * 路径来自别的程序（不可信）：形状、白名单、普通文件、大小、读取任一项不满足都静默当没有图，
+   * 日志只记固定枚举原因与消息编号，不记路径、不记原始错误串。
+   */
+  private groupImages(chatId: string): Block[] {
+    if (!this.groups || this.sharedReadDirs.length === 0) return []
+    const key = `group_images:${chatId}`
+    const watermark = parseWatermark(this.ledger.getMeta(key))
+    const after = Math.max(watermark.after, Date.now() - GROUP_IMAGE_WINDOW_MS)
+    let lines: TranscriptLine[]
+    try { lines = this.groups.since(chatId, after - 1, GROUP_IMAGE_SCAN_LIMIT) } catch { return [] }
+    const res = consumeSharedImages({
+      lines, watermark, botUsername: this.botUsername, max: MAX_GROUP_IMAGES_PER_TURN,
+      read: path => readSharedImage(path, this.sharedReadDirs, MAX_SHARED_IMAGE_BYTES),
+      onSkip: (line, reason) => this.log.info('group_image.skipped', { chat: chatId, message_id: line.message_id, reason }),
+    })
+    if (res.selfCheckUnavailable && !this.selfCheckNoted.has(chatId)) {
+      this.selfCheckNoted.add(chatId)
+      this.log.warn('group_image.self_check_unavailable', { chat: chatId })
+    }
+    if (res.advanced) this.ledger.setMeta(key, watermarkJson(res.watermark))
+    if (res.picks.length) this.log.info('group_image.attached', { chat: chatId, count: res.picks.length })
+    return res.picks.map(p => ({ imageData: p.data, mimeType: p.mimeType }))
+  }
+
   /** 此刻生效的生图引擎（约定 v1.1 5.21）：配置写 off 就不生图；设了 gateway.global_cfg 就每次现读共用开关，读不到退回 image_provider */
   private imageEngine(): string {
     return effectiveEngine(this.cfg.gw.imageProvider, this.globalCfg())
@@ -897,8 +928,10 @@ export class Engine {
     await this.restartForRouteIfNeeded(this.brain.provider).catch(e => this.log.warn('dsh.restart_for_route_failed', { err: safeError(e) }))
     // 新消息一进来就会超预算：先换段再处理
     await this.maybeRoll(chatId, batch)
+    // 群记录里别人发的图（水位之后、30 分钟内，最多 2 张）：附在这一轮文字之后；读不出来就当没有
+    const sharedBlocks = isGroupChat(chatId) ? this.groupImages(chatId) : []
     const since = Date.now()
-    const delay = await this.runBatch(chatId, batch)
+    const delay = await this.runBatch(chatId, batch, sharedBlocks)
     // 这一轮说了"三点提醒你"却没登记：能换算时间的替它登记，下一轮告诉它；换算不了的下一轮提醒它自己登记
     // 承诺、被晾追问只在私聊里（群里谁说话由导演决定）
     if (!isGroupChat(chatId)) {
@@ -911,7 +944,7 @@ export class Engine {
     return delay
   }
 
-  private async runBatch(chatId: string, batch: InboundRow[]): Promise<number> {
+  private async runBatch(chatId: string, batch: InboundRow[], sharedImages: Block[] = []): Promise<number> {
     const ids = batch.map(b => b.id)
     let seg: SegmentRow
     let seed: string | null
@@ -936,7 +969,7 @@ export class Engine {
     if (recap) life.push(recap)
     // 对方发来的图片：附在消息后面（模型看不了图时，runPrompt 里换成一句说明）
     const images: Block[] = batch.flatMap(r => { const m = rowMedia(r); return m?.kind === 'photo' && m.path ? [{ image: m.path }] : [] })
-    let blocks: Block[] = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone }), ...images]
+    let blocks: Block[] = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone }), ...images, ...sharedImages]
     const contentBlocks = blocks // 换段重试时用同样的内容（不带新段的补充说明）
     let kind: TurnKind = 'message'
     let attempt = 0
