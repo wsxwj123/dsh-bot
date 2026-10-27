@@ -2,7 +2,7 @@
 // 读目录白名单与真正的 open/fstat/read 在 media.readSharedImage 里；这里只负责"该看哪几行、水位推到哪"。
 import { extname, isAbsolute } from 'path'
 import { SHARED_IMAGE_EXTS } from '../media/media'
-import type { TranscriptLine } from './transcript'
+import { transcriptTs, type TranscriptLine } from './transcript'
 
 /** 水位：看过/给过的时间点，以及同一毫秒里已经消费过的消息编号（同秒多行不重复给、也不漏） */
 export type SharedImageWatermark = { after: number; ids: number[] }
@@ -53,7 +53,7 @@ export function inspectImageLine(line: TranscriptLine, botUsername: string): Lin
 
 /** 这一行在水位之后吗？同一毫秒里已消费过的消息编号跳过。 */
 function afterWatermark(line: TranscriptLine, wm: SharedImageWatermark): boolean {
-  const ts = Date.parse(line.ts)
+  const ts = transcriptTs(line.ts)
   if (!Number.isFinite(ts)) return false
   if (ts < wm.after) return false
   return !(ts === wm.after && wm.ids.includes(line.message_id))
@@ -82,7 +82,7 @@ export function consumeSharedImages(o: {
   let lastTs = -1
   let lastIds: number[] = []
   const consumed = (line: TranscriptLine): void => {
-    const ts = Date.parse(line.ts)
+    const ts = transcriptTs(line.ts)
     if (ts > lastTs) { lastTs = ts; lastIds = [line.message_id] }
     else if (ts === lastTs && !lastIds.includes(line.message_id)) lastIds.push(line.message_id)
   }

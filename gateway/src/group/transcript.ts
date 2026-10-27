@@ -35,6 +35,13 @@ const TAIL_BYTES = 128 * 1024
 /** 轮转锁超过这么久没删，当作写方崩在半路留下的残留，谁都可以删（约定 v1.2 5.12.4） */
 const ROTATE_LOCK_STALE_MS = 60_000
 
+/** 记录行的时间：ISO 字符串（本网关写法）或毫秒数（别的写方/旧记录）。解析不了返回 NaN。 */
+export function transcriptTs(v: unknown): number {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : NaN
+  if (typeof v === 'string') return Date.parse(v)
+  return NaN
+}
+
 export class GroupTranscript {
   constructor(
     private readonly dir: string,
@@ -141,7 +148,10 @@ export class GroupTranscript {
       if (!l) continue
       try {
         const o = JSON.parse(l) as TranscriptLine
-        if (!(Date.parse(o.ts) > afterMs)) continue
+        const ts = transcriptTs(o.ts)
+        if (!(ts > afterMs)) continue
+        // 下游（私聊近况、群图水位）都按 ISO 字符串比较：数字时间戳在这里统一归一
+        o.ts = new Date(ts).toISOString()
         if (typeof o.text !== 'string') o.text = ''
         const prev = byId.get(o.message_id)
         if (prev) {
