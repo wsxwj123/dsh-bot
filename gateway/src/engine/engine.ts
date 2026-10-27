@@ -738,19 +738,27 @@ export class Engine {
     if (!this.groups || !this.features.groups || isGroupChat(chatId)) return null
     const key = `group_recap:${chatId}`
     const after = Math.max(Number(this.ledger.getMeta(key) || 0), Date.now() - 12 * 3600_000)
-    // since 也会返回纯图片/无文本的行（群图要用）；近况只需要文字，空 text 不进摘要。
+    // since 也会返回纯图片/无文本的行（群图要用）。有图的空 text 行要留一行占位：
+    // 私聊里被问「群里那张图是什么」时，上下文里至少要有「群里有图」这个事实，
+    // 否则模型只会凭空编（2026-10-27 真机：私聊里编出「白瓷小杯子装草莓冻」）。
     // 同一条群消息可能有两行（本 bot 的 observe 行 + 对端 bot 补写的带图行，observed_by 不同、
     // since 按写方分开保留），近况里同一句只说一次。
     const seenMsg = new Set<string>()
     const rows = Object.keys(this.access().groups).map(k => k.trim()).flatMap(g => this.groups!.since(g, after, 8))
-      .filter(r => r.text.trim())
+      .filter(r => r.text.trim() || typeof r.image_path === 'string')
       .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts))
       .filter(r => { const k = `${r.chat_id}\u0000${r.message_id}`; if (seenMsg.has(k)) return false; seenMsg.add(k); return true })
       .slice(-8)
     if (rows.length === 0) return null
     this.ledger.setMeta(key, String(Math.max(...rows.map(r => Date.parse(r.ts)))))
     const who = (r: TranscriptLine) => r.is_bot && r.from_username === this.botUsername ? '你' : !r.is_bot && r.from_id === chatId ? '对方' : (r.from_name || r.from_username || '群友')
-    const lines = rows.map(r => `${escapeUserText(who(r))}：${escapeUserText(r.text.replace(/\s+/g, ' ').slice(0, 100))}`)
+    const body = (r: TranscriptLine): string => {
+      const t = r.text.replace(/\s+/g, ' ').trim().slice(0, 100)
+      if (t) return t
+      // 这里只是私聊的近况摘要，没有图可看；写明看不到，避免模型编内容
+      return '[发了一张图片，这里看不到内容]'
+    }
+    const lines = rows.map(r => `${escapeUserText(who(r))}：${escapeUserText(body(r))}`)
     this.log.info('group.recap', { chat: chatId, lines: lines.length })
     return `⟦群里近况：你在的群里，上次之后说了这些。只是让你知道，不用逐条回应⟧\n${lines.join('\n')}`
   }
@@ -762,7 +770,11 @@ export class Engine {
    */
   private groupImages(chatId: string): Block[] {
     if (!this.groups || this.sharedReadDirs.length === 0) return []
-    const key = `group_images:${chatId}`
+    // 私聊回合也附群图：否则私聊里被问「群里那张图是什么」时，上下文里连图带描述都没有，模型只能编
+    // （2026-10-27 真机：编出「白瓷小杯子装草莓冻」）。群与私聊各用一份水位——群里看过的图，
+    // 被问到时私聊里仍要能再看一次；同一张图在同一侧仍然只给一次。
+    const dm = !isGroupChat(chatId)
+    const key = dm ? `group_images_dm:${chatId}` : `group_images:${chatId}`
     const now = Date.now()
     const watermark = parseWatermark(this.ledger.getMeta(key))
     if (watermark.after > now) {
@@ -774,7 +786,11 @@ export class Engine {
     }
     const after = Math.min(Math.max(watermark.after, now - GROUP_IMAGE_WINDOW_MS), now)
     let lines: TranscriptLine[]
-    try { lines = this.groups.since(chatId, after - 1, GROUP_IMAGE_SCAN_LIMIT) } catch { return [] }
+    try {
+      // 私聊：把该 bot 所有群的记录合起来看（水位是全局时间点，多群共用一个 after）
+      const chats = dm ? Object.keys(this.access().groups).map(k => k.trim()).filter(Boolean) : [chatId]
+      lines = chats.flatMap(g => this.groups!.since(g, after - 1, GROUP_IMAGE_SCAN_LIMIT))
+    } catch { return [] }
     // 同一条群消息可能有多行（本 bot 自取行 + 对端 bot 补写行）：按 (chat_id, message_id) 折叠成一行再喂水位，
     // 优先本 bot 自取行（observed_by 是自己且带 image_path），其次任意带 image_path 的行。
     // 同一轮内按 id 只喂一行；跨回合若对端行晚于本 bot 自取行写入，仍可能各附一次（过渡期双写风险，
@@ -1069,7 +1085,8 @@ export class Engine {
     // 新消息一进来就会超预算：先换段再处理
     await this.maybeRoll(chatId, batch)
     // 群记录里别人发的图（水位之后、30 分钟内，最多 2 张）：附在这一轮文字之后；读不出来就当没有
-    const sharedBlocks = isGroupChat(chatId) ? this.groupImages(chatId) : []
+    // 群回合附本群的新图；私聊回合附所有群的新图（见 groupImages 里的说明）
+    const sharedBlocks = this.groupImages(chatId)
     const since = Date.now()
     const delay = await this.runBatch(chatId, batch, sharedBlocks)
     // 这一轮说了"三点提醒你"却没登记：能换算时间的替它登记，下一轮告诉它；换算不了的下一轮提醒它自己登记
