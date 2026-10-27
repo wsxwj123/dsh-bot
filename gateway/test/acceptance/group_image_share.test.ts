@@ -395,7 +395,7 @@ test('读取-同 message_id 双写 本 bot 行无图、对方 bot 行有图：�
   expect(tg.sentTo(GROUP).some(s => (s.text ?? '').includes('轮双写'))).toBe(true)
 })
 
-test('读取-同 message_id 双写 两行都带图（自己与对方各一张）：只附对方那张，图片块为 1', async () => {
+test('读取-同 message_id 双写 本 bot 自取行与对端补写行都带图：折叠成一行只附一张，回复照常产生', async () => {
   let selfImg = ''
   let otherImg = ''
   const { tg, b, gw } = await setup({
@@ -405,19 +405,21 @@ test('读取-同 message_id 双写 两行都带图（自己与对方各一张）
     },
   })
   const SAME_ID = 990002
+  // 本 bot 自取行：真人发图，observed_by 是自己、带 image_path（新语义下不再按"自己写的"排除）
   seed(b, {
     message_id: SAME_ID, ts: Date.now() - 2000, text: '同 id 双写带图',
     from_username: 'friend_user', from_id: String(FRIEND), is_bot: false, observed_by: A_NAME,
     attachment_kind: 'photo', image_path: selfImg,
   })
+  // 对端（claude 侧）补写的同一 message_id、不同 observed_by 的行
   seed(b, {
     message_id: SAME_ID, ts: Date.now() - 1000, text: '同 id 双写带图',
     from_username: 'bot_b_other', from_id: '900002', is_bot: true, observed_by: 'bot_b_other',
     attachment_kind: 'photo', image_path: otherImg,
   })
   const p = await groupTurn({ tg, b, gw }, '轮双写二')
+  // 读侧按 (chat_id, message_id) 折叠成一行再喂水位：两张都可读也只附一张（优先本 bot 自取行）
   expect(p.images).toBe(1)
-  expect(p.text).not.toContain(selfImg)
   expect(tg.sentTo(GROUP).some(s => (s.text ?? '').includes('轮双写二'))).toBe(true)
 })
 
