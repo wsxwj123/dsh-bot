@@ -407,6 +407,28 @@ export function loadAccess(channelDir: string): Access {
   return readAccess(channelDir) ?? { dmPolicy: 'disabled', allowFrom: [], groups: {} }
 }
 
+/** 跨聊天发送的目标：chatId 是实际要发的编号，kind 决定是否写群记录 */
+export type RegisteredChat = { chatId: string; kind: 'group' | 'dm' }
+
+/**
+ * 在 access.json 的登记表里找 raw 对应的聊天（raw 由调用方 trim、验过格式）。
+ * 只做首尾 trim 后逐 UTF-16 码元相等，不做大小写折叠、前缀、数值归一；未登记返回 null。
+ * 群用 access.groups 的原始键（群记录按它落盘），私聊取 allowFrom 里的登记值。
+ */
+export function registeredChatTarget(access: Pick<Access, 'allowFrom' | 'groups'>, raw: string): RegisteredChat | null {
+  const t = raw.trim()
+  if (!t) return null
+  if (t.startsWith('-')) {
+    for (const key of Object.keys(access.groups)) if (key.trim() === t) return { chatId: key, kind: 'group' }
+    return null
+  }
+  for (const entry of access.allowFrom) {
+    const s = String(entry)
+    if (s.trim() === t) return { chatId: s.trim(), kind: 'dm' }
+  }
+  return null
+}
+
 // ─── Telegram 令牌：频道目录的 .env（与旧系统相同），找不到才看环境变量 ───
 
 export function parseDotenv(text: string): Record<string, string> {
