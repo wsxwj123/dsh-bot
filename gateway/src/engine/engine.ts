@@ -649,12 +649,14 @@ export class Engine {
   private groupImages(chatId: string): Block[] {
     if (!this.groups || this.sharedReadDirs.length === 0) return []
     const key = `group_images:${chatId}`
+    const now = Date.now()
     const watermark = parseWatermark(this.ledger.getMeta(key))
-    const after = Math.max(watermark.after, Date.now() - GROUP_IMAGE_WINDOW_MS)
+    // 水位可能被旧数据推到未来：clamp 到 now，否则之后的行永远在"水位之前"取不到
+    const after = Math.min(Math.max(watermark.after, now - GROUP_IMAGE_WINDOW_MS), now)
     let lines: TranscriptLine[]
     try { lines = this.groups.since(chatId, after - 1, GROUP_IMAGE_SCAN_LIMIT) } catch { return [] }
     const res = consumeSharedImages({
-      lines, watermark, botUsername: this.botUsername, max: MAX_GROUP_IMAGES_PER_TURN,
+      lines, watermark, botUsername: this.botUsername, max: MAX_GROUP_IMAGES_PER_TURN, now,
       read: path => readSharedImage(path, this.sharedReadDirs, MAX_SHARED_IMAGE_BYTES),
       onSkip: (line, reason) => this.log.info('group_image.skipped', { chat: chatId, message_id: line.message_id, reason }),
     })
