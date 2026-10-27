@@ -306,13 +306,13 @@ test('清单20 启动后新增的 claudeMediaRoot 子目录不在允许清单内
   let late = ''
   const { tg, b, gw, media } = await setup({
     prepare: d => {
-      mkdirSync(join(d.media, 'existing'), { recursive: true })
-      early = join(d.media, 'existing', 'early.jpg')
+      mkdirSync(join(d.media, 'existing', 'telegram-group'), { recursive: true })
+      early = join(d.media, 'existing', 'telegram-group', 'early.jpg')
       writeFileSync(early, 'jpg')
     },
   })
-  mkdirSync(join(media, 'added'), { recursive: true })
-  late = join(media, 'added', 'late.jpg')
+  mkdirSync(join(media, 'added', 'telegram-group'), { recursive: true })
+  late = join(media, 'added', 'telegram-group', 'late.jpg')
   writeFileSync(late, 'jpg')
   const t = Date.now()
   seed(b, { ts: t - 2000, text: '启动前目录', attachment_kind: 'photo', image_path: early })
