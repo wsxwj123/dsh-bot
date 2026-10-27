@@ -6,7 +6,7 @@
 import { afterEach, expect, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { dirname, join } from 'path'
+import { dirname, join, relative } from 'path'
 import { FakeTelegram } from '../fakes/fake-telegram'
 import { FRIEND, Gateway, IS_WIN, logEvents, makeBot, OWNER, prompts, readJsonl, sleep, until, type BotEnv } from './_acc'
 
@@ -379,7 +379,8 @@ test('群图自取14 多 bot 隔离：B 读不到 A 的 group-media 图，跳过
   const row = await until(() => rowsOf(groups, GROUP).find(r => Number(r.message_id) === mid && r.image_path),
     'A 的自取图行', 20_000)
   const realA = realpathSync(String(row.image_path))
-  expect(realA.startsWith(realpathSync(ba.botDir) + '/')).toBe(true)
+  // 用 relative 判前缀，Windows 上路径分隔符是反斜杠，拼 '/' 会永远不匹配
+  expect(relative(realpathSync(ba.botDir), realA).startsWith('..')).toBe(false)
 
   // B 读同一份群记录：A 的图不在 B 的读白名单里，不附图
   const p = await groupTurn({ tg: tgB, b: bb, gw: gwb }, '轮十四')
@@ -388,4 +389,29 @@ test('群图自取14 多 bot 隔离：B 读不到 A 的 group-media 图，跳过
     () => logEvents(bb).some(x => x.event === 'group_image.skipped' && Number(x.message_id) === mid && x.reason === 'outside_allowlist'),
     'B 跳过 A 的图的日志（outside_allowlist）', 10_000,
   )
+})
+
+test('群图自取15 折叠后仍按 ts 升序：超过上限的那张下一轮还能出现（水位不被跳过）', async () => {
+  let i1 = '', i2 = '', i3 = ''
+  const { tg, b, gw } = await setup({
+    prepare: d => {
+      i1 = join(d.shared, 'fifteen-1.png'); writeFileSync(i1, 'png')
+      i2 = join(d.shared, 'fifteen-2.png'); writeFileSync(i2, 'png')
+      i3 = join(d.shared, 'fifteen-3.png'); writeFileSync(i3, 'png')
+    },
+  })
+  const now = Date.now()
+  // key=2 的第一行（本 bot、无图）先写、位置靠前；同 id 稍后由对端补一行带图的（ts 更晚）。
+  // 折叠会把这个键的「值」换成对端那行，但 Map 保留首次插入的位置——不重排的话数组就失序了。
+  seed(b, { message_id: 2, ts: now - 5000, text: '图二', from_username: 'friend', is_bot: false, observed_by: A_NAME })
+  seed(b, { message_id: 1, ts: now - 3000, text: '图一', from_username: 'friend', is_bot: false, observed_by: 'bot_other', attachment_kind: 'photo', image_path: i1 })
+  seed(b, { message_id: 2, ts: now - 1000, text: '', from_username: 'friend', is_bot: false, observed_by: 'bot_other', attachment_kind: 'photo', image_path: i2 })
+  seed(b, { message_id: 3, ts: now - 2000, text: '图三', from_username: 'friend', is_bot: false, observed_by: 'bot_other', attachment_kind: 'photo', image_path: i3 })
+
+  // 第一轮按 ts 升序给前两张（图一、图三），额度用完；图二留到下一轮
+  const p1 = await groupTurn({ tg, b, gw }, '轮十五甲')
+  expect(p1.images).toBe(2)
+  // 第二轮必须还能拿到图二——水位若被折叠后失序的数组推到 now-1000，这张就永久漏了
+  const p2 = await groupTurn({ tg, b, gw }, '轮十五乙')
+  expect(p2.images).toBe(1)
 })

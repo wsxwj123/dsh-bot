@@ -3,7 +3,7 @@
 // 以及假 dsh 落盘的 prompts.jsonl（看模型这一轮收到的图片块数量）。
 // 注释里的「清单 N」对应接口文件第 3 节编号；错误契约单独标「契约」。
 import { afterEach, expect, test } from 'bun:test'
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs'
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { FakeTelegram } from '../fakes/fake-telegram'
@@ -298,7 +298,7 @@ test('清单18 群记录写入失败（目录只读）：已发出的群消息�
 
 test('清单19 私聊回合即使群记录里有图片字段也不附图', async () => {
   let img = ''
-  const { tg, b, gw } = await setup({ prepare: d => { img = join(d.shared, 'group-only.png'); writeFileSync(img, 'png') } })
+  const { tg, b } = await setup({ prepare: d => { img = join(d.shared, 'group-only.png'); writeFileSync(img, 'png') } })
   seed(b, { text: '群里的图', attachment_kind: 'photo', image_path: img })
   tg.pushText(OWNER, '私聊一句轮十九')
   const p = (await until(() => promptWith(b, '私聊一句轮十九'), '私聊这一轮提示', 15_000))!
