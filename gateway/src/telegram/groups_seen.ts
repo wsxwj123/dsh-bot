@@ -112,6 +112,19 @@ export class GroupsSeen {
 
 const STATUSES = new Set<unknown>(['member', 'administrator', 'restricted', 'left', 'kicked'])
 
+/** 只读地看一遍 groups-seen.json（list_chats 取群名用）：读不出、坏 JSON、形状不对都返回空表，不抛异常也不写盘 */
+export function readSeenGroups(path: string): Record<string, SeenGroup> {
+  let raw: string
+  try { raw = readFileSync(path, 'utf8') } catch { return {} }
+  try {
+    const v = JSON.parse(raw)
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return {}
+    const out: Record<string, SeenGroup> = {}
+    for (const [id, g] of Object.entries(v)) if (/^-\d+$/.test(id) && wellFormed(g)) out[id] = g
+    return out
+  } catch { return {} }
+}
+
 function wellFormed(g: unknown): g is SeenGroup {
   if (!g || typeof g !== 'object' || Array.isArray(g)) return false
   const r = g as Record<string, unknown>
