@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import { extname, isAbsolute, join, relative } from 'path'
 import type { Access } from '../config'
 import type { Ledger, OutboundKind } from '../ledger'
+import { MAX_SHARED_IMAGE_BYTES } from '../media/media'
 import { safeError, type Logger } from '../log'
 import { crashPoint, sleep } from '../util'
 import { classifySendError, isReplyNotFound, type TelegramApi } from './api'
@@ -113,7 +114,7 @@ export function shrinkPhoto(path: string): string | null {
 }
 
 /** 文件只允许来自白名单目录（防止把本机任意文件发出去）。返回规范化后的真实路径，不允许时返回 null。 */
-export function allowedFile(path: string, allowDirs: string[]): string | null {
+export function allowedFile(path: string, allowDirs: readonly string[]): string | null {
   if (!isAbsolute(path) || !existsSync(path)) return null
   let real: string
   try { real = realpathSync(path) } catch { return null }
@@ -137,10 +138,13 @@ export class Sender {
     private readonly ledger: Ledger,
     private readonly log: Logger,
     private readonly o: {
-      allowDirs: () => string[]; maxSendWaitMs: number; access: () => Access
+      allowDirs: () => readonly string[]; maxSendWaitMs: number; access: () => Access
+      /** 群聊共享图库（默认 sharedMediaDir）：只有这里的原图才写进群记录，和"允许发 Telegram"是两套名单 */
+      shareDirs?: () => readonly string[]
       /** 一次 send 的各段都发完后回调一次（群聊记录用：bot 自己在群里说的话由自己记，一次回复记一行）。
-       *  text 是发出的各段按顺序以换行连接（非文字段写占位），messageId 是第一条发出的段，at 是最后一段发出的时刻；一段都没发出就不回调 */
-      onSent?: (chatId: string, messageId: number, text: string, at: Date) => void
+       *  text 是发出的各段按顺序以换行连接（非文字段写占位），messageId 是第一条发出的段，at 是最后一段发出的时刻；
+       *  photos 是这一回复第一张确实送达、且在共享图库内、不超过 8 MiB 的原图真实路径；一段都没发出就不回调 */
+      onSent?: (chatId: string, messageId: number, text: string, at: Date, photos?: string[]) => void
     },
   ) {}
 
@@ -157,6 +161,8 @@ export class Sender {
     const sentTexts: string[] = []
     let firstSentId = 0
     let lastSentAt = new Date()
+    /** 这一回复第一张可共享的原图（真实路径，且不超过上限） */
+    let sharedPhoto: string | null = null
 
     let textIdx = 0
     try {
@@ -206,6 +212,11 @@ export class Sender {
             crashPoint('after_send_before_record')
             this.ledger.outboundResult(outId, 'sent', { tgMessageId: m.message_id })
             results.push({ index: i + 1, kind: item.kind, state: 'sent', messageId: m.message_id })
+            // 群记录只记第一张：photo 通道、原图在共享图库内、原图不超过 8 MiB（压缩件/临时件不算）
+            if (!sharedPhoto && fk === 'photo') {
+              const shared = allowedFile(filePath!, this.o.shareDirs?.() ?? [])
+              try { if (shared && statSync(shared).size <= MAX_SHARED_IMAGE_BYTES) sharedPhoto = shared } catch {}
+            }
             if (item.kind === 'text') this.log.chatLine('bot', req.chatId, item.text)
             if (sentTexts.length === 0) firstSentId = m.message_id
             sentTexts.push(item.kind === 'text' ? item.text : fk === 'photo' ? '[图片]' : fk === 'animation' ? '[表情包]' : fk === 'sticker' ? '[贴纸]' : '[文件]')
@@ -249,7 +260,11 @@ export class Sender {
       }
     } finally {
       // 中途抛异常也把已经发出去的段记上（对方已经看到了）
-      if (sentTexts.length) this.o.onSent?.(req.chatId, firstSentId, sentTexts.join('\n'), lastSentAt)
+      if (sentTexts.length) {
+        // 记群记录失败不能影响已经发出的结果：回调内部再兜一层
+        try { this.o.onSent?.(req.chatId, firstSentId, sentTexts.join('\n'), lastSentAt, sharedPhoto ? [sharedPhoto] : undefined) }
+        catch { this.log.warn('send.on_sent_failed', { chat: req.chatId }) }
+      }
     }
     return results
   }
