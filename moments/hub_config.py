@@ -396,7 +396,10 @@ def make_backup(kind, content):
 
     `O_CREAT|O_EXCL|0o600` 一次建成：没有"先建再 chmod"的 644 窗口，
     也天然不会覆盖同名的既有备份（同秒冲突就往后取 `-01`…`-99`）。
-    """
+
+    id 在 save 与 restore 两类之间也唯一：两类只是前缀不同，同一秒各取一份会拿到同一个
+    bid，`list_backups` 按 id 排序时同 id 的先后就随 `os.listdir` 漂移（锁定用例取第一个
+    同 id 期望 kind=restore 会随机红）。取名时把两个前缀都算占用。"""
     prefix = SAVE_PREFIX if kind == "save" else RESTORE_PREFIX
     base = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     bids = [base] + ["%s-%02d" % (base, i) for i in range(1, 100)]
@@ -406,7 +409,8 @@ def make_backup(kind, content):
         taken = set(os.listdir(configs_dir()))
     except OSError:
         taken = set()                   # 目录读不了：下面 os.open 照常报 config_write_failed
-    start = max((i + 1 for i, bid in enumerate(bids) if prefix + bid in taken), default=0)
+    start = max((i + 1 for i, bid in enumerate(bids)
+                 if SAVE_PREFIX + bid in taken or RESTORE_PREFIX + bid in taken), default=0)
     for bid in bids[start:]:
         target = os.path.join(configs_dir(), prefix + bid)
         try:
