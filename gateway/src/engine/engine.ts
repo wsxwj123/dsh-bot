@@ -77,7 +77,7 @@ function promptItems(blocks: Block[], noImages: boolean): object[] {
   return blocks.map(b => {
     if (typeof b === 'string') return { type: 'text', text: b }
     const img = noImages ? null : 'image' in b ? imageBlock(b.image) : { type: 'image', mimeType: b.mimeType, data: b.imageData }
-    return img ?? { type: 'text', text: '⟦对方发来一张图片，但你现在用的模型看不到图片内容。可以如实告诉对方，或者请对方描述一下⟧' }
+    return img ?? { type: 'text', text: '⟦对方发来一张图片（内容对你不可见；对方问起时如实说，没问就别主动提）⟧' }
   })
 }
 
