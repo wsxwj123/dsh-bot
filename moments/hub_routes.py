@@ -1150,15 +1150,16 @@ def params_get():
 @hub_bp.post("/hub/api/params")
 @_api
 def params_save():
-    """§2.3 校验顺序照表：body → 未知键/类型/范围 → version → 磁盘可读 →
+    """§2.3 校验顺序照表：body → version → 未知键/类型/范围 → 磁盘可读 →
     版本乐观锁 → 空操作 200 或写。**纯输入错优先于冲突错**，用户先看到真正该改的东西；
     「没变化」也不能绕开乐观锁：拿旧 version 重放同值必须报 409。"""
     body = _cfg_body()
     values = body.get("values")
     if not isinstance(values, dict):
         raise HubError(400, "bad_body", "缺少 values 或它不是 JSON 对象")
+    # version 的坏法也算 bad_body，排在 bad_field 之前：缺 version 时不该先抱怨某个键的值
+    version = _cfg_version(body)
     hub_config.validate_values(values)
-    version = _cfg_version(body)        # 空 values 也要有 version：缺了就是 400 bad_body
     data, text = _cfg_readable()
     changed, new_text = hub_config.apply_form(values, data, text)
     with hub_config.hold_config_lock():
