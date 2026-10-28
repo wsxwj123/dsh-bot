@@ -40,6 +40,7 @@ import {
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, summaryPrompt,
 } from './format'
 import { compactReply, formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, splitReply, summaryReply, type KeyStatus, type ModelChoice, type ProviderView } from './commands'
+import { ImagesUnsupportedTracker } from './image_support'
 import { mergeRoutes, normName, readProviders, ProvidersUnreadable, DEFAULT_CONTEXT, type ProvidersSnapshot, type MergedProviders, type ProviderEntry, type ProviderApi } from '../providers/store'
 
 /**
@@ -239,8 +240,8 @@ export class Engine {
   readonly media: Media
   readonly actions: LifeActions
   readonly stickers: StickerService
-  /** 发过图片但被 dsh 拒了的模型（看不了图）：之后对这个模型只说"有一张图"，不再附图 */
-  private noImages = new Set<string>()
+  /** 模型「看不见图」的判定与禁用状态（连续失败计数、30 分钟过期、换模型清空） */
+  private readonly imageSupport: ImagesUnsupportedTracker
   /** 功能开关（约定 v1.1 5.19）：启动时读，配置文件变了重读；工具与运行规则跟着它，等空闲换新会话生效 */
   features: Features
 
@@ -254,6 +255,7 @@ export class Engine {
     readonly mcp: McpServer,
   ) {
     this.features = this.readFeatures()
+    this.imageSupport = new ImagesUnsupportedTracker({ logger: log })
     this.fileRoutes = cfg.brain.routes
     this.providerMerge = mergeRoutes(this.fileRoutes, null)
     this.configBrain = { ...cfg.brain, routes: this.providerMerge.routes }
@@ -1280,14 +1282,18 @@ export class Engine {
     if (seg.needs_seed) { this.ledger.segmentSeeded(seg.id); seg.needs_seed = 0 }
     try {
       const bk = this.keyOf(this.brain)
+      // 每轮都问一次 tracker：模型标识变了它会清空旧判断（换回原模型也重新尝试附图）
+      const hasImages = blocks.some(b => typeof b !== 'string')
+      const attachImages = hasImages && this.imageSupport.shouldAttachImages(bk)
       let res: { stopReason?: string }
       try {
-        res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: promptItems(blocks, this.noImages.has(bk)) }, 0)
+        res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: promptItems(blocks, !attachImages) }, 0)
+        if (attachImages) this.imageSupport.onImageSuccess(bk)
       } catch (e) {
-        // 这个模型看不了图：dsh 整条拒收（没进历史），去掉图片、换成一句说明再发一次
-        if (!(e instanceof AcpError) || !blocks.some(b => typeof b !== 'string') || this.noImages.has(bk) || !/image|UNSUPPORTED_CONTENT|attachment/i.test(e.message)) throw e
-        this.noImages.add(bk)
-        this.log.warn('prompt.images_unsupported', { model: this.brain.model })
+        // 带图回合被 dsh 整条拒收（没进历史）：让 tracker 判定，本轮去图重发或按普通错误抛出
+        if (!(e instanceof AcpError) || !hasImages) throw e
+        const verdict = this.imageSupport.onImageFailure(bk, e.message)
+        if (!verdict.unsupported) throw e
         res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: promptItems(blocks, true) }, 0)
       }
       // 不等的话这一轮会被当成"没回"去提醒，又发一遍
