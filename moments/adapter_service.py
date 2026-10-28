@@ -3449,13 +3449,16 @@ def _hub_scrub(resp):
 
 
 def _hub_respond(path):
-    """名单内的 ``/hub/...``：已过鉴权，调 8765 上同一个处理函数，照 8765 的样子收尾。"""
-    handler, args = _hub_match(path, request.method)
+    """``/hub/...``：已过鉴权；先过 8765 的体积闸，按原样路径分派，调 8765 上同一个处理函数，
+    照 8765 的样子收尾。"""
     api = path.startswith(HUB_API_PREFIX)
+    # 8765 的体积闸在 before_request 里，先于路由匹配：``/hub/api/`` 的声明体超限时，
+    # 不论路径在不在名单、方法对不对，一律 413。这里同样放在 _hub_match 之前。
+    if api and (request.content_length or 0) > HUB_MAX_BODY:
+        return _hub_failure(api, RequestEntityTooLarge())
+    handler, args = _hub_match(path, request.method)
     try:
         if api:
-            if (request.content_length or 0) > HUB_MAX_BODY:     # 8765 的体积闸（web.py 的 _hub_body_limit）
-                raise RequestEntityTooLarge()
             # 应用级的 MAX_CONTENT_LENGTH 是给适配接口的；这几条接口按 8765 的上限读请求体，
             # 分块传输的读到上限就停（超了框架抛 413，下面回同一个 JSON）。
             request.max_content_length = HUB_MAX_BODY
