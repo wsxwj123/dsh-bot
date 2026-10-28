@@ -1276,7 +1276,7 @@ def params_restore(bid):
 # 把 provider activate 顶成了 404，那是这条规矩的来历。
 # ======================================================================
 
-from moments import hub_addbot                        # noqa: E402  本段自己的依赖
+from moments import hub_addbot, life_settings       # noqa: E402  本段自己的依赖
 
 
 @hub_bp.record_once
@@ -1457,6 +1457,21 @@ def bots_edit_save(bot_id):
     with hub_addbot.hold_addbot_lock():
         body, code = hub_addbot.edit_save(bot_id, request.get_json(silent=True))
     return jsonify(body), code
+
+
+@hub_bp.post("/hub/api/bots/<bot_id>/life/refresh_summary")
+@_api
+def bots_life_refresh_summary(bot_id):
+    """按当前人设重算生活设定里的 persona_summary（life-refresh-summary 接口）。
+
+    只有显式点按钮才走到这里，不在改人设时自动触发 —— 用户可能手工调过摘要。
+    失败时的 ``reason`` 是接口约定里的 ``no_persona`` / ``no_life_config`` / ``io_error``。
+    """
+    try:
+        body = hub_addbot.refresh_life_summary(bot_id)
+    except life_settings.LifeError as e:
+        return jsonify({"ok": False, "reason": e.code, "message": e.message}), e.status
+    return jsonify(body)
 
 
 # ======================================================================

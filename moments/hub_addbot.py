@@ -1537,6 +1537,49 @@ def edit_read(bot_id):
             "persona": persona, "fish_voice_id": _voice_of(access_raw)}
 
 
+def refresh_life_summary(bot_id):
+    """POST /hub/api/bots/<bot_id>/life/refresh_summary（管理台入口）。
+
+    判定顺序照接口：编号（400）→ 新系统那份配置（404）→ 频道目录 → 人设文件
+    （422 ``no_persona``）→ ``life_config``（422 ``no_life_config``）→ 共用实现。
+    只读 ``CLAUDE.md`` 再重算摘要，**不打印人设正文**，响应里只有前 80 字的 preview。
+    """
+    if not isinstance(bot_id, str) or not BOT_ID_RE.match(bot_id):
+        raise HubError(400, "bad_bot_id", "bot id 形状非法")
+    path = _dsh_yml(bot_id)                     # 不是新系统的 bot：404，不碰任何文件
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+    except OSError:
+        raise HubError(500, "config_unreadable", "这只 bot 的配置读不出来") from None
+    except Exception:                           # noqa: BLE001
+        raise HubError(409, "bad_yaml", "这只 bot 的配置格式有错") from None
+    if not isinstance(cfg, dict):
+        raise HubError(409, "bad_yaml", "这只 bot 的配置格式有错")
+
+    channel = config_sources.channel_dir(cfg)
+    if not channel:
+        raise HubError(409, "bad_channel_path", "这只 bot 的配置里没写频道目录")
+    if not os.path.isfile(os.path.join(channel, "CLAUDE.md")):
+        raise life_settings.LifeError(422, "no_persona",
+                                      "这只 bot 还没有人设文件，先写好 CLAUDE.md 再来刷新")
+    life = cfg.get("life_config")
+    if not isinstance(life, str) or not life.strip():
+        raise life_settings.LifeError(422, "no_life_config",
+                                      "这只 bot 还没有生活设定文件，先建好再来刷新")
+    life_path = os.path.normpath(os.path.expanduser(life.strip()))
+    # 允许目录拿不到时**拒绝**（不要 fail-open 跳过校验）：拿不到说明目录不存在或是条
+    # 绕过禁区的软链，这时候没有可信的"允许范围"可以比对，放行等于不做路径检查
+    allowed = life_settings.allowed_dir()
+    if allowed is None:
+        raise life_settings.LifeError(422, "no_life_config",
+                                      "生活设定目录还不可用（不存在或是软链），先建好再来刷新")
+    if (os.path.dirname(os.path.realpath(life_path)) != allowed[1]
+            or not life_path.endswith(".yml")):
+        raise HubError(409, "bad_life_config", "这只 bot 的生活设定文件不在允许修改的位置")
+    return life_settings.refresh_summary(channel, life_path)
+
+
 def _edit_voice(value):
     """§10b 音色：非字符串（含 null）400；strip 后为空 = 清除音色（回空串）；其余与 §6b 同三档。"""
     if not isinstance(value, str):

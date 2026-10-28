@@ -357,6 +357,9 @@ def _dispatch():
         elif len(parts) == 3 and parts[1:] == ["groups", "discovered"]:     # 刚发现的群（约定 v1.1 5.20.2）
             methods = _DISCOVERED_ROUTES
             parts = parts[:2]
+        elif len(parts) == 3 and parts[1] == "life" and parts[2] == "refresh_summary":
+            methods = _LIFE_SUB_ROUTES
+            parts = parts[:2]
         else:                               # 只有技能多一段：/bots/<bot_id>/skills/<通用名>（11.2）
             methods = _SKILL_ROUTES if len(parts) == 3 and parts[1] == "skills" else None
         if methods is not None:
@@ -1293,6 +1296,38 @@ def _life_put(bot_id):
 
 
 # ---------------------------------------------------------------- v0.6、v0.7（补充文件第 9 节）
+
+def _refresh_refuse(status, reason, message):
+    """刷新摘要的失败形状：``{"ok": false, "reason", "message"}``（接口约定，不是 Refuse 的 code 形状）。"""
+    return _json({"ok": False, "reason": reason, "message": message}, status)
+
+
+def _life_refresh_summary(bot_id):
+    """POST /adapter/v1/bots/<bot_id>/life/refresh_summary（life-refresh-summary 接口）。
+
+    判定顺序照接口：编号（路由层）→ 名单（404）→ 人设文件（422 ``no_persona``）→
+    生活设定文件（422 ``no_life_config``）→ 共用实现。停用的 bot 也能刷：只改文件，不碰进程。
+    """
+    bots = _own_bots()
+    bot = _require_bot(bot_id, bots)
+    channel = bot["channel"]
+    persona = _channel_file(bot, "CLAUDE.md") if channel else None
+    if persona is None:
+        return _refresh_refuse(500, "io_error", "这只 bot 的频道目录或人设文件不在它自己的家里，读不了人设")
+    if not os.path.isfile(persona):
+        return _refresh_refuse(422, "no_persona", "这只 bot 还没有人设文件，先写好 CLAUDE.md 再来刷新")
+    try:
+        life_path, _st = life_settings.locate(bot, bots)
+    except life_settings.LifeError as e:
+        # 允许目录都还没建出来时 locate 判"不在允许位置"，但对这只 bot 就是没有生活设定文件
+        if life_settings.allowed_dir() is None or e.message in (life_settings.NO_FILE, life_settings.MISSING):
+            return _refresh_refuse(422, "no_life_config", "这只 bot 还没有生活设定文件，先建好再来刷新")
+        return _refresh_refuse(e.status, e.code, e.message)
+    try:
+        return life_settings.refresh_summary(channel, life_path)
+    except life_settings.LifeError as e:
+        return _refresh_refuse(e.status, e.code, e.message)
+
 
 def _gateway_health(channel):
     """这只 bot 的网关 ``GET /v1/health`` 返回里 ``telegram`` 那一段（9.4 同跑提示、9.5 用户名）。
@@ -3283,6 +3318,8 @@ _BOT_ROUTES = {
     "profile": {"GET": _profile_get, "PUT": _profile_put},
     "token_handoff": {"POST": _token_handoff},
 }
+#: ``/bots/<bot_id>/life/<这一段>`` 上的接口（life-refresh-summary）
+_LIFE_SUB_ROUTES = {"POST": _life_refresh_summary}
 #: ``/bots/<bot_id>/skills/<通用名>`` 上的接口（11.2）：处理函数多收一个通用名
 _SKILL_ROUTES = {"GET": _skill_get, "PUT": _skill_put}
 #: ``/bots/<bot_id>/groups/discovered``（约定 v1.1 5.20.2）

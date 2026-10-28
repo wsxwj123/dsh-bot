@@ -934,6 +934,107 @@ def view(bot, bots):
     return {"fields": _fields(readonly, event_options()), "values": values}
 
 
+#: 刷新摘要前的备份文件名后缀（接口约定：``<yml>.bak-before-refresh-<YYYYMMDD>``，同日覆盖）
+REFRESH_BAK = ".bak-before-refresh-"
+
+
+def refresh_summary(channel, life_path, today=None):
+    """按 ``<channel>/CLAUDE.md`` 重算 ``persona_summary``（life-refresh-summary 接口）。
+
+    两个 HTTP 入口（管理台、适配服务）共用这一份：清洗函数固定调用新建路径的
+    ``hub_addbot._persona_summary``，绝不在这里复制一份九步清洗，否则两边会漂。
+
+    - 人设文件不存在 → ``LifeError(422, "no_persona")``，生活设定一个字节都不动；
+    - 人设清洗后为空 → 备份后删键，``empty: true``；
+    - 摘要没变 → 不写盘、不备份，``changed: false``；
+    - 其余 → 备份到 ``<yml>.bak-before-refresh-<YYYYMMDD>``（同一天覆盖），原子改写、
+      保留原权限位与换行风格。
+    """
+    from moments import hub_addbot        # 延迟 import：它在导入期就 import 本模块，顶部会循环
+
+    persona_path = os.path.join(channel, "CLAUDE.md")
+    try:
+        fd = os.open(persona_path, _READ_FLAGS)
+    except FileNotFoundError:
+        raise LifeError(422, "no_persona", "这只 bot 还没有人设文件，先写好 CLAUDE.md 再来刷新") from None
+    except OSError:
+        raise LifeError(500, "io_error", "这只 bot 的人设文件读不出来") from None
+    with os.fdopen(fd, "rb") as f:
+        try:
+            opened = os.fstat(f.fileno())
+            if not stat.S_ISREG(opened.st_mode):        # FIFO / 设备：不把它当成空人设
+                raise LifeError(500, "io_error", "这只 bot 的人设文件不是普通文件")
+            persona_text = f.read().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            raise LifeError(500, "io_error", "这只 bot 的人设文件不是合法的 UTF-8 文本") from None
+    summary = hub_addbot._persona_summary(persona_text)
+    # 人设正文只在内存里过一遍清洗，绝不进日志、响应或报错文案。
+
+    try:
+        before = os.lstat(life_path)
+    except FileNotFoundError:
+        raise LifeError(422, "no_life_config", "这只 bot 还没有生活设定文件，先建好再来刷新") from None
+    except OSError:
+        before = None
+    if before is None or stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise LifeError(500, "io_error", "这只 bot 的生活设定文件读不出来")
+    data, current = _read(life_path, before)
+    if data is None:
+        raise LifeError(500, "io_error", "这只 bot 的生活设定文件读不出来")
+    try:
+        text = data.decode("utf-8")
+        doc = yaml.safe_load(text)
+    except UnicodeDecodeError:
+        raise LifeError(500, "io_error", "这只 bot 的生活设定文件不是合法的 UTF-8 文本") from None
+    except Exception:                       # noqa: BLE001  坏 YAML 的原话带文件内容，不往外带
+        raise LifeError(500, "io_error", "这只 bot 的生活设定文件格式有错，请先修好") from None
+    doc = {} if doc is None else doc
+    if not isinstance(doc, dict):
+        raise LifeError(500, "io_error", "这只 bot 的生活设定文件格式有错，请先修好")
+
+    old = doc.get("persona_summary")
+    if isinstance(old, str):
+        old_summary = old.rstrip("\n")
+    elif old is None:
+        old_summary = ""
+    else:
+        old_summary = None                  # 认不出的类型：当作不同，照常覆盖
+    if old_summary is not None and old_summary == summary:
+        return {"ok": True, "changed": False, "preview": "", "message": "摘要没变"}
+
+    # 换行风格跟着原文件：CRLF 的文件先按 LF 改，写回时再还原
+    crlf = "\r\n" in text
+    work = text.replace("\r\n", "\n") if crlf else text
+    try:
+        root = _layout(work, ("persona_summary",))
+    except LifeError:
+        raise LifeError(500, "io_error", "生活设定文件的写法这里改不了，请直接改文件") from None
+    new_text = _splice(work, root, {"persona_summary": summary or None})
+    if crlf:
+        new_text = new_text.replace("\n", "\r\n")
+
+    stamp = today or datetime.date.today().strftime("%Y%m%d")
+    backup = life_path + REFRESH_BAK + stamp
+    had_backup = os.path.lexists(backup)    # 当天已有备份：失败时不能把它删掉
+    try:
+        _replace(backup, text, 0o600)       # 原文逐字节；同日覆盖
+    except OSError:
+        raise LifeError(500, "io_error", "备份生活设定失败，文件没有动") from None
+    try:
+        _replace(life_path, new_text, stat.S_IMODE(current.st_mode))
+    except OSError:
+        if not had_backup:                  # 这次才建的备份：写失败就不留
+            with contextlib.suppress(OSError):
+                os.unlink(backup)
+        raise LifeError(500, "io_error", "写生活设定失败，原文件没有动") from None
+
+    if not summary:
+        return {"ok": True, "changed": True, "empty": True, "preview": "",
+                "message": "人设是空的，已删掉摘要"}
+    return {"ok": True, "changed": True, "empty": False, "preview": summary[:80],
+            "message": "摘要已按人设更新"}
+
+
 def save(bot, bots, values):
     """PUT 第 6 步起（5.1）：成功回给人看的那句话，失败抛 LifeError。``values`` 已确认是对象。
 
