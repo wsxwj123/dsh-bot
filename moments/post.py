@@ -182,6 +182,10 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
     用于：
       1. should_post_moment 检查 find_activity trigger 是否触发
       2. 拼 MOMENT_PROMPT 时注入 style_guidance 调圈文风格
+
+    ``force=True``（用户明确要求发朋友圈时由 ``scripts/bot_post_moment.py`` 传）**只**跳过
+    「同 kind 4 小时不重发」这一条闸；契机判定（no material）、静默期、每日上限都不受影响。
+    别把它当总开关用。
     """
     moments_cfg = (global_cfg or {}).get("moments", {})
     if not moments_cfg.get("enabled", True):
