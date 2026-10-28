@@ -399,7 +399,8 @@ def make_backup(kind, content):
 
     id 在 save 与 restore 两类之间也唯一：两类只是前缀不同，同一秒各取一份会拿到同一个
     bid，`list_backups` 按 id 排序时同 id 的先后就随 `os.listdir` 漂移（锁定用例取第一个
-    同 id 期望 kind=restore 会随机红）。取名时把两个前缀都算占用。"""
+    同 id 期望 kind=restore 会随机红）。取名时把两个前缀都算占用。**仅单进程内**：
+    跨进程（8765 与 17990 同秒各写一份）仍可能重名，边界见 PLAN-dsh-params-page R3。"""
     prefix = SAVE_PREFIX if kind == "save" else RESTORE_PREFIX
     base = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     bids = [base] + ["%s-%02d" % (base, i) for i in range(1, 100)]

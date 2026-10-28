@@ -19,7 +19,7 @@ v1.0 的补充（列表四个键、迁出标记、新建新字段、归档 shell
 （``bots_client`` / ``bot_launchd`` / ``config_sources`` / ``gateway_client``），这里不重写。
 只有「读 bot 配置」不走管理台那条共用读法，见 ``_own_bots``。
 
-同一个进程里还挂着管理台的三页与它们的接口（``INTERFACE-页面服务.md``，见「管理台三页」一节）：
+同一个进程里还挂着管理台的四页与它们的接口（``INTERFACE-页面服务.md``，见「管理台四页」一节）：
 处理函数就是 8765 上那几个（``hub_routes``），这里只换鉴权（同一个令牌）、按原样路径对名单、
 渲染时把导航条换成一行占位注释，别的照 8765 收尾。
 
@@ -3326,7 +3326,7 @@ _SKILL_ROUTES = {"GET": _skill_get, "PUT": _skill_put}
 _DISCOVERED_ROUTES = {"GET": _groups_discovered}
 
 
-# ---------------------------------------------------------------- 管理台三页（页面服务）
+# ---------------------------------------------------------------- 管理台四页（页面服务）
 #
 # INTERFACE-页面服务.md。处理函数一个不重写：调的就是 8765 上注册的那几个函数对象（hub_routes）。
 # 它们在 8765 上还依赖几样应用级的东西，这里照搬：JSON 键不重排、重启任务表、getMe 地址的形状检查
@@ -3494,7 +3494,7 @@ def create_app():
     # 框架读这种流时最多读到这个数就停（不抛错、不读进更多）。多给 1 个字节，_json_object 才分得清
     # 「正好 MAX_BODY」与「超了」。
     app.config["MAX_CONTENT_LENGTH"] = MAX_BODY + 1
-    # 管理台三页的处理函数在 8765 上依赖的应用级设置（适配接口自己的响应不经 jsonify，不受影响）：
+    # 管理台四页的处理函数在 8765 上依赖的应用级设置（适配接口自己的响应不经 jsonify，不受影响）：
     app.json.sort_keys = False              # 同 web.py：JSON 的键照处理函数给的顺序，不重排
     app.extensions["hub_restart_jobs"] = bots_client.RestartJobs()      # 同 hub_routes 的 _init_restart_jobs
     app.extensions["hub_addbot_base_error"] = _addbot_base_error()

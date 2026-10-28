@@ -45,7 +45,7 @@
 | `GET`、`PUT /bots/{id}/voice` | 语音编号、语音模型、文字语言、语音语言 |
 | `GET`、`POST /bots/{id}/groups` | 在哪些群、各群的设置；进群、退群 |
 
-适配服务还提供 `/hub/bots`、`/hub/addbot`、`/hub/dsh-model` 三个页面及其接口，供壳转发显示。oauth 账号管理的 6 个接口（`GET /hub/api/oauth/accounts`、`POST /hub/api/oauth/start`、`POST /hub/api/oauth/submit`、`GET /hub/api/oauth/status`、`POST /hub/api/oauth/accounts/<provider>/<email_hash>/activate`、`DELETE /hub/api/oauth/accounts/<provider>/<email_hash>`）也在同一份名单里，经同一套适配令牌鉴权后转发。
+适配服务还提供 `/hub/bots`、`/hub/addbot`、`/hub/dsh-model`、`/hub/params` 四个页面及其接口，供壳转发显示。页面与接口的处理函数就是 8765 上同一批（`moments/hub_routes.py`），只是换成适配令牌鉴权、按原样路径对名单、渲染时把导航条换成一行 `<!-- console-nav -->`；完整名单与错误形状见 `.devflow/INTERFACE-页面服务.md`。参数页（系统参数）的接口是 `GET/POST /hub/api/params`、`GET/POST /hub/api/params/raw`、`GET /hub/api/params/backups`、`POST /hub/api/params/backups/<备份 id>/restore`，读写 `HUB_CONFIGS_DSH_DIR` 下的 `_global.yml`（写入先备份、带 version 乐观锁）。oauth 账号管理的 6 个接口（`GET /hub/api/oauth/accounts`、`POST /hub/api/oauth/start`、`POST /hub/api/oauth/submit`、`GET /hub/api/oauth/status`、`POST /hub/api/oauth/accounts/<provider>/<email_hash>/activate`、`DELETE /hub/api/oauth/accounts/<provider>/<email_hash>`）也在同一份名单里，经同一套适配令牌鉴权后转发。
 
 ## 安全边界
 
