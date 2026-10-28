@@ -999,7 +999,10 @@ def _render_yml(fields, target, namespace=None, life_config=None, features=None)
 
     ``life_config``（``life_target`` 给的生活设定文件绝对路径）给了才写一行，``lay_down`` 照它生成那个文件。
     ``features``（九个键的布尔表）给了才写 ``features:`` 块，九个键显式写出（5.19.4）；适配接口自己
-    拼这块，不传这个参数，产出逐字节不变。
+    拼这块，不传这个参数。
+
+    ``gateway.botlife_db`` 总是写：网关读不到这个键就退回仓库根的空库，新建的 bot 会看不到任何人的
+    朋友圈。路径与 claude 侧共用一份，``~`` 由网关侧 expandHome 展开。
     """
     text = ("id: %s\n"
             "display_name: %s\n"
@@ -1015,6 +1018,8 @@ def _render_yml(fields, target, namespace=None, life_config=None, features=None)
     if features is not None:
         # json.dumps 出来的 ``{"voice": false, …}`` 是合法 YAML，键序就是九个键的固定顺序
         text += "features: %s\n" % json.dumps(features, ensure_ascii=False)
+    # 无条件写：缺这个键时网关读默认值（仓库根的空 state.db），新 bot 查不到朋友圈
+    text += "gateway:\n  botlife_db: ~/claudebotlife/state.db\n"
     return text
 
 
