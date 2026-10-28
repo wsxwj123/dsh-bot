@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
 import quota
-from prefilter import DEFAULT_SILENCE_THRESHOLD_MIN, _positive_int_or_default
+from prefilter import DEFAULT_SILENCE_THRESHOLD_MIN, positive_int_or_default
 from school_calendar import IN_SESSION, TERM_LABEL_ZH
 from claude_cli import call_aux
 
@@ -100,7 +100,7 @@ def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
     has_strong_signal = bool(situation.sporadic or wildcard
                               or (world and world.is_special_date))
     moments_cfg = (global_cfg or {}).get("moments")
-    threshold = _positive_int_or_default(
+    threshold = positive_int_or_default(
         moments_cfg.get("silence_threshold_minutes") if isinstance(moments_cfg, dict) else None)
     if (not force and since_user_min is not None and since_user_min < threshold
             and not has_strong_signal):

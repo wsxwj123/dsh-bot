@@ -37,6 +37,9 @@ jiwen:
 
 @pytest.fixture
 def cfg(tmp_path, monkeypatch):
+    # configs_dir() 优先 HUB_CONFIGS_DSH_DIR（根 conftest 会给每条用例设一个空目录），
+    # 这里一并钉到 tmp，用例测的才是自己这份配置。
+    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(tmp_path))
     monkeypatch.setenv("HUB_CONFIGS_DIR", str(tmp_path))
     p = tmp_path / "_global.yml"
     p.write_text(SRC, encoding="utf-8")
