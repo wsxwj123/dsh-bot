@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
 import quota
+from prefilter import DEFAULT_SILENCE_THRESHOLD_MIN, _positive_int_or_default
 from school_calendar import IN_SESSION, TERM_LABEL_ZH
 from claude_cli import call_aux
 
@@ -72,14 +73,16 @@ user 是内部角色标识，不是实际称呼。朋友圈正文不得原样写
 
 def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
                        since_user_min, now: datetime,
-                       db_module=None, force=False) -> tuple[bool, str, str]:
+                       db_module=None, force=False,
+                       global_cfg=None) -> tuple[bool, str, str]:
     """朋友圈情境驱动闸——独立于 judge.judge_action。
 
     返回 (go: bool, kind: str, reason: str)。
 
     决策顺序：
     1. 状态硬闸：sleeping → 否；busy_class → 否；busy_work → 仅强信号
-    2. 静默期：since_user_min < 30 且无 sporadic/wildcard → 否
+    2. 静默期：since_user_min < moments.silence_threshold_minutes（缺省/非法 30）
+       且无 sporadic/wildcard → 否；force=True 时跳过本条
     3. 触发素材命中（按优先级取首个）→ kind
     4. 概率门：弱信号按概率发；强信号必发
     5. 同 kind 4h 不重发（防过密）
@@ -96,8 +99,12 @@ def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
     # ─── 2. 静默期（避免在用户聊天时刷屏）────────────
     has_strong_signal = bool(situation.sporadic or wildcard
                               or (world and world.is_special_date))
-    if since_user_min is not None and since_user_min < 30 and not has_strong_signal:
-        return (False, "skip", f"silence({since_user_min}min<30)")
+    moments_cfg = (global_cfg or {}).get("moments")
+    threshold = _positive_int_or_default(
+        moments_cfg.get("silence_threshold_minutes") if isinstance(moments_cfg, dict) else None)
+    if (not force and since_user_min is not None and since_user_min < threshold
+            and not has_strong_signal):
+        return (False, "skip", f"silence({since_user_min}min<{threshold})")
 
     # ─── 2.5 force：用户明确要求发圈，直接用注入主题的 hobby ──────────
     # 不走 3 的契机优先级——否则 wildcard/sporadic 命中会把用户指定的主题顶掉
@@ -207,8 +214,8 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
       1. should_post_moment 检查 find_activity trigger 是否触发
       2. 拼 MOMENT_PROMPT 时注入 style_guidance 调圈文风格
 
-    ``force=True``（用户明确要求发朋友圈时由 ``scripts/bot_post_moment.py`` 传）**只**跳过
-    「同 kind 4 小时不重发」这一条闸；契机判定（no material）、静默期、每日上限都不受影响。
+    ``force=True``（用户明确要求发朋友圈时由 ``scripts/bot_post_moment.py`` 传）跳过
+    「静默期」和「同 kind 4 小时不重发」两条闸；契机判定（no material）、每日上限都不受影响。
     别把它当总开关用。
     """
     moments_cfg = (global_cfg or {}).get("moments", {})
@@ -227,6 +234,7 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
     go, kind, reason = should_post_moment(
         situation, world, wildcard, mood, jiwen_info,
         bot_cfg_with_id, since_user_min, now, db_module=db, force=force,
+        global_cfg=global_cfg,
     )
     if not go:
         return _skip(bot_id, out, reason)

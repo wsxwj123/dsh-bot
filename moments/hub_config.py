@@ -54,7 +54,11 @@ _MISSING = object()
 
 
 def configs_dir():
-    return os.environ.get("HUB_CONFIGS_DIR") or os.path.join(_REPO_ROOT, "configs")
+    # dsh 的管理台进程把 dsh 配置根放在 HUB_CONFIGS_DSH_DIR，HUB_CONFIGS_DIR 可能指向
+    # 故意留空的 legacy 根；优先 dsh 根，参数页才和网关脚本读同一份 _global.yml。
+    return (os.environ.get("HUB_CONFIGS_DSH_DIR")
+            or os.environ.get("HUB_CONFIGS_DIR")
+            or os.path.join(_REPO_ROOT, "configs"))
 
 
 def global_path():
@@ -155,8 +159,13 @@ def _build_schema():
     meta["moments.enabled"] = _item("bool", True, None, None, "朋友圈总开关", "")
     meta["moments.daily_post_limit_per_bot"] = _item(
         "int", 3, 0, 50, "每个 bot 每天发帖上限", "条")     # moments/post.py 的回落值
+    # 两个静默阈值互相独立：嵌套键管发朋友圈，顶层键管主动开口（见 prefilter.py）
     meta["moments.silence_threshold_minutes"] = _item(
-        "int", prefilter.DEFAULT_SILENCE_THRESHOLD_MIN, 1, 1440, "静默判定时长", "分钟")
+        "int", prefilter.DEFAULT_SILENCE_THRESHOLD_MIN, 1, 1440,
+        "刚聊完天后多久内不主动发朋友圈", "分钟")
+    meta["silence_threshold_minutes"] = _item(
+        "int", prefilter.DEFAULT_SILENCE_THRESHOLD_MIN, 1, 1440,
+        "刚聊完天后多久内不主动找你", "分钟")
     meta["max_calls_per_5h"] = _item(
         "int", quota.DEFAULT_MAX_CALLS_PER_5H, 1, 1000, "5 小时窗口调用上限", "次")
 

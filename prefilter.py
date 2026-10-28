@@ -8,6 +8,13 @@
 DEFAULT_SILENCE_THRESHOLD_MIN = 30
 
 
+def _positive_int_or_default(value, default=DEFAULT_SILENCE_THRESHOLD_MIN) -> int:
+    """配置里的分钟数：只认正整数，0/负数/非数字一律回退默认，绝不抛错阻断启动。"""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return default
+
+
 def hard_prefilter(now, situation, world, wildcard, mood, since_user_min,
                     recent_msgs, global_cfg) -> str | None:
     # 例外：CLAUDEBOTLIFE_BYPASS_SILENCE=1 时**跳过所有硬规则**
@@ -16,8 +23,8 @@ def hard_prefilter(now, situation, world, wildcard, mood, since_user_min,
     if os.environ.get("CLAUDEBOTLIFE_BYPASS_SILENCE") == "1":
         return None
 
-    silence_threshold = (global_cfg or {}).get("silence_threshold_minutes",
-                                                DEFAULT_SILENCE_THRESHOLD_MIN)
+    silence_threshold = _positive_int_or_default(
+        (global_cfg or {}).get("silence_threshold_minutes"))
 
     # 1. 静默期判定（核心）
     if since_user_min is not None and since_user_min < silence_threshold:

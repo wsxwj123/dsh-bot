@@ -29,9 +29,11 @@ def _configs_dir() -> str:
 
 
 def load_global() -> dict:
-    if not os.path.exists(GLOBAL_CFG_PATH):
+    # 路径每次现算：网关用 HUB_CONFIGS_DIR 指定配置根，导入期快照会永远读仓库 configs/
+    path = os.path.join(_configs_dir(), "_global.yml")
+    if not os.path.exists(path):
         return {}
-    with open(GLOBAL_CFG_PATH, encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 

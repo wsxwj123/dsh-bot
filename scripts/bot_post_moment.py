@@ -30,6 +30,10 @@ from moments.post import maybe_post_moment
 
 SitNS = namedtuple("Situation", ["recurring", "sporadic", "hobby"])
 
+# 用户明确要求发圈：用一个远超阈值的分钟数表示"不存在静默期"。
+# 不用 None —— None 在这条链上已有"不知道用户多久没说话"的含义。
+FORCE_SINCE_USER_MIN = 999
+
 
 USAGE = """用法：bot_post_moment.py <bot_id> [topic_hint] [visibility]
 
@@ -72,13 +76,13 @@ def main():
     if sit.recurring is not None and sit.recurring.state in ("sleeping", "busy_class"):
         sit = SitNS(dataclasses.replace(sit.recurring, state="free"), sit.sporadic, sit.hobby)
 
-    # 关掉 silence/limit（用户主动要求，应优先于自动节流）
-    g_force = {**g, "moments": {**(g.get("moments") or {}), "silence_threshold_minutes": 0}}
+    # 关掉每日上限（用户主动要求，应优先于自动节流）；静默期由 force=True 跳过
     cfg_force = {**cfg, "moments_daily_limit": 999}
 
     why = {}
     mid = maybe_post_moment(bot_id, cfg_force, now, sit, world, wildcard,
-                            mood, factors, 999, g_force, force=True, out=why)
+                            mood, factors, FORCE_SINCE_USER_MIN, g,
+                            force=True, out=why)
     if not mid:
         # 2026-10-28：把真因照实写出来。原来笼统一句「LLM 返回空 / 触发独白闸 / 无素材」
         # 会把上游给的具体原因（daily_limit(N) / same_kind(X) within 4h 等）盖掉，排查被误导过。
