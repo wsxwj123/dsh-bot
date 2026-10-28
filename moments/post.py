@@ -99,6 +99,12 @@ def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
     if since_user_min is not None and since_user_min < 30 and not has_strong_signal:
         return (False, "skip", f"silence({since_user_min}min<30)")
 
+    # ─── 2.5 force：用户明确要求发圈，直接用注入主题的 hobby ──────────
+    # 不走 3 的契机优先级——否则 wildcard/sporadic 命中会把用户指定的主题顶掉
+    # （2026-10-28 真机：让小雪发「测试2」，发出来却是 wildcard 的「周三下午最容易飘」）
+    if force and situation.hobby:
+        return (True, "hobby", situation.hobby.get("name", "hobby"))
+
     # ─── 3. 触发素材命中 ─────────────────────────────
     kind = None
     reason = ""
