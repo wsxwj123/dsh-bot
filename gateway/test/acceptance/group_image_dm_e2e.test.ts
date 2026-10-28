@@ -222,3 +222,78 @@ test('契约 图在白名单外：近况只留 [图片] 占位，不附 image �
   expect(p.text).not.toContain('看不到内容')
   expect(p.images ?? 0).toBe(0)
 })
+
+// ───────── 追加：跨通道去重与水位推进（以上用例不动） ─────────
+
+test('场景5 同一条群图被两只 bot 各记一遍（30 分钟内）：私聊回合 recap 与群图通道合计只附 1 张', async () => {
+  let img = ''
+  const { tg, b } = await setup({ prepare: d => { img = join(d.shared, 'same.png'); writeFileSync(img, PNG) } })
+  const ts = Date.now() - 5 * MIN
+  const messageId = nextSeedId++
+  const imagePath = realpathSync(img)
+  // 同一条真人消息被两只 bot 各记一行：同 chat/ts/from_id，仅 observed_by 不同
+  for (const observedBy of ['a', 'peer_bot']) {
+    seed(b, { ts, message_id: messageId, text: '', attachment_kind: 'photo', image_path: imagePath, observed_by: observedBy })
+  }
+  tg.pushText(OWNER, '同图去重甲')
+  const p = (await until(() => promptWith(b, '同图去重甲'), '私聊提示', 20_000))!
+  expect(p.images).toBe(1)
+})
+
+test('场景6 第二条私聊（紧接场景5 的消息）：images 为 0，水位已推进', async () => {
+  let img = ''
+  const { tg, b } = await setup({ prepare: d => { img = join(d.shared, 'same.png'); writeFileSync(img, PNG) } })
+  const ts = Date.now() - 5 * MIN
+  const messageId = nextSeedId++
+  const imagePath = realpathSync(img)
+  for (const observedBy of ['a', 'peer_bot']) {
+    seed(b, { ts, message_id: messageId, text: '', attachment_kind: 'photo', image_path: imagePath, observed_by: observedBy })
+  }
+  tg.pushText(OWNER, '同图水位一')
+  await until(() => promptWith(b, '同图水位一'), '第一轮私聊提示', 20_000)
+  await until(() => metaGet(b, `group_recap:${DM}`), 'group_recap 水位落盘', 15_000)
+  tg.pushText(OWNER, '同图水位二')
+  const p2 = (await until(() => promptWith(b, '同图水位二'), '第二轮私聊提示', 20_000))!
+  expect(p2.images ?? 0).toBe(0)
+})
+
+test('场景7 4 条 31 分钟前的带图行：私聊首轮附 3 张（近况上限），下一轮 0 张', async () => {
+  const images: string[] = []
+  const { tg, b } = await setup({
+    prepare: d => {
+      for (let i = 0; i < 4; i++) {
+        const p = join(d.shared, `recap-${i}.png`)
+        writeFileSync(p, PNG)
+        images.push(realpathSync(p))
+      }
+    },
+  })
+  const base = Date.now() - 31 * MIN
+  for (let i = 0; i < 4; i++) {
+    seed(b, { ts: base + i * 1000, text: `四图近况${i}`, attachment_kind: 'photo', image_path: images[i] })
+  }
+  tg.pushText(OWNER, '四图私聊一')
+  const p = (await until(() => promptWith(b, '四图私聊一'), '私聊提示', 20_000))!
+  expect(p.images).toBe(3)
+  await until(() => metaGet(b, `group_recap:${DM}`), 'group_recap 水位落盘', 15_000)
+  tg.pushText(OWNER, '四图私聊二')
+  const p2 = (await until(() => promptWith(b, '四图私聊二'), '第二轮私聊提示', 20_000))!
+  expect(p2.images ?? 0).toBe(0)
+})
+
+test('场景8 私聊 /clear 之后：下一条私聊重新带近况和图', async () => {
+  let img = ''
+  const { tg, b } = await setup({ prepare: d => { img = join(d.shared, 'recap.png'); writeFileSync(img, PNG) } })
+  seedOldImageRow(b, img, '带图近况戊')
+  tg.pushText(OWNER, '清前先聊')
+  const p1 = (await until(() => promptWith(b, '清前先聊'), '私聊提示', 20_000))!
+  expect(p1.images ?? 0).toBeGreaterThanOrEqual(1)
+  await until(() => evs(b, 'turn.end').length >= 1, '第一轮结束', 20_000)
+  await until(() => metaGet(b, `group_recap:${DM}`), 'group_recap 水位落盘', 15_000)
+  tg.pushText(OWNER, '/clear')
+  await until(() => isCleared(b, DM), '/clear 清空四个水位', 20_000)
+  tg.pushText(OWNER, '清后一问')
+  const p2 = (await until(() => promptWith(b, '清后一问'), '清后提示', 20_000))!
+  expect(p2.text).toContain('带图近况戊')
+  expect(p2.images).toBe(1)
+})
