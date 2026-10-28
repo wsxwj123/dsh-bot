@@ -199,10 +199,15 @@ export class Ledger {
       try { return this.db.query<{ ts: number; text: string }, [string, number, number]>(sql).all(chatId, afterMs, limit) } catch { return [] }
     }
     const rows: { ts: number; from: 'owner' | 'bot'; text: string }[] = []
+    // SQLite 的 trim() 只去半角空格，换行/制表符/全角空格会漏过来变成空行占额度，所以 JS 侧再兜一次
+    // （`\s` 在 JS 里覆盖全角空格以外的所有空白；全角空格 U+3000 单独判）
+    const blank = (s: string): boolean => !s.replace(/[\s\u3000]/g, '')
     for (const r of query(`SELECT ts, text FROM inbound WHERE chat_id = ? AND kind = 'user' AND ts > ? AND text IS NOT NULL AND trim(text) <> '' ORDER BY ts DESC, id DESC LIMIT ?`)) {
+      if (blank(r.text)) continue
       rows.push({ ts: r.ts, from: 'owner', text: r.text })
     }
     for (const r of query(`SELECT sent_at AS ts, text FROM outbound WHERE chat_id = ? AND kind = 'text' AND state = 'sent' AND sent_at > ? AND text IS NOT NULL AND trim(text) <> '' ORDER BY sent_at DESC, id DESC LIMIT ?`)) {
+      if (blank(r.text)) continue
       rows.push({ ts: r.ts, from: 'bot', text: r.text })
     }
     return rows.sort((a, b) => a.ts - b.ts).slice(-limit)
