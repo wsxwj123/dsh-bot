@@ -1282,9 +1282,10 @@ export class Engine {
     if (seg.needs_seed) { this.ledger.segmentSeeded(seg.id); seg.needs_seed = 0 }
     try {
       const bk = this.keyOf(this.brain)
-      // 每轮都问一次 tracker：模型标识变了它会清空旧判断（换回原模型也重新尝试附图）
       const hasImages = blocks.some(b => typeof b !== 'string')
-      const attachImages = hasImages && this.imageSupport.shouldAttachImages(bk)
+      // 每轮都先问 tracker（不能和 hasImages 短路相与）：纯文本回合也要让它观测到模型标识变化并清空旧判断
+      const imageAllowed = this.imageSupport.shouldAttachImages(bk)
+      const attachImages = hasImages && imageAllowed
       let res: { stopReason?: string }
       try {
         res = await conn.request<{ stopReason?: string }>('session/prompt', { sessionId, prompt: promptItems(blocks, !attachImages) }, 0)
