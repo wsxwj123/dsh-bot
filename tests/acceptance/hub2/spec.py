@@ -31,6 +31,8 @@ KEYS += [("jiwen.tick_interval_min", "int", 1, 60)]
 KEYS += [("moments.enabled", "bool", None, None)]
 KEYS += [("moments.daily_post_limit_per_bot", "int", 0, 50)]
 KEYS += [("moments.silence_threshold_minutes", "int", 1, 1440)]
+# 2026-10-28：静默阈值拆成两个独立数字，顶层这个管「主动找你说话」（嵌套那个管发朋友圈）
+KEYS += [("silence_threshold_minutes", "int", 1, 1440)]
 KEYS += [("max_calls_per_5h", "int", 1, 1000)]
 
 KEY_SET = {k for k, _, _, _ in KEYS}
@@ -63,6 +65,7 @@ _defaults: &base          # 锚点：K8 要求原样保留，不许被展开
   retry: 3
   timeout_sec: 30
 
+silence_threshold_minutes: 30   # 刚聊完天后多久内不主动找你（主动开口）
 moments:
   enabled: true
   daily_post_limit_per_bot: 5
@@ -127,4 +130,5 @@ EXPECTED_VALUES["jiwen.tick_interval_min"] = 5
 EXPECTED_VALUES["moments.enabled"] = True
 EXPECTED_VALUES["moments.daily_post_limit_per_bot"] = 5
 EXPECTED_VALUES["moments.silence_threshold_minutes"] = 30
+EXPECTED_VALUES["silence_threshold_minutes"] = 30
 EXPECTED_VALUES["max_calls_per_5h"] = 100
