@@ -404,7 +404,7 @@ export class Engine {
       },
       {
         name: 'moments',
-        description: '朋友圈：recent 看最近的圈（whose：self=你自己发的、user=主人/对方发的、或别的 bot 的 id；对方说"你的朋友圈/我朋友圈"时注意别传反——问他自己发的用 user，问你自己发的才用 self。days 默认 7）；like 点赞或取消（moment_id）；reply 评论或回复评论（moment_id、parent_comment_id（评论圈本身填 0）、text、可选 image）；post 发一条圈（可选 topic、visibility=public/private）；set_image 给圈配图（moment_id、images）；delete_comment 删自己的评论（comment_id）。',
+        description: '朋友圈：recent 看最近的圈（whose：self=你自己发的、user=主人/对方发的、或别的 bot 的 id；对方说"你的朋友圈/我朋友圈"时注意别传反——问他自己发的用 user，问你自己发的才用 self。days 默认 7；7 天查不到时把 days 放宽到 30 再查一次，别直接说"你没发过"）；like 点赞或取消（moment_id）；reply 评论或回复评论（moment_id、parent_comment_id（评论圈本身填 0）、text、可选 image）；post 发一条圈（可选 topic、visibility=public/private）；set_image 给圈配图（moment_id、images）；delete_comment 删自己的评论（comment_id）。',
         inputSchema: {
           type: 'object',
           properties: {
