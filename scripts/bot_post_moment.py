@@ -48,10 +48,12 @@ def main():
     wildcard = wc_mod.pick_today_wildcard(bot_id, now)
     mood, factors = mood_at(now, bot_id, sit, world, cfg)
 
-    # 用户主动要求 → 强行注入 hobby（按 topic_hint 或随机抽个）
-    if topic_hint and not sit.hobby:
+    # 用户主动要求 → 强行注入 hobby。没传 topic 也要注入：素材判定会给"no material"挡掉，
+    # 而这条路径本来就是"对方在聊天里让我发一条"，不该再要求程序自己找到发圈理由
+    if not sit.hobby:
+        name = f"想分享：{topic_hint}" if topic_hint else "想发条朋友圈"
         sit = SitNS(sit.recurring, sit.sporadic,
-                    {"name": f"想分享：{topic_hint}", "effect": topic_hint, "kind": "obsession"})
+                    {"name": name, "effect": topic_hint or "", "kind": "obsession"})
 
     # 用户正在聊天里让她发圈：人显然醒着、也不在上课，作息表上的"睡觉/上课"不拦（真机 M4：半夜聊着天要发圈，被"睡觉"挡住）
     if sit.recurring is not None and sit.recurring.state in ("sleeping", "busy_class"):
