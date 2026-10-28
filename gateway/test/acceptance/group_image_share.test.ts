@@ -12,6 +12,11 @@ import { FRIEND, Gateway, logEvents, makeBot, OWNER, prompts, readJsonl, sleep, 
 const GROUP = -1001777
 const A_NAME = 'bot_a_dsh_bot'
 const MiB = 1024 * 1024
+// 读图链路会校验图片头，夹具必须是真 PNG：1×1 RGBA
+const PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+)
 
 let tgs: FakeTelegram[] = []
 let bots: BotEnv[] = []
@@ -298,7 +303,7 @@ test('清单18 群记录写入失败（目录只读）：已发出的群消息�
 
 test('清单19 私聊回合也附群记录里的图（2026-10-27 用户口径变更：私聊里被问群图不能凭空编）', async () => {
   let img = ''
-  const { tg, b } = await setup({ prepare: d => { img = join(d.shared, 'group-only.png'); writeFileSync(img, 'png') } })
+  const { tg, b } = await setup({ prepare: d => { img = join(d.shared, 'group-only.png'); writeFileSync(img, PNG) } })
   seed(b, { text: '群里的图', attachment_kind: 'photo', image_path: img })
   tg.pushText(OWNER, '私聊一句轮十九')
   const p = (await until(() => promptWith(b, '私聊一句轮十九'), '私聊这一轮提示', 15_000))!

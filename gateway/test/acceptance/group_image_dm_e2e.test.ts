@@ -15,6 +15,8 @@ setDefaultTimeout(60_000)
 
 const GROUP = -1001777
 const A_NAME = 'bot_a_dsh_bot'
+/** 主人的私聊 chat id：私聊回合里 group_recap / group_images_dm 的水位按它记 */
+const DM = String(OWNER)
 const MIN = 60_000
 const HOUR = 60 * MIN
 const MiB = 1024 * 1024
@@ -118,8 +120,8 @@ test('清单13 rollSegment（上下文超长换段）触发：四个跨聊天水
   tg.pushText(OWNER, '第一句话')
   await until(() => promptWith(b, '第一句话'), '第一轮提示')
   await until(() => evs(b, 'turn.end').length >= 1, '第一轮结束', 20_000)
-  seedWatermarks(b, String(GROUP))
-  expect(metaGet(b, `group_recap:${GROUP}`)).toBe('1700000000000')
+  seedWatermarks(b, DM)
+  expect(metaGet(b, `group_recap:${DM}`)).toBe('1700000000000')
   mkdirSync(b.acpState, { recursive: true })
   writeFileSync(join(b.acpState, 'next-error.txt'), "400 This model's maximum context length is 8192 tokens")
   tg.pushText(OWNER, '第二句话')
@@ -128,7 +130,7 @@ test('清单13 rollSegment（上下文超长换段）触发：四个跨聊天水
     '上下文超长换段',
     25_000,
   )
-  assertCleared(b, String(GROUP))
+  assertCleared(b, DM)
 })
 
 test('清单14 cmdClear（/clear）触发：四个跨聊天水位键都被清空', async () => {
@@ -137,11 +139,11 @@ test('清单14 cmdClear（/clear）触发：四个跨聊天水位键都被清空
   tg.pushText(OWNER, '清空前的一句话')
   await until(() => promptWith(b, '清空前的一句话'), '第一轮提示')
   await until(() => evs(b, 'turn.end').length >= 1, '第一轮结束', 20_000)
-  seedWatermarks(b, String(GROUP))
-  expect(metaGet(b, `group_recap:${GROUP}`)).toBe('1700000000000')
+  seedWatermarks(b, DM)
+  expect(metaGet(b, `group_recap:${DM}`)).toBe('1700000000000')
   tg.pushText(OWNER, '/clear')
-  await until(() => isCleared(b, String(GROUP)), '/clear 清空四个水位', 20_000)
-  assertCleared(b, String(GROUP))
+  await until(() => isCleared(b, DM), '/clear 清空四个水位', 20_000)
+  assertCleared(b, DM)
 })
 
 // ───────── 第 4 节清单 15、16：水位两阶段 ─────────
@@ -155,7 +157,7 @@ test('清单15 首次 prompt 成功且带图：group_recap 水位落盘', async 
   expect(p.text).toContain('带图近况甲')
   expect(p.text).not.toContain('看不到内容')
   expect(p.images ?? 0).toBeGreaterThanOrEqual(1)
-  const wm = await until(() => metaGet(b, `group_recap:${GROUP}`), 'group_recap 水位落盘', 15_000)
+  const wm = await until(() => metaGet(b, `group_recap:${DM}`), 'group_recap 水位落盘', 15_000)
   const n = Number(wm)
   expect(Number.isFinite(n)).toBe(true)
   expect(n).toBeGreaterThan(Date.now() - 48 * HOUR)
@@ -167,14 +169,14 @@ test('清单16 首轮失败（模型报错/重试用尽）：水位不落盘，�
   seedOldImageRow(b, img, '带图近况乙')
   const mid = tg.pushText(OWNER, '第一问 !empty:99:b')
   await until(() => inboundRow(b, OWNER, mid)?.state === 'dead', '第一条消息重试用尽', 30_000)
-  expect(metaGet(b, `group_recap:${GROUP}`) ?? '', '失败轮不应落盘水位').toBe('')
+  expect(metaGet(b, `group_recap:${DM}`) ?? '', '失败轮不应落盘水位').toBe('')
   const p1 = prompts(b).find(p => p.text.includes('第一问'))
   expect(p1?.text).toContain('带图近况乙')
   tg.pushText(OWNER, '第二问')
   const p2 = (await until(() => promptWith(b, '第二问'), '第二轮提示', 20_000))!
   expect(p2.text).toContain('带图近况乙')
   expect(p2.images ?? 0).toBeGreaterThanOrEqual(1)
-  await until(() => metaGet(b, `group_recap:${GROUP}`), '成功后 group_recap 水位落盘', 15_000)
+  await until(() => metaGet(b, `group_recap:${DM}`), '成功后 group_recap 水位落盘', 15_000)
 })
 
 // ───────── 错误契约：读图失败不附图，只留 [图片] 占位 ─────────
