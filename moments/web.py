@@ -910,9 +910,9 @@ def api_image_provider():
 
     持久化方式：直接改 _global.yml 的 image_generation 下三个字段之一。
     """
-    # 读写都走 hub_config 认的路径（HUB_CONFIGS_DIR 接缝）：原来 GET 读
-    # config_loader.GLOBAL_CFG_PATH（钉死仓库 configs/）、POST 写 hub_config 路径，
-    # 设了该 env 就读写分离，页面显示与磁盘不一致。
+    # 读写都走 hub_config 认的路径（HUB_CONFIGS_DIR 存在时优先，否则 HUB_CONFIGS_DSH_DIR）：
+    # 原来 GET 读 config_loader.GLOBAL_CFG_PATH（导入期钉死仓库 configs/）、POST 写
+    # hub_config 路径，设了该 env 就读写分离，页面显示与磁盘不一致。
     import yaml
     from moments import hub_config, provider_model
     g = yaml.safe_load(hub_config.read_global() or "") or {}

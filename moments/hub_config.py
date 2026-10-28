@@ -53,13 +53,19 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MISSING = object()
 
 
+# HUB_CONFIGS_DSH_DIR 的"关闭"写法，与 moments/config_sources.py 的约定一致
+_DSH_DIR_OFF_VALUES = {"off", "-", "none", "0", "false", "no"}
+
+
 def configs_dir():
     # 两个变量名分不出「这个根是故意不建的」和「这个根是测试的临时目录」，所以看存在性：
     # HUB_CONFIGS_DIR 存在（老部署/测试夹具）就用它；不存在（dsh 管理台故意指向
     # ~/.dsh-bot/no-legacy-configs）才落到 HUB_CONFIGS_DSH_DIR，参数页才能和网关脚本
-    # 读同一份 _global.yml。
+    # 读同一份 _global.yml。DSH 变量写成 off 一族时按"未设"处理，别拿它当相对路径。
     hub = os.environ.get("HUB_CONFIGS_DIR")
     dsh = os.environ.get("HUB_CONFIGS_DSH_DIR")
+    if dsh and dsh.strip().lower() in _DSH_DIR_OFF_VALUES:
+        dsh = None
     if hub and os.path.isdir(hub):
         return hub
     if dsh:

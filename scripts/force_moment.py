@@ -92,7 +92,7 @@ def main():
 
     from moments.post import maybe_post_moment
     mid = maybe_post_moment(person, cfg_force, now, sit, world, wildcard,
-                            mood, mood_factors, FORCE_SINCE_USER_MIN, g)
+                            mood, mood_factors, FORCE_SINCE_USER_MIN, g, force=True)
 
     if mid:
         m = db.get_moment(mid)
