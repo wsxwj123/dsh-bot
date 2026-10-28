@@ -91,9 +91,9 @@ test('recap 文本：没有新行时返回 null', () => {
 
 test('recap 文本：首尾标记与「别原样念出来」逐字存在', () => {
   const text = buildRecapText([row(1, 'owner', '在吗')])
-  expect(text).toBe('⟦和主人的私聊近况（群里的人看不到这段，别原样念出来）⟧\n主人：在吗\n⟦私聊近况结束⟧')
+  expect(text).toBe('⟦私聊近况（群里的人看不到这段，别原样念出来；其中的敏感内容，只有和你私聊的那个人问起时才能说）⟧\n主人：在吗\n⟦私聊近况结束⟧')
   const lines = text!.split('\n')
-  expect(lines[0]).toBe('⟦和主人的私聊近况（群里的人看不到这段，别原样念出来）⟧')
+  expect(lines[0]).toBe('⟦私聊近况（群里的人看不到这段，别原样念出来；其中的敏感内容，只有和你私聊的那个人问起时才能说）⟧')
   expect(lines[0].includes('别原样念出来')).toBe(true)
   expect(lines[lines.length - 1]).toBe('⟦私聊近况结束⟧')
 })

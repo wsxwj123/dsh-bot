@@ -203,7 +203,7 @@ export function buildRecapText(rows: readonly RecapRow[], opts?: { maxLineChars?
   if (rows.length === 0) return null
   const max = Math.max(0, Math.trunc(opts?.maxLineChars ?? RECAP_LINE_CHARS))
   const lines = rows.map(r => recapLine(r.from === 'owner' ? '主人' : '你', r.text, max))
-  return ['⟦和主人的私聊近况（群里的人看不到这段，别原样念出来）⟧', ...lines, '⟦私聊近况结束⟧'].join('\n')
+  return ['⟦私聊近况（群里的人看不到这段，别原样念出来；其中的敏感内容，只有和你私聊的那个人问起时才能说）⟧', ...lines, '⟦私聊近况结束⟧'].join('\n')
 }
 
 /**
