@@ -27,7 +27,7 @@ test('错误分类：六种明确"模型不接受图片"的文案都算，大小
   for (const message of messages) expect(isImagesUnsupportedError(message)).toBe(true)
 })
 
-test('错误分类：图片偶发错误不算（过大、格式、加载失败、上传失败、单独的 attachment）', () => {
+test('A 档图片偶发错误：不算"模型不接受图片"，但本轮要去图重发且不计入禁用', () => {
   const messages = [
     'image too large',
     'Image format is invalid',
@@ -36,7 +36,12 @@ test('错误分类：图片偶发错误不算（过大、格式、加载失败�
     'attachment is missing',
     'image processing error',
   ]
-  for (const message of messages) expect(isImagesUnsupportedError(message)).toBe(false)
+  const tracker = new ImagesUnsupportedTracker({ now: () => 1_000_000 })
+  for (const message of messages) {
+    expect(isImagesUnsupportedError(message)).toBe(false)
+    expect(tracker.onImageFailure(KEY, message)).toEqual({ unsupported: true, disabled: false })
+  }
+  expect(tracker.shouldAttachImages(KEY)).toBe(true)
 })
 
 test('判定口径：只有"不支持"语义与"图片"语义同时出现才算，缺一半或空消息都不算', () => {
@@ -83,13 +88,13 @@ test('换模型：禁用状态立即清空，换回原模型也重新尝试附�
   expect(tracker.onImageFailure(KEY, 'UNSUPPORTED_CONTENT')).toEqual({ unsupported: true, disabled: false })
 })
 
-test('普通图片错误：连续两次 image too large 不改视觉状态、不禁用、不打禁用 warn', () => {
+test('普通图片错误：连续两次 image too large 都去图重发，但不禁用、下轮仍带图、不打禁用 warn', () => {
   const dir = mkdtempSync(join(tmpdir(), 'noimg-'))
   try {
     const logger = new Logger({ dir })
     const tracker = new ImagesUnsupportedTracker({ now: () => 1_000_000, logger })
-    expect(tracker.onImageFailure(KEY, 'image too large')).toEqual({ unsupported: false, disabled: false })
-    expect(tracker.onImageFailure(KEY, 'image too large')).toEqual({ unsupported: false, disabled: false })
+    expect(tracker.onImageFailure(KEY, 'image too large')).toEqual({ unsupported: true, disabled: false })
+    expect(tracker.onImageFailure(KEY, 'image too large')).toEqual({ unsupported: true, disabled: false })
     expect(tracker.shouldAttachImages(KEY)).toBe(true)
     const lines = readLogLines(dir)
     expect(lines.filter((l) => l.event === 'prompt.images_unsupported')).toHaveLength(0)
