@@ -120,7 +120,7 @@ UNLISTED = [
     "/hub/api/bots/botalpha", "/hub/api/bots/restart/", "/hub/api/dsh-model/",
     "/hub/api/dsh-model//effort", "/hub/api/dsh-model/provider//models",
     "/hub/api/dsh-model/provider/x/preview/", "/hub/api/dsh-model/provider/x/rename",
-    "/hub/params", "/hub/provider", "/hub/setup", "/hub/healthz", "/hub/api/params",
+    "/hub/provider", "/hub/setup", "/hub/healthz",
     "/hub/api/provider", "/hub/api/claude-native/activate",
 ]
 
@@ -144,15 +144,40 @@ def test_框架的路由表里没有挂任何hub规则(client):
     assert [r.rule for r in client.application.url_map.iter_rules() if r.rule.startswith("/hub")] == []
 
 
-def test_名单正好29项_每项都是8765同一路径同一方法的那个处理函数(old_app):
+def test_名单正好36项_每项都是8765同一路径同一方法的那个处理函数(old_app):
     on_8765 = {}
     for rule in old_app.url_map.iter_rules():
         for method in rule.methods - {"HEAD", "OPTIONS"}:
             on_8765[(rule.rule, method)] = old_app.view_functions[rule.endpoint]
     pairs = [(rule, m, fn) for rule, methods in svc._HUB_ROUTES for m, fn in methods.items()]
-    assert len(pairs) == 29, "接口约定第 2 节是 3 页加 26 个接口（2026-10-20 新增 oauth 6 条）"
+    assert len(pairs) == 36, "接口约定第 2 节是 4 页加 32 个接口"
     for rule, method, fn in pairs:
         assert on_8765.get((rule, method)) is fn, "%s %s 不是 8765 上那个处理函数" % (method, rule)
+
+
+#: 页面里拼接出来的接口地址：``'/hub/api/.../' + encodeURIComponent(id) + '/restore'``，
+#: 也有后面不接字符串的 ``'/hub/api/bots/restart/' + encodeURIComponent(jobId)``。
+#: 先把这两种拼接换成一段占位，抽出来的就是拼接后的完整路径。
+JS_CONCAT_MIDDLE = re.compile(r"'\s*\+\s*encodeURIComponent\([^)]*\)\s*\+\s*'")
+JS_CONCAT_TAIL = re.compile(r"'\s*\+\s*encodeURIComponent\([^)]*\)")
+#: 只认 JS 字符串字面量里（引号后）的地址，注释里的「… /hub/api/bots/restart（异步…」不算
+HUB_API_URL = re.compile(r"(?<=['\"])/hub/api/[A-Za-z0-9._~:/?#\[\]@!$&*+,;=%{}-]*")
+
+
+def test_参数页渲染出的每个hub_api地址都能命中名单(client):
+    """页面里调用的接口若不在名单里，17990 上就是 404：按钮看着有、点下去全挂。"""
+    html = client.get("/hub/params", headers=AUTH).get_data(as_text=True)
+    js = JS_CONCAT_TAIL.sub("x", JS_CONCAT_MIDDLE.sub("x", html))
+    urls = set(HUB_API_URL.findall(js))
+    assert {"/hub/api/params", "/hub/api/params/raw", "/hub/api/params/backups",
+            "/hub/api/params/backups/x/restore"} <= urls, \
+        "参数页少了这几个接口地址，页面功能不完整：%r" % (sorted(urls),)
+    for url in sorted(urls):
+        try:
+            svc._hub_match(url, "GET")
+        except svc.Refuse as e:
+            # 405 说明路径在名单里、只是方法不对（restore 只收 POST），这也算「命中名单」
+            assert e.status == 405, "%s 不在名单里" % url
 
 
 #: 一个路径对得上两条的、空名字的：选哪个处理函数、参数是什么，要与 8765 的路由一致
@@ -184,6 +209,11 @@ def test_路径参数先切段_再解一次百分号编码(method, path, args):
 @pytest.mark.parametrize("method,path,allow", [
     ("HEAD", "/hub/bots", "GET"), ("OPTIONS", "/hub/addbot", "GET"), ("PUT", "/hub/api/bots", "GET, POST"),
     ("DELETE", "/hub/api/bots/x/edit", "GET, POST"), ("GET", "/hub/api/bots/x/enabled", "POST"),
+    # 参数页 5 条规则、7 个方法对：每条路径挑一个名单外的方法（HEAD/OPTIONS 各算一条，同接口约定）
+    ("POST", "/hub/params", "GET"), ("PUT", "/hub/api/params", "GET, POST"),
+    ("PUT", "/hub/api/params/raw", "GET, POST"), ("POST", "/hub/api/params/backups", "GET"),
+    ("GET", "/hub/api/params/backups/x/restore", "POST"),
+    ("HEAD", "/hub/api/params", "GET, POST"), ("OPTIONS", "/hub/api/params", "GET, POST"),
 ])
 def test_名单内路径用名单外的方法_405并写明能用哪些(method, path, allow):
     with pytest.raises(svc.Refuse) as e:
