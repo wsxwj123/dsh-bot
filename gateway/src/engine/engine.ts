@@ -791,8 +791,9 @@ export class Engine {
    * 群回合附带"和主人的私聊近况"（cross-chat-recap）：与该 bot 主人的私聊，最近 20 句、24 小时内，
    * 水位按群记（dm_recap:<群 id>，每群各一份），带过的不重复带。
    *
+   * 数据源是送达账本（群记录里没有私聊）：inbound 的真实用户消息 + outbound 真正送达的回复。
    * 隐私：群里其他人能看到 bot 说的话。buildRecapText 的第一行与「别原样念出来」的约束是硬要求；
-   * 只注入文字，没有文字的行（纯图片附件）直接跳过。读失败/没记录返回 null，不中断回合。
+   * 只注入文字，没有文字的行（纯图片附件）由 recentChatRows 跳过。读失败/没记录返回 null，不中断回合。
    */
   private dmRecap(chatId: string): string | null {
     if (!this.groups || !this.features.groups || !isGroupChat(chatId)) return null
@@ -803,15 +804,9 @@ export class Engine {
     const stored = Number(this.ledger.getMeta(key) || 0)
     const watermark = Number.isFinite(stored) && stored > 0 ? stored : undefined
     try {
-      // 窗口起点交给 since 粗筛（水位与未来水位重置在 selectRecapRows 里处理）
-      const lines = dedupTranscriptLines(this.groups.since(dmId, windowStart, DM_RECAP_LIMIT))
-        .filter(r => r.text.trim()) // 图片附件没有文字：不注入
-      const recapRows: RecapRow[] = lines.map(r => ({
-        ts: Date.parse(r.ts),
-        from: r.is_bot && r.from_username === this.botUsername ? 'bot' : 'owner',
-        text: r.text,
-      }))
-      const picked = selectRecapRows(recapRows, windowStart, DM_RECAP_LIMIT, watermark)
+      // 账本按时间窗粗筛（水位与"水位在未来"的重置在 selectRecapRows 里处理）
+      const rows = this.ledger.recentChatRows(dmId, windowStart, DM_RECAP_LIMIT)
+      const picked = selectRecapRows(rows, windowStart, DM_RECAP_LIMIT, watermark)
       const text = buildRecapText(picked)
       if (!text) return null
       this.ledger.setMeta(key, String(picked[picked.length - 1]!.ts))

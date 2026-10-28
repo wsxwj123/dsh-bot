@@ -185,6 +185,27 @@ export class Ledger {
     return this.db.query<{ text: string }, [string, number]>(`SELECT text FROM outbound WHERE chat_id = ? AND kind = 'text' AND state IN ('sent', 'ambiguous') AND turn_id IS NOT NULL AND created_at >= ? ORDER BY id`).all(chatId, since).map(r => r.text)
   }
 
+  /**
+   * 跨聊天近况（cross-chat-recap）用：某个聊天最近的双向文字，按时间升序、最后 limit 条。
+   * 用户侧只算真实用户消息（kind='user'，不含系统合成的提示），bot 侧只算真正送达的
+   * （state='sent'，sent_at 为发送时刻）。纯图片等没有文字的行跳过。
+   * 每路查询各自兜底：失败就当那一侧没有行，不抛（近况是锦上添花，不能中断回合）。
+   */
+  recentChatRows(chatId: string, afterMs: number, limit: number): { ts: number; from: 'owner' | 'bot'; text: string }[] {
+    if (limit <= 0) return []
+    const query = (sql: string): { ts: number; text: string | null }[] => {
+      try { return this.db.query<{ ts: number; text: string | null }, [string, number, number]>(sql).all(chatId, afterMs, limit) } catch { return [] }
+    }
+    const rows: { ts: number; from: 'owner' | 'bot'; text: string }[] = []
+    for (const r of query(`SELECT ts, text FROM inbound WHERE chat_id = ? AND kind = 'user' AND ts > ? ORDER BY ts DESC, id DESC LIMIT ?`)) {
+      if (r.text?.trim()) rows.push({ ts: r.ts, from: 'owner', text: r.text })
+    }
+    for (const r of query(`SELECT sent_at AS ts, text FROM outbound WHERE chat_id = ? AND state = 'sent' AND sent_at > ? ORDER BY sent_at DESC, id DESC LIMIT ?`)) {
+      if (r.text?.trim()) rows.push({ ts: r.ts, from: 'bot', text: r.text })
+    }
+    return rows.sort((a, b) => a.ts - b.ts).slice(-limit)
+  }
+
   /** 老账本补列（只加不删） */
   private migrate(): void {
     const cols = new Set(this.db.query<{ name: string }, []>('PRAGMA table_info(outbound)').all().map(c => c.name))
