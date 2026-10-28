@@ -843,8 +843,16 @@ def _private_dir(*parts):
 
 @contextlib.contextmanager
 def _write_lock():
-    """6.4：``<DSH_BOT_HOME>/locks/life.lock`` 上的非阻塞排他锁，所有 bot、本服务的所有进程共用一把。"""
-    import fcntl                            # 只有 POSIX 有；本功能只在 macOS 上跑，别处按内部错误回
+    """6.4：``<DSH_BOT_HOME>/locks/life.lock`` 上的非阻塞排他锁，所有 bot、本服务的所有进程共用一把。
+
+    Windows 没有 ``fcntl``：降级成不加锁（不能因为拿不到锁就让保存/刷新整条失败）；
+    单用户桌面下本来也没有跨进程并发写这一层。
+    """
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
     folder = _private_dir(str(config_sources.dsh_home()), "locks")
     fd = os.open(os.path.join(folder, "life.lock"), os.O_RDWR | os.O_CREAT | _NOFOLLOW | _CLOEXEC, 0o600)
     try:
@@ -916,7 +924,8 @@ def _replace(path, text, mode):
             f.write(text.encode("utf-8"))
             f.flush()
             os.fsync(f.fileno())
-            os.fchmod(f.fileno(), mode)
+            if hasattr(os, "fchmod"):       # Windows 没有 POSIX 权限位，跳过
+                os.fchmod(f.fileno(), mode)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -970,63 +979,68 @@ def refresh_summary(channel, life_path, today=None):
     summary = hub_addbot._persona_summary(persona_text)
     # 人设正文只在内存里过一遍清洗，绝不进日志、响应或报错文案。
 
-    try:
-        before = os.lstat(life_path)
-    except FileNotFoundError:
-        raise LifeError(422, "no_life_config", "这只 bot 还没有生活设定文件，先建好再来刷新") from None
-    except OSError:
-        before = None
-    if before is None or stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise LifeError(500, "io_error", "这只 bot 的生活设定文件读不出来")
-    data, current = _read(life_path, before)
-    if data is None:
-        raise LifeError(500, "io_error", "这只 bot 的生活设定文件读不出来")
-    try:
-        text = data.decode("utf-8")
-        doc = yaml.safe_load(text)
-    except UnicodeDecodeError:
-        raise LifeError(500, "io_error", "这只 bot 的生活设定文件不是合法的 UTF-8 文本") from None
-    except Exception:                       # noqa: BLE001  坏 YAML 的原话带文件内容，不往外带
-        raise LifeError(500, "io_error", "这只 bot 的生活设定文件格式有错，请先修好") from None
-    doc = {} if doc is None else doc
-    if not isinstance(doc, dict):
-        raise LifeError(500, "io_error", "这只 bot 的生活设定文件格式有错，请先修好")
+    # 读 → 比较 → 写整个放进 save() 同一把锁，且锁内重新读：与生活设定页的 PUT 并发时，
+    # 不会拿锁外的旧快照把对方刚保存的改动整体盖掉。Windows 上 _write_lock 降级为不加锁。
+    with _write_lock():
+        try:
+            before = os.lstat(life_path)
+        except FileNotFoundError:
+            raise LifeError(422, "no_life_config", "这只 bot 还没有生活设定文件，先建好再来刷新") from None
+        except OSError:
+            before = None
+        if before is None or stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise LifeError(500, "io_error", "这只 bot 的生活设定文件读不出来")
+        if before.st_nlink > 1:             # 与别处共用（硬链接）的文件不写
+            raise LifeError(500, "io_error", "这只 bot 的生活设定文件和别处共用，这里不改")
+        data, current = _read(life_path, before)
+        if data is None:
+            raise LifeError(500, "io_error", "这只 bot 的生活设定文件读不出来")
+        try:
+            text = data.decode("utf-8")
+            doc = yaml.safe_load(text)
+        except UnicodeDecodeError:
+            raise LifeError(500, "io_error", "这只 bot 的生活设定文件不是合法的 UTF-8 文本") from None
+        except Exception:                   # noqa: BLE001  坏 YAML 的原话带文件内容，不往外带
+            raise LifeError(500, "io_error", "这只 bot 的生活设定文件格式有错，请先修好") from None
+        doc = {} if doc is None else doc
+        if not isinstance(doc, dict):
+            raise LifeError(500, "io_error", "这只 bot 的生活设定文件格式有错，请先修好")
 
-    old = doc.get("persona_summary")
-    if isinstance(old, str):
-        old_summary = old.rstrip("\n")
-    elif old is None:
-        old_summary = ""
-    else:
-        old_summary = None                  # 认不出的类型：当作不同，照常覆盖
-    if old_summary is not None and old_summary == summary:
-        return {"ok": True, "changed": False, "preview": "", "message": "摘要没变"}
+        old = doc.get("persona_summary")
+        if isinstance(old, str):
+            old_summary = old.rstrip("\n")
+        elif old is None:
+            old_summary = ""
+        else:
+            old_summary = None              # 认不出的类型：当作不同，照常覆盖
+        if old_summary is not None and old_summary == summary:
+            return {"ok": True, "changed": False, "preview": "", "message": "摘要没变"}
 
-    # 换行风格跟着原文件：CRLF 的文件先按 LF 改，写回时再还原
-    crlf = "\r\n" in text
-    work = text.replace("\r\n", "\n") if crlf else text
-    try:
-        root = _layout(work, ("persona_summary",))
-    except LifeError:
-        raise LifeError(500, "io_error", "生活设定文件的写法这里改不了，请直接改文件") from None
-    new_text = _splice(work, root, {"persona_summary": summary or None})
-    if crlf:
-        new_text = new_text.replace("\n", "\r\n")
+        # 换行风格跟着原文件：CRLF 的文件先按 LF 改，写回时再还原
+        crlf = "\r\n" in text
+        work = text.replace("\r\n", "\n") if crlf else text
+        try:
+            root = _layout(work, ("persona_summary",))
+        except LifeError:
+            raise LifeError(500, "io_error", "生活设定文件的写法这里改不了，请直接改文件") from None
+        new_text = _splice(work, root, {"persona_summary": summary or None})
+        if crlf:
+            new_text = new_text.replace("\n", "\r\n")
 
-    stamp = today or datetime.date.today().strftime("%Y%m%d")
-    backup = life_path + REFRESH_BAK + stamp
-    had_backup = os.path.lexists(backup)    # 当天已有备份：失败时不能把它删掉
-    try:
-        _replace(backup, text, 0o600)       # 原文逐字节；同日覆盖
-    except OSError:
-        raise LifeError(500, "io_error", "备份生活设定失败，文件没有动") from None
-    try:
-        _replace(life_path, new_text, stat.S_IMODE(current.st_mode))
-    except OSError:
-        if not had_backup:                  # 这次才建的备份：写失败就不留
-            with contextlib.suppress(OSError):
-                os.unlink(backup)
-        raise LifeError(500, "io_error", "写生活设定失败，原文件没有动") from None
+        stamp = today or datetime.date.today().strftime("%Y%m%d")
+        backup = life_path + REFRESH_BAK + stamp
+        had_backup = os.path.lexists(backup)    # 当天已有备份：失败时不能把它删掉
+        try:
+            _replace(backup, text, 0o600)   # 原文逐字节；同日覆盖
+        except OSError:
+            raise LifeError(500, "io_error", "备份生活设定失败，文件没有动") from None
+        try:
+            _replace(life_path, new_text, stat.S_IMODE(current.st_mode))
+        except OSError:
+            if not had_backup:              # 这次才建的备份：写失败就不留
+                with contextlib.suppress(OSError):
+                    os.unlink(backup)
+            raise LifeError(500, "io_error", "写生活设定失败，原文件没有动") from None
 
     if not summary:
         return {"ok": True, "changed": True, "empty": True, "preview": "",
