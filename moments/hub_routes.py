@@ -1150,26 +1150,23 @@ def params_get():
 @hub_bp.post("/hub/api/params")
 @_api
 def params_save():
-    """§2.3 校验顺序照表：body → 未知键/类型/范围 → 空操作 200 → version →
-    磁盘可读 → 版本乐观锁 → 写。**纯输入错优先于冲突错**，用户先看到真正该改的东西。"""
+    """§2.3 校验顺序照表：body → 未知键/类型/范围 → version → 磁盘可读 →
+    版本乐观锁 → 空操作 200 或写。**纯输入错优先于冲突错**，用户先看到真正该改的东西；
+    「没变化」也不能绕开乐观锁：拿旧 version 重放同值必须报 409。"""
     body = _cfg_body()
     values = body.get("values")
     if not isinstance(values, dict):
         raise HubError(400, "bad_body", "缺少 values 或它不是 JSON 对象")
     hub_config.validate_values(values)
-    if not values:      # 空操作：不写盘、不备份，也不是错误
-        return jsonify({"ok": True, "changed": [], "backup": None,
-                        "version": hub_config.version_of(),
-                        "restart_hint": hub_config.restart_hint([])})
-    version = _cfg_version(body)
+    version = _cfg_version(body)        # 空 values 也要有 version：缺了就是 400 bad_body
     data, text = _cfg_readable()
     changed, new_text = hub_config.apply_form(values, data, text)
-    if not changed:     # 提交了但与磁盘同值 → 同样不写盘、不备份
-        return jsonify({"ok": True, "changed": [], "backup": None,
-                        "version": hub_config.version_of(),
-                        "restart_hint": hub_config.restart_hint([])})
     with hub_config.hold_config_lock():
         hub_config.check_version(version)
+        if not changed:     # 空操作：不写盘、不备份，也不是错误
+            return jsonify({"ok": True, "changed": [], "backup": None,
+                            "version": hub_config.version_of(),
+                            "restart_hint": hub_config.restart_hint([])})
         backup = hub_config.commit(new_text)
     return jsonify({"ok": True, "changed": changed, "backup": backup,
                     "version": hub_config.version_of(),
