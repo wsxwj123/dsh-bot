@@ -54,11 +54,17 @@ _MISSING = object()
 
 
 def configs_dir():
-    # dsh 的管理台进程把 dsh 配置根放在 HUB_CONFIGS_DSH_DIR，HUB_CONFIGS_DIR 可能指向
-    # 故意留空的 legacy 根；优先 dsh 根，参数页才和网关脚本读同一份 _global.yml。
-    return (os.environ.get("HUB_CONFIGS_DSH_DIR")
-            or os.environ.get("HUB_CONFIGS_DIR")
-            or os.path.join(_REPO_ROOT, "configs"))
+    # 两个变量名分不出「这个根是故意不建的」和「这个根是测试的临时目录」，所以看存在性：
+    # HUB_CONFIGS_DIR 存在（老部署/测试夹具）就用它；不存在（dsh 管理台故意指向
+    # ~/.dsh-bot/no-legacy-configs）才落到 HUB_CONFIGS_DSH_DIR，参数页才能和网关脚本
+    # 读同一份 _global.yml。
+    hub = os.environ.get("HUB_CONFIGS_DIR")
+    dsh = os.environ.get("HUB_CONFIGS_DSH_DIR")
+    if hub and os.path.isdir(hub):
+        return hub
+    if dsh:
+        return dsh
+    return hub or os.path.join(_REPO_ROOT, "configs")
 
 
 def global_path():
