@@ -174,7 +174,7 @@ test('清单9 无图但有文本：文本与 buildGroupRecapText 的输出逐字
   )
   expect(imageBlocks(blocks)).toHaveLength(0)
   const expected = buildGroupRecapText(['对方：第一句', '你：第二句'])
-  expect(textOf(blocks).join('\n')).toBe(expected)
+  expect(textOf(blocks).join('\n')).toBe(expected!)   // buildGroupRecapText 返回 string | null，这里保证非空
 })
 
 test('清单10 行的 ts 在未来：该行被跳过（不选、不附图）', () => {
@@ -301,8 +301,8 @@ test('skipKeys 命中的行不占每轮额度：max=1 时后面的图仍能被�
     read: r.read,
     skipKeys: new Set<unknown>([21, '21']),
   } as never)
-  expect(res.picks.map(p => p.line.message_id)).toEqual([22])
-  expect(r.calls).toEqual([b.image_path])
+  expect(res.picks.map(p => (p.line as any).message_id)).toEqual([22])
+  expect(r.calls as string[]).toEqual([b.image_path as string])
 })
 
 test('initialSeenReal 命中：读之前就跳过该 realpath，不重复读、不出图、标记已消费', () => {
