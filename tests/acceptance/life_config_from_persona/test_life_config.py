@@ -14,7 +14,7 @@ import yaml
 from moments import hub_addbot
 from moments import life_settings
 
-FIRST_LINE = "# 生活设定：新建 bot 时按人设生成的骨架，可以直接改"
+FIRST_LINE = "# 生活设定：新建 bot 时生成的骨架，可以直接改"
 SLEEP_HOURS = ["00:00-07:30"]
 UNWRITTEN_KEYS = ("bio", "city", "birthday", "speaking_threshold")
 MISSING = object()
@@ -72,53 +72,21 @@ def test_未填写字段不出现在文档中():
 
 # ---------------------------------------------------------------- 行为清单 2：persona_summary
 
-def test_人设非空时写入persona_summary且内容等于正文():
+def test_人设非空但未显式给摘要时不生成persona_summary():
+    # 2026-10-28 用户决定：不再从人设正文自动提取摘要，改成新建时提示用户手填
     doc = load(render(make_fields(persona="喜欢下雨天，偶尔去公园散步。")))
-    assert summary_of(doc) == "喜欢下雨天，偶尔去公园散步。"
-
-
-def test_persona_summary按Unicode字符计数不按字节():
-    body = "😀" * 300                      # 300 个字符，UTF-8 下是 1200 字节
-    doc = load(render(make_fields(persona=body)))
-    summary = summary_of(doc)
-    assert len(summary) == 300
-    assert summary == body
-
-
-def test_人设超过300字时截断到300字且不加省略号():
-    body = "测" * 350
-    doc = load(render(make_fields(persona=body)))
-    summary = summary_of(doc)
-    assert len(summary) == 300
-    assert summary == "测" * 300
-    assert not summary.endswith("…")
-    assert not summary.endswith("...")
-
-
-def test_人设恰好300字时不截断():
-    body = "边" * 300
-    doc = load(render(make_fields(persona=body)))
-    summary = summary_of(doc)
-    assert len(summary) == 300
-    assert summary == body
-
-
-@pytest.mark.parametrize("persona", ["", "  \n\t\n  ", MISSING],
-                         ids=["空串", "全空白", "缺persona键"])
-def test_人设为空时不写persona_summary(persona):
-    fields = make_fields()
-    if persona is not MISSING:
-        fields["persona"] = persona
-    doc = load(render(fields))
     assert "persona_summary" not in doc
 
 
-def test_人设含markdown标题与连续空行时清洗结果():
-    # 2026-10-28 与 claude 侧对齐后：连续多个空行压成「一个空行」，单个空行保留
-    # （原来压成「一个换行」会把段落分隔吃掉，同一份人设两边摘要不一致）
-    fields = make_fields(persona="# 标题\n\n\n\n正文")
-    doc = load(render(fields))
-    assert summary_of(doc) == "标题\n\n正文"
+def test_显式给了persona_summary就写入():
+    doc = load(render(make_fields(persona_summary="38岁成熟人妻，黏人但骄傲")))
+    assert summary_of(doc) == "38岁成熟人妻，黏人但骄傲"
+
+
+def test_显式摘要原样写入不再清洗():
+    # 显式给的是用户手写的成品，不能再被 markdown 清洗或截断
+    doc = load(render(make_fields(persona_summary="**重点**：喜欢下雨天")))
+    assert summary_of(doc) == "**重点**：喜欢下雨天"
 
 
 # ---------------------------------------------------------------- 行为清单 4：YAML 合法性
@@ -158,7 +126,7 @@ def test_生成文件能被life_settings读取(life_dir):
     text = render(make_fields(persona=persona))
     resp = write_and_view(life_dir, text)
     assert resp["values"]["sleep_hours"] == SLEEP_HOURS
-    assert resp["values"]["persona_summary"].rstrip("\n") == persona
+    assert not (resp["values"].get("persona_summary") or "").strip()
 
 
 def test_特殊字符显示名不影响life_settings读取(life_dir):
@@ -166,4 +134,4 @@ def test_特殊字符显示名不影响life_settings读取(life_dir):
                          persona="正文")
     resp = write_and_view(life_dir, render(fields))
     assert resp["values"]["sleep_hours"] == SLEEP_HOURS
-    assert resp["values"]["persona_summary"].rstrip("\n") == "正文"
+    assert not (resp["values"].get("persona_summary") or "").strip()

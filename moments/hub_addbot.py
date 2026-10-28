@@ -571,20 +571,24 @@ def _persona_summary(text):
 
 
 def _life_text(fields):
-    """新建 bot 的生活设定骨架：``id``、``display_name``、按人设生成的摘要与默认睡觉时段，
-    其余字段只留注释（读出来都是空/缺省），用户拿到后直接改。
+    """新建 bot 的生活设定骨架：``id``、``display_name``、默认睡觉时段，其余字段只留注释。
 
-    ``id`` 是这只的 person（适配服务新建给了 person 时），没有就是编号。显式给了摘要字段就
-    用摘要，否则从人设正文提取；人设为空时整条 ``persona_summary`` 不写。"""
-    summary = _persona_summary(fields.get("persona_summary") or fields.get("persona"))
+    ``id`` 是这只的 person（适配服务新建给了 person 时），没有就是编号。
+
+    **不再从人设正文自动提取 ``persona_summary``**（2026-10-28 用户决定）：那是一句话人设
+    简介、给情绪裁判判断好感涨跌用，自动截的 300 字不如手写精准。显式给了就用；没给只留一行
+    注释提醒去填。"""
+    explicit = (fields.get("persona_summary") or "").strip()
     lines = [
-        "# 生活设定：新建 bot 时按人设生成的骨架，可以直接改",
+        "# 生活设定：新建 bot 时生成的骨架，可以直接改",
         "id: %s" % _yaml_str(fields.get("person") or fields["bot_id"]),
         "display_name: %s" % _yaml_str(fields["display_name"]),
     ]
-    if summary:
+    if explicit:
         lines.append("persona_summary: |")
-        lines.extend("  " + line for line in summary.split("\n"))
+        lines.extend("  " + line for line in explicit.split("\n"))
+    else:
+        lines.append("# persona_summary: |   # 【建议填】一句话人设简介，情绪裁判靠它判断好感涨跌")
     lines.extend([
         "sleep_hours:",
         '  - "00:00-07:30"',
@@ -1432,26 +1436,27 @@ def _dsh_yml(bot_id):
     return path
 
 
-def _channel_dir(bot_id, root):
-    """§10 的 channelDir 连同**落点校验**：读与写共用这一处，交出去的是可以放心读写的目录。
-
-    取法。新系统配置根下这只的 yml **自己**顶层写的 `bot_channel_path`（expanduser）；
-    没写、为空、不是字符串、或这份 yml 读不出结构（`root` 为 None）→ 家目录下的 `channel`。
-    与网关 `config.ts:286` 同款，只认这份 yml 自己的键：`life_config` 指向的那份里写的
-    不参与。此前取的是两份合并之后的值，那个目录可以在新系统家目录之外，而且与网关读的
-    不是同一处。
-
-    落点。把新系统家目录解析成真实路径，这只 bot 的家 = 它下面的 `bots/<bot_id>`。频道目录
-    解析成真实路径（软链跟到底）之后必须就是这个家或在它里面，否则 409 `bad_channel_path`。
-    显式写到外面的、经软链出去的、`bots/<bot_id>` 这一级本身是软链的，都落在这一格；
-    名字以这只打头的另一个目录（`<bot_id>_x`）不算在里面，所以比的是带分隔符的前缀。
-
-    返回**解析后的真实路径**：校验的是哪条路径，随后读写的就是哪条。
+def _channel_written(bot_id, root):
+    """频道目录的取法（不含落点校验）：只认这份 yml 自己顶层写的 `bot_channel_path`（expanduser），
+    没写、为空、不是字符串、或这份 yml 读不出结构（`root` 为 None）→ `<bot 家>/channel`。
+    与网关 `config.ts:286` 同款；展开只有 `config_sources.channel_dir` 那一处（§14）。
     """
     raw = _top_str(root, "bot_channel_path").strip()
     home = os.path.join(os.path.realpath(str(config_sources.dsh_home())), "bots", bot_id)
-    written = config_sources.channel_dir({"bot_channel_path": raw})   # 展开只有那一处（§14）
-    channel = os.path.realpath(written or os.path.join(home, "channel"))
+    written = config_sources.channel_dir({"bot_channel_path": raw})
+    return os.path.realpath(written or os.path.join(home, "channel")), home
+
+
+def _channel_dir(bot_id, root):
+    """§10 的 channelDir 连同**落点校验**：读与写共用这一处，交出去的是可以放心读写的目录。
+
+    取法见 `_channel_written`。落点：频道目录解析成真实路径（软链跟到底）之后必须就是
+    这个家（`<bot 家>`）或在它里面，否则 409 `bad_channel_path`。名字以这只打头的另一个
+    目录（`<bot_id>_x`）不算在里面，所以比的是带分隔符的前缀。
+
+    返回**解析后的真实路径**：校验的是哪条路径，随后读写的就是哪条。
+    """
+    channel, home = _channel_written(bot_id, root)
     if channel != home and not channel.startswith(home + os.sep):
         raise HubError(409, "bad_channel_path", BAD_CHANNEL_PATH_DETAIL)
     return channel
@@ -1549,17 +1554,19 @@ def refresh_life_summary(bot_id):
     path = _dsh_yml(bot_id)                     # 不是新系统的 bot：404，不碰任何文件
     try:
         with open(path, encoding="utf-8") as f:
-            cfg = yaml.safe_load(f)
+            text = f.read()
+        root = yaml.compose(text, Loader=yaml.SafeLoader)   # _channel_dir 读的是节点树
+        cfg = yaml.safe_load(text)
     except OSError:
         raise HubError(500, "config_unreadable", "这只 bot 的配置读不出来") from None
     except Exception:                           # noqa: BLE001
         raise HubError(409, "bad_yaml", "这只 bot 的配置格式有错") from None
-    if not isinstance(cfg, dict):
+    if not isinstance(cfg, dict) or not isinstance(root, yaml.MappingNode):
         raise HubError(409, "bad_yaml", "这只 bot 的配置格式有错")
 
-    channel = config_sources.channel_dir(cfg)
-    if not channel:
-        raise HubError(409, "bad_channel_path", "这只 bot 的配置里没写频道目录")
+    # 取法复用编辑页那一处（含没写 bot_channel_path 时回落 <bot 家>/channel）；
+    # 但不套它的“必须在 bot 家内”409：hub 刷新按配置里显式写的频道目录读人设。
+    channel, _home = _channel_written(bot_id, root)
     if not os.path.isfile(os.path.join(channel, "CLAUDE.md")):
         raise life_settings.LifeError(422, "no_persona",
                                       "这只 bot 还没有人设文件，先写好 CLAUDE.md 再来刷新")
@@ -1567,16 +1574,15 @@ def refresh_life_summary(bot_id):
     if not isinstance(life, str) or not life.strip():
         raise life_settings.LifeError(422, "no_life_config",
                                       "这只 bot 还没有生活设定文件，先建好再来刷新")
-    life_path = os.path.normpath(os.path.expanduser(life.strip()))
-    # 允许目录拿不到时**拒绝**（不要 fail-open 跳过校验）：拿不到说明目录不存在或是条
-    # 绕过禁区的软链，这时候没有可信的"允许范围"可以比对，放行等于不做路径检查
     allowed = life_settings.allowed_dir()
     if allowed is None:
         raise life_settings.LifeError(422, "no_life_config",
                                       "生活设定目录还不可用（不存在或是软链），先建好再来刷新")
-    if (os.path.dirname(os.path.realpath(life_path)) != allowed[1]
-            or not life_path.endswith(".yml")):
-        raise HubError(409, "bad_life_config", "这只 bot 的生活设定文件不在允许修改的位置")
+    try:
+        # 绝对路径、禁止 `.`/`..`、`_`/`.` 开头、必须 .yml —— 全部走生活设定那一处口径
+        life_path = life_settings._written_path(life, allowed)
+    except life_settings.LifeError as e:
+        raise HubError(409, "bad_life_config", e.message) from None
     return life_settings.refresh_summary(channel, life_path)
 
 
