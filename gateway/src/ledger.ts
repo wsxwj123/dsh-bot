@@ -187,21 +187,23 @@ export class Ledger {
 
   /**
    * 跨聊天近况（cross-chat-recap）用：某个聊天最近的双向文字，按时间升序、最后 limit 条。
-   * 用户侧只算真实用户消息（kind='user'，不含系统合成的提示），bot 侧只算真正送达的
-   * （state='sent'，sent_at 为发送时刻）。纯图片等没有文字的行跳过。
+   * 用户侧只算真实用户消息（kind='user'，不含系统合成的提示），bot 侧只算真正送达的文字
+   * （kind='text' 排除 reaction 表情与系统通知，state='sent'，sent_at 为发送时刻）。
+   * 没有文字的行（纯图片/贴纸）在 SQL 里就过滤掉，不能先 LIMIT 再丢——否则最近 20 条恰好
+   * 都是图片时，更早的真实文字会被额度白白挤掉。
    * 每路查询各自兜底：失败就当那一侧没有行，不抛（近况是锦上添花，不能中断回合）。
    */
   recentChatRows(chatId: string, afterMs: number, limit: number): { ts: number; from: 'owner' | 'bot'; text: string }[] {
     if (limit <= 0) return []
-    const query = (sql: string): { ts: number; text: string | null }[] => {
-      try { return this.db.query<{ ts: number; text: string | null }, [string, number, number]>(sql).all(chatId, afterMs, limit) } catch { return [] }
+    const query = (sql: string): { ts: number; text: string }[] => {
+      try { return this.db.query<{ ts: number; text: string }, [string, number, number]>(sql).all(chatId, afterMs, limit) } catch { return [] }
     }
     const rows: { ts: number; from: 'owner' | 'bot'; text: string }[] = []
-    for (const r of query(`SELECT ts, text FROM inbound WHERE chat_id = ? AND kind = 'user' AND ts > ? ORDER BY ts DESC, id DESC LIMIT ?`)) {
-      if (r.text?.trim()) rows.push({ ts: r.ts, from: 'owner', text: r.text })
+    for (const r of query(`SELECT ts, text FROM inbound WHERE chat_id = ? AND kind = 'user' AND ts > ? AND text IS NOT NULL AND trim(text) <> '' ORDER BY ts DESC, id DESC LIMIT ?`)) {
+      rows.push({ ts: r.ts, from: 'owner', text: r.text })
     }
-    for (const r of query(`SELECT sent_at AS ts, text FROM outbound WHERE chat_id = ? AND state = 'sent' AND sent_at > ? ORDER BY sent_at DESC, id DESC LIMIT ?`)) {
-      if (r.text?.trim()) rows.push({ ts: r.ts, from: 'bot', text: r.text })
+    for (const r of query(`SELECT sent_at AS ts, text FROM outbound WHERE chat_id = ? AND kind = 'text' AND state = 'sent' AND sent_at > ? AND text IS NOT NULL AND trim(text) <> '' ORDER BY sent_at DESC, id DESC LIMIT ?`)) {
+      rows.push({ ts: r.ts, from: 'bot', text: r.text })
     }
     return rows.sort((a, b) => a.ts - b.ts).slice(-limit)
   }

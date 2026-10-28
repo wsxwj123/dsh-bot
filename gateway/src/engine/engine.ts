@@ -1163,10 +1163,13 @@ export class Engine {
     const commitHints = this.pendingHints(chatId)
     if (commitHints.length) this.ledger.setMeta(`hints:${chatId}`, '')
     const life = batch.some(r => r.kind === 'user') ? this.lifeLines(chatId, seg.id, this.ledger.segmentTurnCount(seg.id) === 0) : []
-    // 跨聊天近况：私聊回合带群聊近况（私聊 → 群），群回合带与主人的私聊近况（群 → 私聊），互斥
-    const recap = batch.some(r => r.kind === 'user')
-      ? (isGroupChat(chatId) ? this.dmRecap(chatId) : this.groupRecap(chatId))
-      : null
+    // 跨聊天近况：私聊回合带群聊近况（私聊 → 群），群回合带与主人的私聊近况（群 → 私聊），互斥。
+    // 群消息在 poller 里只走 observe、不写 inbound，群回合由导演经 /v1/inject 以
+    // kind='synthetic' + meta.source='director' 触发，所以两边门控要分开看。
+    const directorTurn = batch.some(r => r.kind === 'synthetic' && safeMeta(r.meta)?.source === 'director')
+    const recap = isGroupChat(chatId)
+      ? (directorTurn ? this.dmRecap(chatId) : null)
+      : (batch.some(r => r.kind === 'user') ? this.groupRecap(chatId) : null)
     if (recap) life.push(recap)
     // 对方发来的图片：附在消息后面（模型看不了图时，runPrompt 里换成一句说明）
     const images: Block[] = batch.flatMap(r => { const m = rowMedia(r); return m?.kind === 'photo' && m.path ? [{ image: m.path }] : [] })
