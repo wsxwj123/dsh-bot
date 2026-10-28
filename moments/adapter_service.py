@@ -3375,6 +3375,12 @@ _HUB_ROUTES = [
     ("/hub/api/oauth/accounts/<provider>/<email_hash>/activate",
      {"POST": hub_routes.oauth_account_activate}),
     ("/hub/api/oauth/accounts/<provider>/<email_hash>", {"DELETE": hub_routes.oauth_account_delete}),
+    # 参数页（BRIEF-dsh-params-page）：8765 第 5 段那套，处理函数一个不重写
+    ("/hub/params", {"GET": hub_routes.hub_params_page}),
+    ("/hub/api/params", {"GET": hub_routes.params_get, "POST": hub_routes.params_save}),
+    ("/hub/api/params/raw", {"GET": hub_routes.params_raw_get, "POST": hub_routes.params_raw_post}),
+    ("/hub/api/params/backups", {"GET": hub_routes.params_backups}),
+    ("/hub/api/params/backups/<bid>/restore", {"POST": hub_routes.params_restore}),
 ]
 _HUB_TABLE = [(rule.split("/"), methods) for rule, methods in _HUB_ROUTES]
 
