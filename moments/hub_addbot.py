@@ -555,10 +555,14 @@ def _persona_summary(text):
     cleaned = re.sub(r"<!--.*?-->", "", str(text), flags=re.S)
     lines = []
     for line in cleaned.splitlines():
-        line = re.sub(r"^#+\s*", "", line)          # 标题符与紧跟的空格
+        # C0/C1 控制字符（NUL、ESC 等）会让 PyYAML 解析块标量时直接抛错，
+        # 文件读不出来的话这只 bot 的 jiwen tick 会整条停掉，所以先剔掉
+        line = re.sub(r"[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f]", "", line)
+        line = re.sub(r"^#+[ \t]*", "", line)       # 标题符与紧跟的空格（只去行首，不吃换行）
         line = line.replace("**", "").replace("`", "")
         lines.append(line.strip())
-    cleaned = re.sub(r"\n{2,}", "\n", "\n".join(lines)).strip()
+    # 连续多个空行压成一个空行（保留段落分隔）；单个空行不动
+    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
     summary = cleaned[:300]
     placeholder_chars = sum(len(m) for m in _PLACEHOLDER_RE.findall(summary))
     if placeholder_chars * 2 > len(summary):        # 先截断再算占比：长模板后面的正文不能把比例摊薄

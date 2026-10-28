@@ -114,9 +114,11 @@ def test_人设为空时不写persona_summary(persona):
 
 
 def test_人设含markdown标题与连续空行时清洗结果():
+    # 2026-10-28 与 claude 侧对齐后：连续多个空行压成「一个空行」，单个空行保留
+    # （原来压成「一个换行」会把段落分隔吃掉，同一份人设两边摘要不一致）
     fields = make_fields(persona="# 标题\n\n\n\n正文")
     doc = load(render(fields))
-    assert summary_of(doc) == "标题\n正文"
+    assert summary_of(doc) == "标题\n\n正文"
 
 
 # ---------------------------------------------------------------- 行为清单 4：YAML 合法性
