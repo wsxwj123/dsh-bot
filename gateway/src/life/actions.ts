@@ -289,7 +289,9 @@ export class LifeActions {
         break
       }
       case 'post':
-        argv = [join(scripts, 'bot_post_moment.py'), this.d.botId, s('topic'), ...(['public', 'private'].includes(s('visibility')) ? [s('visibility')] : [])]
+        // topic 为空时不传空串：脚本按位置读 argv[2]，传空串会让它以为「给了个空主题」
+        argv = [join(scripts, 'bot_post_moment.py'), this.d.botId, ...(s('topic') ? [s('topic')] : []),
+                ...(['public', 'private'].includes(s('visibility')) ? [s('visibility')] : [])]
         break
       case 'set_image': {
         const imgs = Array.isArray(args.images) ? args.images.filter((x): x is string => typeof x === 'string') : []
