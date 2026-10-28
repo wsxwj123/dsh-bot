@@ -35,9 +35,12 @@ import { effectiveVoiceModel } from '../life/voice_model'
 import { loadFeatures, readFeatures, type Features } from '../features'
 import { StickerService } from '../stickers/sticker'
 import {
+  buildGroupRecapText, buildRecapText,
   escapeUserText,
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
-  NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, summaryPrompt,
+  DM_RECAP_LIMIT, DM_RECAP_WINDOW_MS, GROUP_RECAP_LIMIT, GROUP_RECAP_WINDOW_MS,
+  NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, selectRecapRows, summaryPrompt,
+  type RecapRow,
 } from './format'
 import { compactReply, formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, splitReply, summaryReply, type KeyStatus, type ModelChoice, type ProviderView } from './commands'
 import { ImagesUnsupportedTracker } from './image_support'
@@ -744,22 +747,24 @@ export class Engine {
    * 私聊每条都带前两行，与 claude 大脑（dispatcher/worker-manager.ts 给真人私聊加的前缀）一致；
    * 群里照旧只在新会话开头和内容变了时带。
    */
-  /** 私聊时附带"群里近况"（M5）：这个 bot 在的群里，上次带过之后又有人说话了，就带最近几句（最多 8 句，只看 12 小时内）。
+  /** 私聊时附带"群里近况"（M5）：这个 bot 在的群里，上次带过之后又有人说话了，就带最近几句（最多 30 句，只看 48 小时内）。
    *  会话按聊天分开（群里的话不进私聊会话），只靠这一小段让它接得上话 */
   private groupRecap(chatId: string): string | null {
     if (!this.groups || !this.features.groups || isGroupChat(chatId)) return null
     const key = `group_recap:${chatId}`
-    const after = Math.max(Number(this.ledger.getMeta(key) || 0), Date.now() - 12 * 3600_000)
+    const windowStart = Date.now() - GROUP_RECAP_WINDOW_MS
+    const stored = Number(this.ledger.getMeta(key) || 0)
+    const watermark = Number.isFinite(stored) && stored > 0 ? stored : undefined
+    // since 的 after 只做粗筛（窗口起点）；水位和"水位在未来"的重置统一交给 selectRecapRows，
+    // 否则旧版本把水位推到未来后，这里会因为 max(水位, 窗口起点) 取不到任何行。句数上限放到
+    // 筛选之后再截，保证水位过滤后仍能取到最近 GROUP_RECAP_LIMIT 句。
     // since 也会返回纯图片/无文本的行（群图要用）。有图的空 text 行要留一行占位：
     // 私聊里被问「群里那张图是什么」时，上下文里至少要有「群里有图」这个事实，
     // 否则模型只会凭空编（2026-10-27 真机：私聊里编出「白瓷小杯子装草莓冻」）。
     // 同一条群消息可能有两行（本 bot 的 observe 行 + 对端 bot 补写的带图行，observed_by 不同、
     // since 按写方分开保留），近况里同一句只说一次。
-    const rows = dedupTranscriptLines(Object.keys(this.access().groups).map(k => k.trim()).flatMap(g => this.groups!.since(g, after, 8))
+    const rows = dedupTranscriptLines(Object.keys(this.access().groups).map(k => k.trim()).flatMap(g => this.groups!.since(g, windowStart, GROUP_RECAP_LIMIT))
       .filter(r => r.text.trim() || typeof r.image_path === 'string'))
-      .slice(-8)
-    if (rows.length === 0) return null
-    this.ledger.setMeta(key, String(Math.max(...rows.map(r => Date.parse(r.ts)))))
     const who = (r: TranscriptLine) => r.is_bot && r.from_username === this.botUsername ? '你' : !r.is_bot && r.from_id === chatId ? '对方' : (r.from_name || r.from_username || '群友')
     const body = (r: TranscriptLine): string => {
       const t = r.text.replace(/\s+/g, ' ').trim().slice(0, 100)
@@ -767,9 +772,55 @@ export class Engine {
       // 这里只是私聊的近况摘要，没有图可看；写明看不到，避免模型编内容
       return '[发了一张图片，这里看不到内容]'
     }
-    const lines = rows.map(r => `${escapeUserText(who(r))}：${escapeUserText(body(r))}`)
-    this.log.info('group.recap', { chat: chatId, lines: lines.length })
-    return `⟦群里近况：你在的群里，上次之后说了这些。只是让你知道，不用逐条回应⟧\n${lines.join('\n')}`
+    // 先拼成「谁：内容」再进筛选：selectRecapRows 只看 ts（窗口/水位/句数），
+    // from 在群聊近况里不参与文案，只为复用同一套筛选逻辑。
+    const recapRows: RecapRow[] = rows.map(r => ({
+      ts: Date.parse(r.ts),
+      from: r.is_bot && r.from_username === this.botUsername ? 'bot' : 'owner',
+      text: `${escapeUserText(who(r))}：${escapeUserText(body(r))}`,
+    }))
+    const picked = selectRecapRows(recapRows, windowStart, GROUP_RECAP_LIMIT, watermark)
+    const text = buildGroupRecapText(picked.map(r => r.text))
+    if (!text) return null
+    this.ledger.setMeta(key, String(picked[picked.length - 1]!.ts))
+    this.log.info('group.recap', { chat: chatId, lines: picked.length })
+    return text
+  }
+
+  /**
+   * 群回合附带"和主人的私聊近况"（cross-chat-recap）：与该 bot 主人的私聊，最近 20 句、24 小时内，
+   * 水位按群记（dm_recap:<群 id>，每群各一份），带过的不重复带。
+   *
+   * 隐私：群里其他人能看到 bot 说的话。buildRecapText 的第一行与「别原样念出来」的约束是硬要求；
+   * 只注入文字，没有文字的行（纯图片附件）直接跳过。读失败/没记录返回 null，不中断回合。
+   */
+  private dmRecap(chatId: string): string | null {
+    if (!this.groups || !this.features.groups || !isGroupChat(chatId)) return null
+    const dmId = this.cfg.gw.owners[0]
+    if (!dmId || dmId === chatId) return null
+    const key = `dm_recap:${chatId}`
+    const windowStart = Date.now() - DM_RECAP_WINDOW_MS
+    const stored = Number(this.ledger.getMeta(key) || 0)
+    const watermark = Number.isFinite(stored) && stored > 0 ? stored : undefined
+    try {
+      // 窗口起点交给 since 粗筛（水位与未来水位重置在 selectRecapRows 里处理）
+      const lines = dedupTranscriptLines(this.groups.since(dmId, windowStart, DM_RECAP_LIMIT))
+        .filter(r => r.text.trim()) // 图片附件没有文字：不注入
+      const recapRows: RecapRow[] = lines.map(r => ({
+        ts: Date.parse(r.ts),
+        from: r.is_bot && r.from_username === this.botUsername ? 'bot' : 'owner',
+        text: r.text,
+      }))
+      const picked = selectRecapRows(recapRows, windowStart, DM_RECAP_LIMIT, watermark)
+      const text = buildRecapText(picked)
+      if (!text) return null
+      this.ledger.setMeta(key, String(picked[picked.length - 1]!.ts))
+      this.log.info('dm.recap', { chat: chatId, lines: picked.length })
+      return text
+    } catch (e) {
+      this.log.warn('dm.recap_failed', { chat: chatId, err: safeError(e) })
+      return null
+    }
   }
 
   /**
@@ -1117,7 +1168,10 @@ export class Engine {
     const commitHints = this.pendingHints(chatId)
     if (commitHints.length) this.ledger.setMeta(`hints:${chatId}`, '')
     const life = batch.some(r => r.kind === 'user') ? this.lifeLines(chatId, seg.id, this.ledger.segmentTurnCount(seg.id) === 0) : []
-    const recap = batch.some(r => r.kind === 'user') ? this.groupRecap(chatId) : null
+    // 跨聊天近况：私聊回合带群聊近况（私聊 → 群），群回合带与主人的私聊近况（群 → 私聊），互斥
+    const recap = batch.some(r => r.kind === 'user')
+      ? (isGroupChat(chatId) ? this.dmRecap(chatId) : this.groupRecap(chatId))
+      : null
     if (recap) life.push(recap)
     // 对方发来的图片：附在消息后面（模型看不了图时，runPrompt 里换成一句说明）
     const images: Block[] = batch.flatMap(r => { const m = rowMedia(r); return m?.kind === 'photo' && m.path ? [{ image: m.path }] : [] })

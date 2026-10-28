@@ -166,3 +166,51 @@ export function formatSeedParts(p: SeedParts, o: FormatOpts): string | null {
 export function formatMemoryHint(items: string[]): string {
   return ['⟦系统：你在别的聊天里新记下了这些事（供参考）：', ...items.map(t => `- ${escapeUserText(t)}`), '⟧'].join('\n')
 }
+
+// ─── 跨聊天近况（cross-chat-recap）：私聊回合附群聊近况，群回合附与主人的私聊近况 ───
+
+/** 私聊 → 群：私聊回合最多带群里最近 30 句、只看 48 小时内 */
+export const GROUP_RECAP_LIMIT = 30
+export const GROUP_RECAP_WINDOW_MS = 48 * 60 * 60 * 1000
+/** 群 → 私聊：群回合最多带与主人私聊的最近 20 句、只看 24 小时内 */
+export const DM_RECAP_LIMIT = 20
+export const DM_RECAP_WINDOW_MS = 24 * 60 * 60 * 1000
+
+export type RecapRow = { ts: number; from: 'owner' | 'bot'; text: string }
+
+/** 单行正文的默认上限（前缀「主人：」「你：」不计入） */
+const RECAP_LINE_CHARS = 200
+
+/**
+ * 从按 ts 升序的行里选出要注入的：窗口内（ts > afterMs）、水位之后（ts 严格大于 watermark），
+ * 取最后 limit 行。水位在未来（时钟回拨）时视为失效，重置到窗口起点。
+ */
+export function selectRecapRows(rows: readonly RecapRow[], afterMs: number, limit: number, watermark?: number): RecapRow[] {
+  if (limit <= 0) return [] // slice(-0) 会返回整个数组，必须单独挡掉
+  const floor = watermark !== undefined && Number.isFinite(watermark) && watermark <= Date.now() ? watermark : afterMs
+  return rows.filter(r => r.ts > afterMs && r.ts > floor).slice(-limit)
+}
+
+function recapLine(who: string, text: string, max: number): string {
+  return `${escapeUserText(who)}：${escapeUserText(text).replace(/\s+/g, ' ').trim().slice(0, max)}`
+}
+
+/**
+ * 私聊近况（群回合注入）。首尾标记与「别原样念出来」的提示是硬要求：群里其他人能看到 bot 说的话，
+ * 这段私聊内容只能在心里参考，不能逐字复述到群里。
+ */
+export function buildRecapText(rows: readonly RecapRow[], opts?: { maxLineChars?: number }): string | null {
+  if (rows.length === 0) return null
+  const max = Math.max(0, Math.trunc(opts?.maxLineChars ?? RECAP_LINE_CHARS))
+  const lines = rows.map(r => recapLine(r.from === 'owner' ? '主人' : '你', r.text, max))
+  return ['⟦和主人的私聊近况（群里的人看不到这段，别原样念出来）⟧', ...lines, '⟦私聊近况结束⟧'].join('\n')
+}
+
+/**
+ * 群聊近况（私聊回合注入）沿用原来的格式：一行说明 + 每行「谁：内容」。
+ * 行内容（说话人、100 字截断、图片占位）由调用方按群记录拼好，这里只负责外壳。
+ */
+export function buildGroupRecapText(lines: readonly string[]): string | null {
+  if (lines.length === 0) return null
+  return `⟦群里近况：你在的群里，上次之后说了这些。只是让你知道，不用逐条回应⟧\n${lines.join('\n')}`
+}
