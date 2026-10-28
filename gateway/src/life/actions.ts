@@ -305,7 +305,7 @@ export class LifeActions {
         return { text: 'action 只能是 recent、like、reply、post、set_image、delete_comment。', isError: true }
     }
     try {
-      const r = await this.py(argv, {}, 50_000)
+      const r = await this.py(argv, {}, 70_000)
       // 发圈被挡住时脚本先打一行"moment skip: 原因"，最后一行是笼统的"没生成"：把真实原因带上（真机 M4 问题 6）
       const errLines = r.err.trim().split('\n').filter(Boolean)
       const skip = errLines.find(l => l.includes('moment skip:'))?.replace(/^.*moment skip:\s*/, '')
