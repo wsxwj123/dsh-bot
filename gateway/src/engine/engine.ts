@@ -404,7 +404,7 @@ export class Engine {
       },
       {
         name: 'moments',
-        description: '朋友圈：recent 看最近的圈（whose=self/user/别的 bot 名，days 默认 7）；like 点赞或取消（moment_id）；reply 评论或回复评论（moment_id、parent_comment_id（评论圈本身填 0）、text、可选 image）；post 发一条圈（可选 topic、visibility=public/private）；set_image 给圈配图（moment_id、images）；delete_comment 删自己的评论（comment_id）。',
+        description: '朋友圈：recent 看最近的圈（whose：self=你自己发的、user=主人/对方发的、或别的 bot 的 id；对方说"你的朋友圈/我朋友圈"时注意别传反——问他自己发的用 user，问你自己发的才用 self。days 默认 7）；like 点赞或取消（moment_id）；reply 评论或回复评论（moment_id、parent_comment_id（评论圈本身填 0）、text、可选 image）；post 发一条圈（可选 topic、visibility=public/private）；set_image 给圈配图（moment_id、images）；delete_comment 删自己的评论（comment_id）。',
         inputSchema: {
           type: 'object',
           properties: {
@@ -769,8 +769,8 @@ export class Engine {
     const body = (r: TranscriptLine): string => {
       const t = r.text.replace(/\s+/g, ' ').trim().slice(0, 100)
       if (t) return t
-      // 这里只是私聊的近况摘要，没有图可看；写明看不到，避免模型编内容
-      return '[发了一张图片，这里看不到内容]'
+      // 只说"有图片这条消息"，不评价看得到看不到——写"看不到"会让模型主动汇报「我看不到群图」
+      return '[图片]'
     }
     // 先拼成「谁：内容」再进筛选：selectRecapRows 只看 ts（窗口/水位/句数），
     // from 在群聊近况里不参与文案，只为复用同一套筛选逻辑。

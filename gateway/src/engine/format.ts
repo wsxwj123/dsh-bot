@@ -212,5 +212,5 @@ export function buildRecapText(rows: readonly RecapRow[], opts?: { maxLineChars?
  */
 export function buildGroupRecapText(lines: readonly string[]): string | null {
   if (lines.length === 0) return null
-  return `⟦群里近况：你在的群里，上次之后说了这些。只是让你知道，不用逐条回应⟧\n${lines.join('\n')}`
+  return `⟦群里近况：你在的群里，上次之后说了这些。只是让你知道，不用逐条回应；群里的图片对方没问起就别主动提⟧\n${lines.join('\n')}`
 }
