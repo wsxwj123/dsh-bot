@@ -1243,8 +1243,11 @@ def params_restore(bid):
     所以回滚本身也可回滚；pre-restore 自己一个配额（留最近 2 份），不挤占 save 的 2 份（R3-3）。"""
     body = _cfg_body()
     version = _cfg_version(body)
-    path = hub_config.backup_path(bid)
-    if path is None or not os.path.isfile(path):
+    # 备份列表里 save 与 restore（回滚前留的那份）都会列出来，页面也给它「回滚到此」按钮：
+    # 先按 save 前缀找，找不到再按 restore 前缀找，这样「回滚的回滚」才真的成立。
+    candidates = (hub_config.backup_path(bid), hub_config.backup_path(bid, kind="restore"))
+    path = next((p for p in candidates if p and os.path.isfile(p)), None)
+    if path is None:
         raise HubError(404, "backup_not_found", "没有这份备份")
     try:
         with open(path, "r", encoding="utf-8") as f:
