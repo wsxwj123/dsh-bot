@@ -351,5 +351,6 @@ test('清单17 私聊近况里带群图片占位并写明看不到内容（防�
   expect(await waitTrue(() => prompts(a).some(p => p.text.includes('在吗')))).toBe(true)
   const p = prompts(a).find(p => p.text.includes('在吗'))!.text
   expect(p).toContain('⟦群里近况')
-  expect(p).toContain('[发了一张图片，这里看不到内容]')
+  // 2026-10-28：占位符改成 [图片]，图本身作为附件传进去（群聊里看到什么样私聊里就什么样）
+  expect(p).toContain('[图片]')
 })

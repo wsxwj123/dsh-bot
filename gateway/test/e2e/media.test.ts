@@ -117,7 +117,7 @@ test('图片进：附给模型看；模型看不了图时整条被拒，网关�
   await until(() => prompts(b).some(p => p.text.includes('看我拍的') && (p as any).images === 1), 'image attached')
   writeFileSync(join(b.acpState, 'no-images'), '1')
   tg.pushPhoto(OWNER, '再看这张')
-  await until(() => prompts(b).some(p => p.text.includes('再看这张') && p.text.includes('看不到图片内容')), 'text note instead')
+  await until(() => prompts(b).some(p => p.text.includes('再看这张') && p.text.includes('内容对你不可见')), 'text note instead')
   // 图片存在媒体目录里
   const media = join(b.botDir, 'media')
   const photo = readdirSync(media).find(f => f.startsWith('photo-'))!

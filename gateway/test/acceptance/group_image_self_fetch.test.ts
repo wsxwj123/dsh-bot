@@ -10,6 +10,12 @@ import { dirname, join, relative } from 'path'
 import { FakeTelegram } from '../fakes/fake-telegram'
 import { FRIEND, Gateway, IS_WIN, logEvents, makeBot, OWNER, prompts, readJsonl, sleep, until, type BotEnv } from './_acc'
 
+// 读图链路会校验图片头，夹具必须是真 PNG：1×1 RGBA
+const PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+)
+
 const GROUP = -1001777
 const A_NAME = 'bot_a_dsh_bot'
 const MiB = 1024 * 1024
@@ -368,7 +374,7 @@ test('群图自取15 折叠后仍按 ts 升序：超过上限的那张下一轮�
 test('群图自取16 私聊回合也附群图：被问「群里那张图是什么」时不用凭空编', async () => {
   let img = ''
   const { tg, b } = await setup({
-    prepare: d => { img = join(d.shared, 'dm-group.png'); writeFileSync(img, 'png') },
+    prepare: d => { img = join(d.shared, 'dm-group.png'); writeFileSync(img, PNG) },
   })
   // 群里有一张别人发的图（本 bot 或对端写的都行），私聊回合要能拿到它
   seed(b, {
