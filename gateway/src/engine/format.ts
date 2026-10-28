@@ -241,28 +241,29 @@ export type GroupRecapRow = RecapRow & {
 
 export type RecapBlock = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
 export type RecapImageRead = { ok: true; real: string; mimeType: string; data: string } | { ok: false; reason: string }
-
 /**
  * 把近况行排成「文本/图片交错」的 blocks：从最新行往前挑最多 3 张图，同一 realpath 只留一张；
  * 选中行的文本块后面紧跟它的图片块，读不到的行只留纯文本（纯图行用 [图片] 占位）。
  * 未来时间戳的行整行跳过（还没发生，不该进水印也不该附图）。无行返回 null。
+ * unreadKeys 是「尝试读过但失败」的行键：这些行不认领，留给 groupImages 按它自己的上限再试一次。
  */
 export function buildGroupRecapBlocks(
   rows: readonly GroupRecapRow[],
   read: (path: string) => RecapImageRead,
-): { blocks: RecapBlock[]; seenReals: Set<string> } | null {
+): { blocks: RecapBlock[]; seenReals: Set<string>; unreadKeys: Set<string> } | null {
   const now = Date.now()
   const visible = rows.filter(r => Number.isFinite(r.ts) && r.ts <= now)
   if (visible.length === 0) return null
   const imageAt = new Map<number, { data: string; mimeType: string }>()
   const seenReals = new Set<string>()
+  const unreadKeys = new Set<string>()
   for (let i = visible.length - 1; i >= 0 && imageAt.size < MAX_RECAP_IMAGES_PER_TURN; i--) {
     const r = visible[i]!
     if (r.from === 'bot') continue // 自己发的图不附（与 groupImages 一致）
     const info = inspectImagePath({ image_path: r.imagePath, attachment_kind: r.attachment_kind })
     if (!info || info.kind !== 'image') continue
     const got = read(info.path)
-    if (!got.ok) continue // 读不到就不附，文本照常（不写"看不到"）
+    if (!got.ok) { unreadKeys.add(r.key); continue } // 读不到就不附，文本照常（不写"看不到"）
     if (seenReals.has(got.real)) continue
     seenReals.add(got.real)
     imageAt.set(i, { data: got.data, mimeType: got.mimeType })
@@ -277,5 +278,5 @@ export function buildGroupRecapBlocks(
     const img = imageAt.get(i)
     if (img) blocks.push({ type: 'image', data: img.data, mimeType: img.mimeType })
   })
-  return { blocks, seenReals }
+  return { blocks, seenReals, unreadKeys }
 }

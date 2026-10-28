@@ -38,7 +38,7 @@ import {
   buildGroupRecapBlocks, buildRecapText,
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
   DM_RECAP_LIMIT, DM_RECAP_WINDOW_MS, GROUP_RECAP_LIMIT, GROUP_RECAP_WINDOW_MS,
-  MAX_RECAP_IMAGE_BYTES, MAX_RECAP_IMAGE_SIDE,
+  MAX_RECAP_IMAGE_BYTES, MAX_RECAP_IMAGE_SIDE, RECAP_IMAGE_PLACEHOLDER,
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, selectRecapRows, summaryPrompt,
   type GroupRecapRow,
 } from './format'
@@ -729,6 +729,11 @@ export class Engine {
   start(): void {
     // 崩溃重来的次数上限和报错重试一致：最多重来 maxTurnRetries 次（共 maxTurnRetries + 1 次）
     const rep = this.ledger.recoverOnStartup(this.cfg.gw.maxTurnRetries + 1)
+    // 启动回收把段作废了：和运行中的作废路径一样清水位，否则新段不会重注群近况/群图
+    for (const segId of rep.abandonedSegments) {
+      const chatId = this.ledger.segment(segId)?.chat_id
+      if (chatId) void this.resetCrossChatWatermarks(chatId)
+    }
     if (rep.crashedTurns.length || rep.abortedTurns.length || rep.ambiguousOutbound.length) {
       this.log.warn('recovery', { crashed: rep.crashedTurns.length, aborted: rep.abortedTurns.length, requeued: rep.requeued.length, settled: rep.settled.length, abandoned_segments: rep.abandonedSegments.length, ambiguous_outbound: rep.ambiguousOutbound.length })
     }
@@ -780,7 +785,7 @@ export class Engine {
     const body = (r: TranscriptLine): string => {
       const t = r.text.replace(/\s+/g, ' ').trim().slice(0, 100)
       // 只说"有图片这条消息"，不评价看得到看不到——写"看不到"会让模型主动汇报「我看不到群图」
-      return t || '[图片]'
+      return t || RECAP_IMAGE_PLACEHOLDER
     }
     const recapRows: GroupRecapRow[] = rows
       // 未来时间戳的行还没发生：不选、绝不把水位推到未来
@@ -803,8 +808,12 @@ export class Engine {
     const built = buildGroupRecapBlocks(picked, read)
     if (!built) return null
     const blocks: Block[] = built.blocks.map(b => b.type === 'image' ? { imageData: b.data, mimeType: b.mimeType } : b.text)
-    // picked 中所有带 image_path 的行都算认领（document/读失败/超过 3 张也算），群图通道不再附
-    const handledKeys = new Set(picked.filter(r => r.imagePath !== undefined).map(r => r.key))
+    // 认领范围：picked 中带 image_path 的行，但「尝试读过、读失败」的不认领——
+    // 留给 groupImages 按它自己的 8 MiB 老规则再试一次（能力不回归）；它读到失败也会 consumed，不会反复重试。
+    // document/形状不合格/超过 3 张没尝试的行照常认领（这些行换通道也附不上/不该再附）。
+    const handledKeys = new Set(picked
+      .filter(r => r.imagePath !== undefined && r.key !== undefined && !built.unreadKeys.has(r.key))
+      .map(r => r.key))
     this.log.info('group.recap', { chat: chatId, lines: picked.length, images: built.seenReals.size })
     return { blocks, handledKeys, seenReals: built.seenReals, pendingMeta: { key, value: String(picked[picked.length - 1]!.ts) } }
   }
@@ -890,14 +899,23 @@ export class Engine {
     return { blocks: res.picks.map(p => ({ imageData: p.data, mimeType: p.mimeType })), pendingMeta }
   }
 
-  /** 两阶段水位的第二阶段：内容 prompt 成功后统一落盘。写失败不挡回合，下轮重新计划（宁可重复，不永久丢）。 */
+  /** 两阶段水位的第二阶段：内容 prompt 成功后统一落盘。逐键处理：一个键写失败不影响另一个，
+   *  写失败的水位下轮重新计划（宁可重复，不永久丢）。 */
   private commitPendingMetas(chatId: string, metas: readonly PendingMeta[]): void {
-    if (metas.length === 0) return
-    try {
-      for (const m of metas) this.ledger.setMeta(m.key, m.value)
-    } catch (e) {
-      this.log.warn('recap.watermark_failed', { chat: chatId, err: safeError(e) })
+    for (const m of metas) {
+      try { this.ledger.setMeta(m.key, m.value) } catch (e) {
+        this.log.warn('recap.watermark_failed', { chat: chatId, key: m.key, err: safeError(e) })
+      }
     }
+  }
+
+  /**
+   * 段被作废（上下文丢了）：关段并清四个跨聊天水位，否则新段因水位还在不会重注群近况/群图。
+   * 只用于「作废」路径；正常换段走 rollSegment（它自己会清），别在还要继续用段的地方调。
+   */
+  private abandonSegment(seg: SegmentRow, reason: string): void {
+    this.ledger.closeSegment(seg.id, 'abandoned', reason)
+    void this.resetCrossChatWatermarks(seg.chat_id)
   }
 
   /**
@@ -1265,7 +1283,7 @@ export class Engine {
       }
       if (outcome.type === 'crashed') {
         this.ledger.finishTurn(turn.id, 'crashed', { error: outcome.err })
-        this.ledger.closeSegment(seg.id, 'abandoned', 'crash')
+        this.abandonSegment(seg, 'crash')
         this.loaded.delete(seg.session_id ?? '')
         if (done) { this.ledger.settleInbound(ids, 'done', 'replied before crash'); return 0 }
         const dead: number[] = []
@@ -1331,7 +1349,7 @@ export class Engine {
       if (wait > 0) await sleep(wait)
       if (!this.dsh.running) {
         // 等待期间进程没了：这一段作废，消息放回队列，下一轮开新段补前情
-        this.ledger.closeSegment(seg.id, 'abandoned', 'dsh gone during retry wait')
+        this.abandonSegment(seg, 'dsh gone during retry wait')
         this.ledger.requeueInbound(ids)
         return 1_000
       }
@@ -1444,7 +1462,7 @@ export class Engine {
       } catch (e) {
         if (e instanceof AcpExited) throw e
         this.log.warn('segment.resume_failed', { chat: chatId, segment: seg.id, err: safeError(e) })
-        this.ledger.closeSegment(seg.id, 'abandoned', 'resume failed')
+        this.abandonSegment(seg, 'resume failed')
         seg = null
       }
     }
