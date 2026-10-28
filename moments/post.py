@@ -149,7 +149,7 @@ def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
     # 强信号(event/special_date)例外可插队。是否真发最终由文案 LLM 判断——
     # 没到想发的程度就输出空串放弃。
     # ponytail: 被 LLM 拒发(空串)时下一 tick 仍会再问一次；配额吃紧再加"询问节流"。
-    if kind not in ("event", "special_date") and db_module is not None:
+    if kind not in ("event", "special_date") and db_module is not None and not force:
         try:
             recent_any = db_module.list_moments(bot_id=bot_cfg.get("id", ""), limit=1,
                                                 since_ts=int(now.timestamp()) - 60*60)

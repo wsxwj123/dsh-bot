@@ -221,8 +221,9 @@ def test_force_true_每日上限已到_返回None且不生成(monkeypatch, tmp_p
 
 # ── 行为补充：force=True 仍不跳过静默期（接口「其余闸不变」） ──
 
-def test_force_true_静默期内_仍按min_interval挡住(monkeypatch, tmp_path, capsys):
-    # 30 分钟前刚发过圈，落在 60 分钟静默期内；force 只跳过 4 小时同 kind 闸
+def test_force_true_静默期内也放行(monkeypatch, tmp_path, capsys):
+    # 2026-10-28 用户要求：明确要求发朋友圈就发，不受「60 分钟静默期」限制
+    # 30 分钟前刚发过圈，落在静默期内，force=True 仍应走到生成
     stub_db = StubDb(rows=[_moment_row(30 * 60)])
     stub_llm = StubLlm()
 
@@ -230,9 +231,8 @@ def test_force_true_静默期内_仍按min_interval挡住(monkeypatch, tmp_path,
                      force=True, wildcard=_wildcard())
 
     output = _output(capsys)
-    assert result is None
-    assert "min_interval" in output, "force=True 绕过了静默期：%r" % output
-    assert stub_llm.calls == [], "静默期内不该走到文案生成"
+    assert "min_interval" not in output, "force=True 仍被静默期挡住：%r" % output
+    assert stub_llm.calls != [], "静默期内 force=True 应该走到文案生成"
 
 
 # ── 行为 5：force=True 且成功 → 返回新的 moment_id ──
