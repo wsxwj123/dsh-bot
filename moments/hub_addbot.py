@@ -563,6 +563,10 @@ def _summary_section(lines):
     """按小节切分（**必须在剥 ``#`` 之前**做）：找第一个 ``##`` / ``###`` 标题且标题文本含
     停止词的「停止小节」，返回 ``(从文件开头到该小节结束的行, True)``；没有回 ``(全部行, False)``。
 
+    **为什么只认 2–3 级**：``# 说话方式`` 作为一级主标题时，它下面包含所有 ``##`` 子节，
+    按「切到下一个同级或更高级标题」的规则会一路切到文档末尾——摘要变成全文（再被 4000 兜住），
+    不是「只剩标题」。限制到 2–3 级能挡住这种误命中；实测五只 bot 的停止小节全是 ``##``。
+
     小节结束 = 下一个同级或更高级标题之前（``###`` 小节里的 ``####`` 仍算它自己的内容；
     文件末尾没有下一个标题就到末尾）。"""
     for i, line in enumerate(lines):
@@ -600,12 +604,24 @@ def _persona_summary_ex(text):
         # C0/C1 控制字符（NUL、ESC 等）会让 PyYAML 解析块标量时直接抛错，
         # 文件读不出来的话这只 bot 的 jiwen tick 会整条停掉，所以先剔掉
         line = re.sub(r"[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f]", "", line)
+        # 整行只有一个 markdown 文件名（如人设开头误贴的 "SOUL.md"）——不是人设内容，丢掉
+        if re.fullmatch(r"\s*[\w.-]+\.md\s*", line, flags=re.IGNORECASE):
+            continue
         line = re.sub(r"^#+[ \t]*", "", line)       # 标题符与紧跟的空格（只去行首，不吃换行）
         line = line.replace("**", "").replace("`", "")
         out.append(line.strip())
     # 连续多个空行压成一个空行（保留段落分隔）；单个空行不动
     summary = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
-    summary = summary[:_SUMMARY_SECTION_MAX if found else _SUMMARY_TRUNCATE_MAX]
+    limit = _SUMMARY_SECTION_MAX if found else _SUMMARY_TRUNCATE_MAX
+    if len(summary) > limit:
+        head = summary[:limit]
+        # 回退到句末标点，最多退 100 字（不切半句话；与 claude 侧口径一致）
+        floor = max(len(head) - 100, 0)
+        for i in range(len(head) - 1, floor - 1, -1):
+            if head[i] in "。！？!?；;\n":
+                head = head[:i + 1]
+                break
+        summary = head
     placeholder_chars = sum(len(m) for m in _PLACEHOLDER_RE.findall(summary))
     if placeholder_chars * 2 > len(summary):        # 先截断再算占比：长模板后面的正文不能把比例摊薄
         return "", "section" if found else "truncate"
