@@ -76,10 +76,16 @@ def main():
     g_force = {**g, "moments": {**(g.get("moments") or {}), "silence_threshold_minutes": 0}}
     cfg_force = {**cfg, "moments_daily_limit": 999}
 
+    why = {}
     mid = maybe_post_moment(bot_id, cfg_force, now, sit, world, wildcard,
-                            mood, factors, 999, g_force, force=True)
+                            mood, factors, 999, g_force, force=True, out=why)
     if not mid:
-        print("FAIL 没生成（LLM 返回空 / 触发独白闸 / 无素材）", file=sys.stderr); sys.exit(3)
+        # 2026-10-28：把真因照实写出来。原来笼统一句「LLM 返回空 / 触发独白闸 / 无素材」
+        # 会把上游给的具体原因（daily_limit(N) / same_kind(X) within 4h 等）盖掉，排查被误导过。
+        reason = (why or {}).get("skip") or ""
+        print(f"FAIL 没生成：{reason}" if reason else "FAIL 没生成（原因未记录，见 stderr 上游日志）",
+              file=sys.stderr)
+        sys.exit(3)
 
     m = db.get_moment(mid)
     # visibility 校正（用户明确要 private 但 LLM 出了 public，强改）

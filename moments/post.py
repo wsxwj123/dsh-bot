@@ -179,9 +179,27 @@ def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
     return (True, kind, reason)
 
 
+def _skip(bot_id, out, reason):
+    """记下跳过原因并返回 None。
+
+    2026-10-28：原来有几处前置判断（功能开关、当日上限）一个字节都不打就 return None，
+    外部只看到「发不出去」。现在统一走这里——**同时写 stderr 和 out**（dsh 是用户说发才调，
+    不像 claude 侧每分钟 tick，写 stderr 不会刷屏）。
+
+    原因取值与 claude 侧对齐：moments_disabled / feature_off / daily_limit(N) /
+    llm_empty / too_long(N) / monologue / exception(...)；should_post_moment 的原值
+    （no material / same_kind(X) within 4h / min_interval(...)）**原样透传不改写**——
+    改写一次信息就断了。
+    """
+    sys.stderr.write(f"[{bot_id}] moment skip: {reason}\n")
+    if out is not None:
+        out["skip"] = reason
+    return None
+
+
 def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard,
                       mood, mood_factors, since_user_min, global_cfg,
-                      jiwen_info=None, force=False) -> int | None:
+                      jiwen_info=None, force=False, out=None) -> int | None:
     """决定是否发朋友圈，返回 moment_id 或 None。
 
     新加 jiwen_info 入参（life-context.py 传 jiwen reader.read 的返回 dict）。
@@ -195,13 +213,13 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
     """
     moments_cfg = (global_cfg or {}).get("moments", {})
     if not moments_cfg.get("enabled", True):
-        return None
+        return _skip(bot_id, out, "moments_disabled")
 
     # 1. 当日上限（先查，能省一次 should_post_moment 计算）
     daily_limit = bot_cfg.get("moments_daily_limit") or moments_cfg.get("daily_post_limit_per_bot", 3)
     today = now.strftime("%Y-%m-%d")
     if db.count_moments_today(bot_id, today) >= daily_limit:
-        return None
+        return _skip(bot_id, out, f"daily_limit({daily_limit})")
 
     # 2. 情境驱动闸（独立于 judge）—— 决定是否发 + kind
     bot_cfg_with_id = dict(bot_cfg)
@@ -211,8 +229,7 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
         bot_cfg_with_id, since_user_min, now, db_module=db, force=force,
     )
     if not go:
-        sys.stderr.write(f"[{bot_id}] moment skip: {reason}\n")
-        return None
+        return _skip(bot_id, out, reason)
     sys.stderr.write(f"[{bot_id}] moment go: kind={kind} reason={reason}\n")
 
     # 4. 生成文案 + visibility（LLM 一并决定）
