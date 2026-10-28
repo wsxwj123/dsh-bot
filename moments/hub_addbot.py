@@ -607,7 +607,13 @@ def _persona_summary_ex(text):
         # 整行只有一个 markdown 文件名（如人设开头误贴的 "SOUL.md"）——不是人设内容，丢掉
         if re.fullmatch(r"\s*[\w.-]+\.md\s*", line, flags=re.IGNORECASE):
             continue
-        line = re.sub(r"^#+[ \t]*", "", line)       # 标题符与紧跟的空格（只去行首，不吃换行）
+        # 标题行**整行丢掉**（不是剥掉 # 把文字留下）：摘要给情绪裁判看，
+        # 「Role: …」「核心设定」这类标题没有信息量。切片已经在剥之前做完了，这里可以放心丢。
+        if re.match(r"^#{1,6}[ \t]", line):
+            continue
+        # 人设模板常见的纯文本「Role: …」行（不带 #），同样是模板标记不是正文
+        if re.match(r"^Role\s*[:：]", line, flags=re.IGNORECASE):
+            continue
         line = line.replace("**", "").replace("`", "")
         out.append(line.strip())
     # 连续多个空行压成一个空行（保留段落分隔）；单个空行不动
