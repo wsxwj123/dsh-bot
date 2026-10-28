@@ -81,17 +81,23 @@ LISTED = [
     ("GET", "/hub/api/dsh-model/%s/effort" % BOT, None),
     ("POST", "/hub/api/dsh-model/%s/effort" % BOT, {"effort": "high"}),
     ("POST", "/hub/api/dsh-model/provider/save", {"name": "fake-vendor-new", "key": PROVIDER_KEY}),
+    ("GET", "/hub/params", None),
+    ("GET", "/hub/api/params", None),
+    ("POST", "/hub/api/params", {"values": {}, "version": "x"}),
+    ("GET", "/hub/api/params/raw", None),
+    ("POST", "/hub/api/params/raw", {"text": "user_display_name: x\n", "version": "x"}),
+    ("GET", "/hub/api/params/backups", None),
+    ("POST", "/hub/api/params/backups/20261029-021500/restore", {"version": "x"}),
 ] + [("POST", _prov(op), {}) for op in ("preview", "models", "refresh", "remove", "test")]
 
 #: 名单外的 /hub/ 路径：约定第 3 节举的例子，加上"不规范化"推出来的几个（末尾斜杠、双斜杠）
 UNLISTED = [
     ("GET", "/hub"),
     ("GET", "/hub/"),
-    ("GET", "/hub/params"),
     ("GET", "/hub/provider"),
     ("GET", "/hub/setup"),
-    ("GET", "/hub/api/params"),
-    ("POST", "/hub/api/params"),
+    ("GET", "/hub/api/params/nope"),
+    ("GET", "/hub/api/params/"),
     ("GET", "/hub/api/provider"),
     ("POST", "/hub/api/provider"),
     ("POST", "/hub/api/oauth/callback"),
@@ -121,6 +127,11 @@ WRONG_METHOD = [
     ("GET", "/hub/api/dsh-model/provider/save"),
     ("GET", _prov("preview")),
     ("GET", _prov("remove")),
+    ("POST", "/hub/params"),
+    ("PUT", "/hub/api/params"),
+    ("PUT", "/hub/api/params/raw"),
+    ("POST", "/hub/api/params/backups"),
+    ("GET", "/hub/api/params/backups/20261029-021500/restore"),
 ]
 
 
@@ -493,7 +504,8 @@ def test_带对令牌停用一只假bot_回应与配置文件变化和8765同一
 # ================================================================ 令牌与密钥不外泄
 #: (方法, 路径, 应得状态码)：先确认请求真的到了该到的地方，再看有没有带出令牌
 LEAK_PROBES = [("GET", "/hub/bots", 200), ("GET", "/hub/addbot", 200), ("GET", "/hub/dsh-model", 200),
-               ("GET", "/hub/api/bots", 200), ("GET", "/hub/params", 404), ("DELETE", "/hub/api/bots", 405)]
+               ("GET", "/hub/api/bots", 200), ("GET", "/hub/params", 200),
+               ("GET", "/hub/api/params", 200), ("DELETE", "/hub/api/bots", 405)]
 
 
 @pytest.mark.parametrize("method,path,status", LEAK_PROBES, ids=_ids(LEAK_PROBES))

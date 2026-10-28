@@ -78,24 +78,39 @@ def allowed_methods(resp):
     return {item.strip().upper() for item in raw.split(",") if item.strip()}
 
 
+#: 模板里的地址常被 JS 语法包着出现：`'/hub/api/params'`、`footer('/hub/api/params');`
+#: 正则会把尾部的引号、括号、分号一起吞进来，提取后要剥掉这些语法字符。
+JS_SYNTAX_CHARS = "\"'`);,]} \t\r\n"
+
+
 def api_urls_in(html):
-    """抽出 HTML 里所有 /hub/api/... 形式的地址（去掉查询串与锚点）。"""
+    """抽出 HTML 里所有 /hub/api/... 形式的地址（去掉 JS 语法字符、查询串与锚点）。"""
     pattern = re.compile(r"/hub/api/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%{}-]*")
     urls = []
     for match in pattern.finditer(html):
-        url = match.group(0).split("?")[0].split("#")[0]
-        urls.append(url)
+        url = match.group(0).split("?")[0].split("#")[0].strip(JS_SYNTAX_CHARS)
+        if url:
+            urls.append(url)
     return urls
 
 
 def whitelisted_url(url):
-    """按 BRIEF 的白名单判定：五个登记项；还原接口的 <bid> 只占一段。"""
+    """按适配服务名单判定：五个 params 登记项；<bid>/<job_id> 只占一段。
+
+    参数页复用的模板里还会调既有的 `/hub/api/bots/restart`（适配服务名单里本来就有），
+    JS 里用 `'/hub/api/bots/restart/' + encodeURIComponent(jobId)` 拼接，按前缀放行。
+    """
     if url in ("/hub/api/params", "/hub/api/params/raw", "/hub/api/params/backups"):
         return True
     if re.fullmatch(r"/hub/api/params/backups/[^/]+/restore", url):
         return True
     # 页面若用 JS 拼接还原地址，源码里会出现名单内接口的前缀，按前缀放行。
     if url in ("/hub/api/params/backups/", "/hub/api/params/backups"):
+        return True
+    # 既有的重启接口（页面重启按钮用），名单里本就有。
+    if url in ("/hub/api/bots/restart", "/hub/api/bots/restart/"):
+        return True
+    if re.fullmatch(r"/hub/api/bots/restart/[^/]+", url):
         return True
     return False
 
@@ -498,7 +513,15 @@ def test_读原文_文件不在404_文件坏409且不回显密钥(service):
 def test_写原文_原样回写加中文注释并产生备份(service):
     seed_config(service)
     version = current_version(service)
-    text = GLOBAL_YML + "# 中文注释：😀 引号 \" ' 反斜杠 \\ 保留原样\n"
+    # 接口约定入口 5 第 ⑤ 条：四个必需顶层键齐全才允许写，缺一个就是 400 schema_missing_key。
+    # 样本里同时保留两个静默阈值，写入后要能原样读回。
+    text = (
+        "user_display_name: 测试用户\n"
+        "max_calls_per_5h: 100\n"
+        "jiwen: {}\n"
+        + GLOBAL_YML
+        + "# 中文注释：😀 引号 \" ' 反斜杠 \\ 保留原样\n"
+    )
     resp = service.request("POST", "/hub/api/params/raw",
                            body={"text": text, "version": version})
     assert resp.status == 200, "写原文期望 200，实际 %d：%r" % (resp.status, resp.text[:300])
@@ -508,6 +531,9 @@ def test_写原文_原样回写加中文注释并产生备份(service):
     assert body["version"] != version
     assert body["restart_hint"] == {"bot": True, "moments_web": True}
     assert config_bytes(service).decode("utf-8") == text, "raw 写入应按提交文本原样落盘"
+    saved = read_config(service)
+    assert saved[TOP_KEY] == 42 and saved["moments"][TOP_KEY] == 17, \
+        "写回后两个静默阈值必须仍在"
     backup = service.config_dir / ("_global.yml.bak." + body["backup"])
     assert backup.exists(), "写原文也必须先产生备份 %s" % backup.name
 
