@@ -188,7 +188,7 @@ $('create').addEventListener('click', async () => {
   $('create').disabled = false;
   renderSteps(b.steps);
   if (r.status === 201) {
-    hubSay($('create-msg'), '创建成功：' + b.bot_id + '（@' + b.username + '）');
+    hubSay($('create-msg'), '创建成功：' + b.bot_id + '（@' + b.username + '）\n\n⚠️ 还有一件事：这只 bot 的生活设定里 persona_summary 是空的——那是一句话人设简介，情绪裁判靠它判断好感度怎么涨跌。建议现在去「生活设定」页补一句，比如「38岁成熟人妻，黏人但骄傲」。');
     hubSay($('hint'), '它已经在跑了，去「bot 状态」页就能看到。');
   } else if (r.status === 207) {
     hubSay($('create-msg'), '文件都建好了，但有步骤没走完 —— 按下面的命令自己补一下');
