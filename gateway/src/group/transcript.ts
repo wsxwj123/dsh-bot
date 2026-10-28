@@ -43,10 +43,22 @@ export function transcriptTs(v: unknown): number {
 }
 
 /**
+ * 一条群记录的去重键：`chat_id + ts取整到秒 + from_id`。同一条消息被多只 bot 各记一遍时这个键相同，
+ * 跨两侧的群图去重也用它（recap 认领过的行，groupImages 靠这个键跳过）。
+ * ts 或 from_id 缺失/解析不出来时返回 null。
+ */
+export function dedupGroupKey(l: Pick<TranscriptLine, 'ts' | 'chat_id' | 'from_id'>): string | null {
+  if (typeof l.ts !== 'string' || typeof l.from_id !== 'string' || !l.from_id) return null
+  const t = Date.parse(l.ts)
+  if (!Number.isFinite(t)) return null
+  return `${l.chat_id}\u0000${Math.floor(t / 1000)}\u0000${l.from_id}`
+}
+
+/**
  * v1.4 读侧去重（约定第 22 节）：同一批群记录行里，把「同一条真人消息被多只 bot 各记一遍」的那些
  * 收敛成一份。
  *
- * 分组：`chat_id + ts取整到秒 + from_id`——**ts 必须取整**，因为 bot 自己发言那类行的 ts 是本地
+ * 分组：`chat_id + ts取整到秒 + from_id`（dedupGroupKey）——**ts 必须取整**，因为 bot 自己发言那类行的 ts 是本地
  * 发出时刻、带毫秒，而 peer 记的是 Telegram 的秒级 date，不取整同一句话会被分进两个组。
  *
  * 组内再按 `observed_by` 分组，取**行数最多**的那组（并列时取 observed_by 字典序最小，保证各读方
@@ -54,12 +66,7 @@ export function transcriptTs(v: unknown): number {
  * `ts` 或 `from_id` 缺失/解析不出来的行不参与分组，原样保留。
  */
 export function dedupTranscriptLines(lines: TranscriptLine[]): TranscriptLine[] {
-  const keyOf = (l: TranscriptLine): string | null => {
-    if (typeof l.ts !== 'string' || typeof l.from_id !== 'string' || !l.from_id) return null
-    const t = Date.parse(l.ts)
-    if (!Number.isFinite(t)) return null
-    return `${l.chat_id}\u0000${Math.floor(t / 1000)}\u0000${l.from_id}`
-  }
+  const keyOf = (l: TranscriptLine): string | null => dedupGroupKey(l)
   const groups = new Map<string, TranscriptLine[]>()
   const loose: TranscriptLine[] = []
   for (const l of lines) {

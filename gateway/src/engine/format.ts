@@ -1,5 +1,6 @@
 // 每轮送给模型的文字格式。系统说明一律用 ⟦…⟧ 包起来；用户正文里的 ⟦ ⟧ 会被换掉，防止伪造系统说明（H-27）。
 import type { InboundRow, TranscriptEntry } from '../ledger'
+import { inspectImagePath } from '../group/shared_images'
 
 export function escapeUserText(s: string): string {
   return s.replace(/⟦/g, '〚').replace(/⟧/g, '〛')
@@ -185,7 +186,7 @@ const RECAP_LINE_CHARS = 200
  * 从按 ts 升序的行里选出要注入的：窗口内（ts > afterMs）、水位之后（ts 严格大于 watermark），
  * 取最后 limit 行。水位在未来（时钟回拨）时视为失效，重置到窗口起点。
  */
-export function selectRecapRows(rows: readonly RecapRow[], afterMs: number, limit: number, watermark?: number): RecapRow[] {
+export function selectRecapRows<T extends RecapRow>(rows: readonly T[], afterMs: number, limit: number, watermark?: number): T[] {
   if (limit <= 0) return [] // slice(-0) 会返回整个数组，必须单独挡掉
   const floor = watermark !== undefined && Number.isFinite(watermark) && watermark <= Date.now() ? watermark : afterMs
   return rows.filter(r => r.ts > afterMs && r.ts > floor).slice(-limit)
@@ -210,7 +211,71 @@ export function buildRecapText(rows: readonly RecapRow[], opts?: { maxLineChars?
  * 群聊近况（私聊回合注入）沿用原来的格式：一行说明 + 每行「谁：内容」。
  * 行内容（说话人、100 字截断、图片占位）由调用方按群记录拼好，这里只负责外壳。
  */
+export const GROUP_RECAP_HEADER = '⟦群里近况：你在的群里，上次之后说了这些。只是让你知道，不用逐条回应；群里的图片对方没问起就别主动提⟧'
+export const RECAP_IMAGE_PLACEHOLDER = '[图片]'
+
 export function buildGroupRecapText(lines: readonly string[]): string | null {
   if (lines.length === 0) return null
-  return `⟦群里近况：你在的群里，上次之后说了这些。只是让你知道，不用逐条回应；群里的图片对方没问起就别主动提⟧\n${lines.join('\n')}`
+  return `${GROUP_RECAP_HEADER}\n${lines.join('\n')}`
+}
+
+// ─── 群近况附图（group-image-in-dm）：图必须紧跟对应那行，所以近况改成 blocks ───
+
+/** 一回合最多附几张群图 */
+export const MAX_RECAP_IMAGES_PER_TURN = 3
+/** 近况附图单张字节上限（群图通道仍是 8 MiB） */
+export const MAX_RECAP_IMAGE_BYTES = 2 * 1024 * 1024
+/** 近况附图边长上限（纯色大 PNG 可以很小但几千像素，只限字节挡不住） */
+export const MAX_RECAP_IMAGE_SIDE = 2048
+
+/** 近况行：text 是原始正文（未加「谁：」前缀），from 只区分本人/对方 */
+export type GroupRecapRow = RecapRow & {
+  /** 这一行在群记录里的去重键（dedupGroupKey；解析不出时退回消息编号） */
+  key: string
+  /** 群记录里的附图路径（不可信输入，由 inspectImagePath 校验） */
+  imagePath?: string
+  attachment_kind?: string
+  /** 非本人行的显示名（群里的其他人）；缺省「对方」 */
+  who?: string
+}
+
+export type RecapBlock = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
+export type RecapImageRead = { ok: true; real: string; mimeType: string; data: string } | { ok: false; reason: string }
+
+/**
+ * 把近况行排成「文本/图片交错」的 blocks：从最新行往前挑最多 3 张图，同一 realpath 只留一张；
+ * 选中行的文本块后面紧跟它的图片块，读不到的行只留纯文本（纯图行用 [图片] 占位）。
+ * 未来时间戳的行整行跳过（还没发生，不该进水印也不该附图）。无行返回 null。
+ */
+export function buildGroupRecapBlocks(
+  rows: readonly GroupRecapRow[],
+  read: (path: string) => RecapImageRead,
+): { blocks: RecapBlock[]; seenReals: Set<string> } | null {
+  const now = Date.now()
+  const visible = rows.filter(r => Number.isFinite(r.ts) && r.ts <= now)
+  if (visible.length === 0) return null
+  const imageAt = new Map<number, { data: string; mimeType: string }>()
+  const seenReals = new Set<string>()
+  for (let i = visible.length - 1; i >= 0 && imageAt.size < MAX_RECAP_IMAGES_PER_TURN; i--) {
+    const r = visible[i]!
+    if (r.from === 'bot') continue // 自己发的图不附（与 groupImages 一致）
+    const info = inspectImagePath({ image_path: r.imagePath, attachment_kind: r.attachment_kind })
+    if (!info || info.kind !== 'image') continue
+    const got = read(info.path)
+    if (!got.ok) continue // 读不到就不附，文本照常（不写"看不到"）
+    if (seenReals.has(got.real)) continue
+    seenReals.add(got.real)
+    imageAt.set(i, { data: got.data, mimeType: got.mimeType })
+  }
+  const blocks: RecapBlock[] = []
+  visible.forEach((r, i) => {
+    const who = r.from === 'bot' ? '你' : (r.who ?? '对方')
+    const body = r.text.length > 0 ? r.text : RECAP_IMAGE_PLACEHOLDER
+    // 第一行的文本块带上说明头：这样所有文本块按顺序拼起来与 buildGroupRecapText 逐字相同
+    const line = escapeUserText(`${who}：${body}`)
+    blocks.push({ type: 'text', text: i === 0 ? `${GROUP_RECAP_HEADER}\n${line}` : line })
+    const img = imageAt.get(i)
+    if (img) blocks.push({ type: 'image', data: img.data, mimeType: img.mimeType })
+  })
+  return { blocks, seenReals }
 }

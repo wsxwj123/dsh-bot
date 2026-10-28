@@ -254,10 +254,76 @@ export function collectSharedDirs(o: { sharedMediaDir: string; claudeMediaRoot: 
   return { write: Object.freeze([...new Set(write)]), read: Object.freeze([...new Set(read)]) }
 }
 
-export type SharedImageReason = 'realpath_failed' | 'not_file' | 'outside_allowlist' | 'too_large' | 'read_failed'
+export type SharedImageReason = 'realpath_failed' | 'not_file' | 'outside_allowlist' | 'too_large' | 'too_many_pixels' | 'read_failed'
 export type SharedImageRead =
   | { ok: true; real: string; mimeType: string; data: string }
   | { ok: false; reason: SharedImageReason }
+
+/** 图片的像素尺寸（只读文件头，不解码像素） */
+export type ImageSize = { width: number; height: number }
+
+const saneSize = (width: number, height: number): boolean =>
+  Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0 && width <= 1_000_000 && height <= 1_000_000
+
+/**
+ * 从 PNG / JPEG / WebP 的文件头解析宽高。解析不出来返回 null（调用方按"读不到"处理，fail closed）：
+ * 纯色大 PNG 可以几千像素却只有几十 KB，只限字节数挡不住，必须再限边长。
+ */
+export function imageDimensions(buf: Buffer): ImageSize | null {
+  // PNG：8 字节签名 + 长度(4) + "IHDR" + 宽(4) + 高(4)，均大端
+  if (buf.length >= 24 && buf[0] === 0x89 && buf.toString('ascii', 1, 4) === 'PNG' && buf.toString('ascii', 12, 16) === 'IHDR') {
+    const width = buf.readUInt32BE(16)
+    const height = buf.readUInt32BE(20)
+    return saneSize(width, height) ? { width, height } : null
+  }
+  // JPEG：SOS 之前找 SOF 段（C0-CF，排除 C4/C8/CC）；段长含长度字段自身的 2 字节
+  if (buf.length >= 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+    let i = 2
+    while (i + 4 <= buf.length) {
+      if (buf[i] !== 0xff) return null
+      const marker = buf[i + 1]!
+      if (marker === 0xff) { i++; continue } // 填充字节
+      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue }
+      if (marker === 0xd9 || marker === 0xda) return null // 到了图像数据/结尾还没见到 SOF
+      const len = buf.readUInt16BE(i + 2)
+      if (len < 2 || i + 2 + len > buf.length) return null
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        if (i + 9 > buf.length) return null
+        const height = buf.readUInt16BE(i + 5)
+        const width = buf.readUInt16BE(i + 7)
+        return saneSize(width, height) ? { width, height } : null
+      }
+      i += 2 + len
+    }
+    return null
+  }
+  // WebP：RIFF 容器，四种编码里只有 VP8/VP8L/VP8X 三种常见于照片/截图
+  if (buf.length >= 30 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
+    const format = buf.toString('ascii', 12, 16)
+    if (format === 'VP8 ') {
+      // 有损帧头：3 字节帧标记 + 9D 01 2A 起始码，随后宽、高各 2 字节小端（低 14 位有效）
+      if (buf[23] !== 0x9d || buf[24] !== 0x01 || buf[25] !== 0x2a) return null
+      const width = buf.readUInt16LE(26) & 0x3fff
+      const height = buf.readUInt16LE(28) & 0x3fff
+      return saneSize(width, height) ? { width, height } : null
+    }
+    if (format === 'VP8L') {
+      // 无损：0x2F 签名，随后 32 位小端里 14 位宽-1、14 位高-1
+      if (buf[20] !== 0x2f || buf.length < 25) return null
+      const bits = buf.readUInt32LE(21)
+      const width = (bits & 0x3fff) + 1
+      const height = ((bits >>> 14) & 0x3fff) + 1
+      return saneSize(width, height) ? { width, height } : null
+    }
+    if (format === 'VP8X') {
+      // 扩展：1 字节 flags + 3 字节保留 + 宽-1、高-1 各 3 字节小端
+      const width = (buf[24]! | (buf[25]! << 8) | (buf[26]! << 16)) + 1
+      const height = (buf[27]! | (buf[28]! << 8) | (buf[29]! << 16)) + 1
+      return saneSize(width, height) ? { width, height } : null
+    }
+  }
+  return null
+}
 
 function mimeOf(path: string): string {
   const ext = extname(path).toLowerCase()
@@ -289,8 +355,9 @@ function fdRealPath(fd: number): string | null {
  * 校验并读出一张群记录图片：realpath → 白名单 → O_NOFOLLOW 打开 → 按 fd 复核真实路径 →
  * 同一个 fd 上 fstat + read（关闭 TOCTOU）。
  * 任何一步不满足都返回原因，调用方静默降级（日志只记原因，不记路径）。
+ * maxSide 给了就再校验像素边长（解析不出当读不到，fail closed）；只给近况附图用，群图通道不传。
  */
-export function readSharedImage(path: string, allowDirs: readonly string[], maxBytes = MAX_SHARED_IMAGE_BYTES): SharedImageRead {
+export function readSharedImage(path: string, allowDirs: readonly string[], maxBytes = MAX_SHARED_IMAGE_BYTES, o?: { maxSide?: number }): SharedImageRead {
   let real: string
   try { real = realpathSync(path) } catch { return { ok: false, reason: 'realpath_failed' } }
   if (!inAllowlist(real, allowDirs)) return { ok: false, reason: 'outside_allowlist' }
@@ -322,6 +389,10 @@ export function readSharedImage(path: string, allowDirs: readonly string[], maxB
       const n = readSync(fd, buf, off, buf.length - off, off)
       if (n <= 0) return { ok: false, reason: 'read_failed' }
       off += n
+    }
+    if (o?.maxSide !== undefined) {
+      const dim = imageDimensions(buf)
+      if (!dim || Math.max(dim.width, dim.height) > o.maxSide) return { ok: false, reason: 'too_many_pixels' }
     }
     return { ok: true, real, mimeType: mimeOf(real), data: buf.toString('base64') }
   } catch {

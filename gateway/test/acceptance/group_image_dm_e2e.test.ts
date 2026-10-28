@@ -167,7 +167,7 @@ test('清单16 首轮失败（模型报错/重试用尽）：水位不落盘，�
   let img = ''
   const { tg, b } = await setup({ prepare: d => { img = join(d.shared, 'recap.png'); writeFileSync(img, PNG) } })
   seedOldImageRow(b, img, '带图近况乙')
-  const mid = tg.pushText(OWNER, '第一问 !empty:99:b')
+  const mid = tg.pushText(OWNER, '第一问 !empty:3:b')   // maxTurnRetries=2 → 共 3 次尝试，正好只失败第一轮
   await until(() => inboundRow(b, OWNER, mid)?.state === 'dead', '第一条消息重试用尽', 30_000)
   expect(metaGet(b, `group_recap:${DM}`) ?? '', '失败轮不应落盘水位').toBe('')
   const p1 = prompts(b).find(p => p.text.includes('第一问'))

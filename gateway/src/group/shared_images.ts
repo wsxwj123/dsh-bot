@@ -4,7 +4,7 @@
 import { realpathSync } from 'fs'
 import { extname, isAbsolute } from 'path'
 import { SHARED_IMAGE_EXTS } from '../media/media'
-import { transcriptTs, type TranscriptLine } from './transcript'
+import { dedupGroupKey, transcriptTs, type TranscriptLine } from './transcript'
 
 /** 水位：看过/给过的时间点，以及同一毫秒里已经消费过的消息编号（同秒多行不重复给、也不漏） */
 export type SharedImageWatermark = { after: number; ids: number[] }
@@ -18,7 +18,9 @@ export const GROUP_IMAGE_SCAN_LIMIT = 1000
 
 export type SharedImageSkipReason =
   | 'self' | 'bad_kind' | 'bad_path_value' | 'not_absolute' | 'bad_extension'
-  | 'realpath_failed' | 'not_file' | 'outside_allowlist' | 'too_large' | 'read_failed'
+  | 'realpath_failed' | 'not_file' | 'outside_allowlist' | 'too_large' | 'too_many_pixels' | 'read_failed'
+  /** 已经被私聊回合的群近况认领过（recap 附图 / 同 realpath 已读），本通道不再读 */
+  | 'recap_attached'
 
 export function parseWatermark(raw: string | null): SharedImageWatermark {
   try {
@@ -40,16 +42,23 @@ function isSelfLine(line: TranscriptLine, botUsername: string): boolean {
 
 type LineInfo = { kind: 'skip'; reason: SharedImageSkipReason } | { kind: 'image'; path: string }
 
-/** 只看记录里的字段形状：不是图片行返回 null；明显不合格给出原因；合格返回待校验的路径 */
-export function inspectImageLine(line: TranscriptLine, botUsername: string): LineInfo | null {
+/** 只看记录里的字段形状（不看是谁发的）：不是图片行返回 null；明显不合格给出原因；合格返回待校验的路径。
+ *  群近况（私聊回合）用它判断「这一行有图可附」，self 判定由调用方单独做。 */
+export function inspectImagePath(line: Pick<TranscriptLine, 'image_path' | 'attachment_kind'>): LineInfo | null {
   if (line.image_path === undefined) return null
-  if (isSelfLine(line, botUsername)) return { kind: 'skip', reason: 'self' }
   if (line.attachment_kind !== undefined && line.attachment_kind !== 'photo') return { kind: 'skip', reason: 'bad_kind' }
   const p = line.image_path
   if (typeof p !== 'string' || p.length === 0 || p.length > 4096 || p.includes('\0')) return { kind: 'skip', reason: 'bad_path_value' }
   if (!isAbsolute(p)) return { kind: 'skip', reason: 'not_absolute' }
   if (!SHARED_IMAGE_EXTS.has(extname(p).toLowerCase())) return { kind: 'skip', reason: 'bad_extension' }
   return { kind: 'image', path: p }
+}
+
+/** 只看记录里的字段形状：不是图片行返回 null；明显不合格给出原因；合格返回待校验的路径 */
+export function inspectImageLine(line: TranscriptLine, botUsername: string): LineInfo | null {
+  if (line.image_path === undefined) return null
+  if (isSelfLine(line, botUsername)) return { kind: 'skip', reason: 'self' }
+  return inspectImagePath(line)
 }
 
 /** 这一行在水位之后吗？同一毫秒里已消费过的消息编号跳过。 */
@@ -78,6 +87,11 @@ export function consumeSharedImages(o: {
   /** 本轮开始时刻（毫秒）：时间在它之后的行一律不消费（避免水位被推到未来、也避免反复附图） */
   now: number
   read: (path: string) => SharedImageRead
+  /** 已被别的通道（私聊回合的群近况）认领的行：只标记已消费，不读文件、不占每轮额度。
+   *  键接受 dedupGroupKey（同一消息被多只 bot 记录时的稳定键），也接受消息编号（数字或字符串）。 */
+  skipKeys?: ReadonlySet<string | number>
+  /** 本回合已经读出过的 realpath（recap 附过的图）：读到这一步之前就跳过，免得同一张图读两次 */
+  initialSeenReal?: ReadonlySet<string>
   onSkip?: (line: TranscriptLine, reason: SharedImageSkipReason) => void
 }): { picks: SharedImageHit[]; watermark: SharedImageWatermark; advanced: boolean; selfCheckUnavailable: boolean } {
   const picks: SharedImageHit[] = []
@@ -85,6 +99,13 @@ export function consumeSharedImages(o: {
   let selfCheckUnavailable = false
   let lastTs = -1
   let lastIds: number[] = []
+  const skipKeyHit = (line: TranscriptLine): boolean => {
+    const keys = o.skipKeys
+    if (!keys || keys.size === 0) return false
+    const dedup = dedupGroupKey(line)
+    if (dedup !== null && keys.has(dedup)) return true
+    return keys.has(line.message_id) || keys.has(String(line.message_id))
+  }
   const consumed = (line: TranscriptLine): void => {
     // 未来时间只推到 now，事后补写的行不会让水位越过现在
     const ts = Math.min(transcriptTs(line.ts), o.now)
@@ -99,6 +120,13 @@ export function consumeSharedImages(o: {
     const info = inspectImageLine(line, o.botUsername)
     if (!info) continue
     if (info.kind === 'skip') { o.onSkip?.(line, info.reason); consumed(line); continue }
+    // 近况通道已经认领过的行：不读文件、不占额度，但要消费掉，让水位越过它
+    if (skipKeyHit(line)) { o.onSkip?.(line, 'recap_attached'); consumed(line); continue }
+    if (o.initialSeenReal && o.initialSeenReal.size > 0) {
+      let real: string | null = null
+      try { real = realpathSync(info.path) } catch {}
+      if (real !== null && o.initialSeenReal.has(real)) { o.onSkip?.(line, 'recap_attached'); consumed(line); continue }
+    }
     if (!o.botUsername) selfCheckUnavailable = true
     // 到每回合上限就不再读文件（每张最多 8 MiB + base64），留给下一回合；
     // 只有"本回合已经给过的同一张图"才继续消费，判重单独用 realpath、不读内容

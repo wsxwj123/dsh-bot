@@ -18,7 +18,7 @@ import type { McpServer, ToolDef } from '../mcp/server'
 import type { TelegramApi } from '../telegram/api'
 import { isGroupChat, parseCommand } from '../telegram/inbound'
 import { readSeenGroups } from '../telegram/groups_seen'
-import { dedupTranscriptLines } from '../group/transcript'
+import { dedupGroupKey, dedupTranscriptLines } from '../group/transcript'
 import type { GroupTranscript, TranscriptLine } from '../group/transcript'
 import { describeResults, normText, planParts, type Sender } from '../telegram/sender'
 import { Backoff, randomToken, sleep } from '../util'
@@ -35,12 +35,12 @@ import { effectiveVoiceModel } from '../life/voice_model'
 import { loadFeatures, readFeatures, type Features } from '../features'
 import { StickerService } from '../stickers/sticker'
 import {
-  buildGroupRecapText, buildRecapText,
-  escapeUserText,
+  buildGroupRecapBlocks, buildRecapText,
   cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
   DM_RECAP_LIMIT, DM_RECAP_WINDOW_MS, GROUP_RECAP_LIMIT, GROUP_RECAP_WINDOW_MS,
+  MAX_RECAP_IMAGE_BYTES, MAX_RECAP_IMAGE_SIDE,
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, selectRecapRows, summaryPrompt,
-  type RecapRow,
+  type GroupRecapRow,
 } from './format'
 import { compactReply, formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, splitReply, summaryReply, type KeyStatus, type ModelChoice, type ProviderView } from './commands'
 import { ImagesUnsupportedTracker } from './image_support'
@@ -72,6 +72,19 @@ function hangText(t: string): string {
 
 /** 发给模型的一块内容：文字、一张图片（文件路径由引擎自己读），或已经读好的图片字节（群记录里的图） */
 type Block = string | { image: string } | { imageData: string; mimeType: string }
+
+/** 两阶段水位：计划阶段只算好键值，等内容 prompt 首次成功后才落盘 */
+type PendingMeta = { key: string; value: string }
+
+/** 私聊回合的群近况计划：文本/图片交错，图片紧跟对应行 */
+type GroupRecapPlan = {
+  blocks: Block[]
+  /** picked 中全部带 image_path 的行（document/读失败/超上限也算认领），群图通道据此跳过 */
+  handledKeys: ReadonlySet<string>
+  /** 本回合已读出的 realpath，群图通道据此不再重复读 */
+  seenReals: ReadonlySet<string>
+  pendingMeta: PendingMeta
+}
 
 function promptItems(blocks: Block[], noImages: boolean): object[] {
   return blocks.map(b => {
@@ -747,44 +760,53 @@ export class Engine {
    * 私聊每条都带前两行，与 claude 大脑（dispatcher/worker-manager.ts 给真人私聊加的前缀）一致；
    * 群里照旧只在新会话开头和内容变了时带。
    */
-  /** 私聊时附带"群里近况"（M5）：这个 bot 在的群里，上次带过之后又有人说话了，就带最近几句（最多 30 句，只看 48 小时内）。
-   *  会话按聊天分开（群里的话不进私聊会话），只靠这一小段让它接得上话 */
-  private groupRecap(chatId: string): string | null {
+  /** 私聊时准备"群里近况"（M5）：这个 bot 在的群里，上次带过之后又有人说话了，就带最近几句（最多 30 句，只看 48 小时内）。
+   *  会话按聊天分开（群里的话不进私聊会话），只靠这一小段让它接得上话。
+   *  带图的行把图紧跟在该行后面（最多 3 张、2 MiB、边长 2048，读不到只留 [图片]）。
+   *  水位不在这里落盘：返回 pendingMeta，由 runBatch 在首次内容 prompt 成功后统一写。 */
+  private planGroupRecap(chatId: string): GroupRecapPlan | null {
     if (!this.groups || !this.features.groups || isGroupChat(chatId)) return null
     const key = `group_recap:${chatId}`
-    const windowStart = Date.now() - GROUP_RECAP_WINDOW_MS
+    const now = Date.now()
+    const windowStart = now - GROUP_RECAP_WINDOW_MS
     const stored = Number(this.ledger.getMeta(key) || 0)
     const watermark = Number.isFinite(stored) && stored > 0 ? stored : undefined
-    // since 的 after 只做粗筛（窗口起点）；水位和"水位在未来"的重置统一交给 selectRecapRows，
-    // 否则旧版本把水位推到未来后，这里会因为 max(水位, 窗口起点) 取不到任何行。句数上限放到
-    // 筛选之后再截，保证水位过滤后仍能取到最近 GROUP_RECAP_LIMIT 句。
-    // since 也会返回纯图片/无文本的行（群图要用）。有图的空 text 行要留一行占位：
-    // 私聊里被问「群里那张图是什么」时，上下文里至少要有「群里有图」这个事实，
-    // 否则模型只会凭空编（2026-10-27 真机：私聊里编出「白瓷小杯子装草莓冻」）。
-    // 同一条群消息可能有两行（本 bot 的 observe 行 + 对端 bot 补写的带图行，observed_by 不同、
-    // since 按写方分开保留），近况里同一句只说一次。
+    // since 的 after 只做粗筛（窗口起点）；水位和"水位在未来"的重置统一交给 selectRecapRows。
+    // since 也会返回纯图片/无文本的行；同一条群消息可能被多只 bot 各记一遍，近况里同一句只说一次。
     const rows = dedupTranscriptLines(Object.keys(this.access().groups).map(k => k.trim()).flatMap(g => this.groups!.since(g, windowStart, GROUP_RECAP_LIMIT))
       .filter(r => r.text.trim() || typeof r.image_path === 'string'))
-    const who = (r: TranscriptLine) => r.is_bot && r.from_username === this.botUsername ? '你' : !r.is_bot && r.from_id === chatId ? '对方' : (r.from_name || r.from_username || '群友')
+    const self = (r: TranscriptLine): boolean => r.is_bot && r.from_username === this.botUsername
+    const who = (r: TranscriptLine): string => self(r) ? '你' : !r.is_bot && r.from_id === chatId ? '对方' : (r.from_name || r.from_username || '群友')
     const body = (r: TranscriptLine): string => {
       const t = r.text.replace(/\s+/g, ' ').trim().slice(0, 100)
-      if (t) return t
       // 只说"有图片这条消息"，不评价看得到看不到——写"看不到"会让模型主动汇报「我看不到群图」
-      return '[图片]'
+      return t || '[图片]'
     }
-    // 先拼成「谁：内容」再进筛选：selectRecapRows 只看 ts（窗口/水位/句数），
-    // from 在群聊近况里不参与文案，只为复用同一套筛选逻辑。
-    const recapRows: RecapRow[] = rows.map(r => ({
-      ts: Date.parse(r.ts),
-      from: r.is_bot && r.from_username === this.botUsername ? 'bot' : 'owner',
-      text: `${escapeUserText(who(r))}：${escapeUserText(body(r))}`,
-    }))
+    const recapRows: GroupRecapRow[] = rows
+      // 未来时间戳的行还没发生：不选、绝不把水位推到未来
+      .filter(r => Date.parse(r.ts) <= now)
+      .map(r => ({
+        ts: Date.parse(r.ts),
+        from: self(r) ? 'bot' : 'owner',
+        who: who(r),
+        text: body(r),
+        imagePath: typeof r.image_path === 'string' ? r.image_path : undefined,
+        attachment_kind: r.attachment_kind,
+        key: dedupGroupKey(r) ?? String(r.message_id),
+      }))
     const picked = selectRecapRows(recapRows, windowStart, GROUP_RECAP_LIMIT, watermark)
-    const text = buildGroupRecapText(picked.map(r => r.text))
-    if (!text) return null
-    this.ledger.setMeta(key, String(picked[picked.length - 1]!.ts))
-    this.log.info('group.recap', { chat: chatId, lines: picked.length })
-    return text
+    if (picked.length === 0) return null
+    // 白名单为空时连 realpath 都不做：只出文字
+    const read = this.sharedReadDirs.length === 0
+      ? () => ({ ok: false as const, reason: 'outside_allowlist' })
+      : (path: string) => readSharedImage(path, this.sharedReadDirs, MAX_RECAP_IMAGE_BYTES, { maxSide: MAX_RECAP_IMAGE_SIDE })
+    const built = buildGroupRecapBlocks(picked, read)
+    if (!built) return null
+    const blocks: Block[] = built.blocks.map(b => b.type === 'image' ? { imageData: b.data, mimeType: b.mimeType } : b.text)
+    // picked 中所有带 image_path 的行都算认领（document/读失败/超过 3 张也算），群图通道不再附
+    const handledKeys = new Set(picked.filter(r => r.imagePath !== undefined).map(r => r.key))
+    this.log.info('group.recap', { chat: chatId, lines: picked.length, images: built.seenReals.size })
+    return { blocks, handledKeys, seenReals: built.seenReals, pendingMeta: { key, value: String(picked[picked.length - 1]!.ts) } }
   }
 
   /**
@@ -822,9 +844,11 @@ export class Engine {
    * 群记录里别人发的图：水位之后、30 分钟内，最多 2 张，附在这一轮文字之后。
    * 路径来自别的程序（不可信）：形状、白名单、普通文件、大小、读取任一项不满足都静默当没有图，
    * 日志只记固定枚举原因与消息编号，不记路径、不记原始错误串。
+   * 水位不在这里落盘：返回 pendingMeta，由 runBatch 在首次内容 prompt 成功后统一写。
+   * skipKeys / initialSeenReal 来自私聊回合的群近况：它已经认领/读过的行和 realpath 不再重复处理。
    */
-  private groupImages(chatId: string): Block[] {
-    if (!this.groups || this.sharedReadDirs.length === 0) return []
+  private groupImages(chatId: string, o: { skipKeys?: ReadonlySet<string | number>; initialSeenReal?: ReadonlySet<string> } = {}): { blocks: Block[]; pendingMeta: PendingMeta | null } {
+    if (!this.groups || this.sharedReadDirs.length === 0) return { blocks: [], pendingMeta: null }
     // 私聊回合也附群图：否则私聊里被问「群里那张图是什么」时，上下文里连图带描述都没有，模型只能编
     // （2026-10-27 真机：编出「白瓷小杯子装草莓冻」）。群与私聊各用一份水位——群里看过的图，
     // 被问到时私聊里仍要能再看一次；同一张图在同一侧仍然只给一次。
@@ -832,12 +856,13 @@ export class Engine {
     const key = dm ? `group_images_dm:${chatId}` : `group_images:${chatId}`
     const now = Date.now()
     const watermark = parseWatermark(this.ledger.getMeta(key))
+    let pendingMeta: PendingMeta | null = null
     if (watermark.after > now) {
-      // 旧版本可能把水位推到了未来：一次性重置到窗口起点并写回。
+      // 旧版本可能把水位推到了未来：一次性重置到窗口起点，内容 prompt 成功后写回。
       // 只 clamp 不写回的话，after=now 取不到行、advanced=false 又不落盘，这个群会永久不可读
       watermark.after = now - GROUP_IMAGE_WINDOW_MS
       watermark.ids = []
-      this.ledger.setMeta(key, watermarkJson(watermark))
+      pendingMeta = { key, value: watermarkJson(watermark) }
     }
     const after = Math.min(Math.max(watermark.after, now - GROUP_IMAGE_WINDOW_MS), now)
     let lines: TranscriptLine[]
@@ -845,13 +870,14 @@ export class Engine {
       // 私聊：把该 bot 所有群的记录合起来看（水位是全局时间点，多群共用一个 after）
       const chats = dm ? Object.keys(this.access().groups).map(k => k.trim()).filter(Boolean) : [chatId]
       lines = chats.flatMap(g => this.groups!.since(g, after - 1, GROUP_IMAGE_SCAN_LIMIT))
-    } catch { return [] }
+    } catch { return { blocks: [], pendingMeta } }
     // v1.4：同一条真人消息可能被多只 bot 各记一遍，读侧统一用 dedupTranscriptLines 收敛
     // （chat_id + ts取整 + from_id 分组，组内按 observed_by 取行数最多那组）。
     // 它返回的结果已按 ts 升序——consumeSharedImages 靠数组顺序推进水位，顺序必须对。
     lines = dedupTranscriptLines(lines)
     const res = consumeSharedImages({
       lines, watermark, botUsername: this.botUsername, max: MAX_GROUP_IMAGES_PER_TURN, now,
+      skipKeys: o.skipKeys, initialSeenReal: o.initialSeenReal,
       read: path => readSharedImage(path, this.sharedReadDirs, MAX_SHARED_IMAGE_BYTES),
       onSkip: (line, reason) => this.log.info('group_image.skipped', { chat: chatId, message_id: line.message_id, reason }),
     })
@@ -859,9 +885,31 @@ export class Engine {
       this.selfCheckNoted.add(chatId)
       this.log.warn('group_image.self_check_unavailable', { chat: chatId })
     }
-    if (res.advanced) this.ledger.setMeta(key, watermarkJson(res.watermark))
+    if (res.advanced) pendingMeta = { key, value: watermarkJson(res.watermark) }
     if (res.picks.length) this.log.info('group_image.attached', { chat: chatId, count: res.picks.length })
-    return res.picks.map(p => ({ imageData: p.data, mimeType: p.mimeType }))
+    return { blocks: res.picks.map(p => ({ imageData: p.data, mimeType: p.mimeType })), pendingMeta }
+  }
+
+  /** 两阶段水位的第二阶段：内容 prompt 成功后统一落盘。写失败不挡回合，下轮重新计划（宁可重复，不永久丢）。 */
+  private commitPendingMetas(chatId: string, metas: readonly PendingMeta[]): void {
+    if (metas.length === 0) return
+    try {
+      for (const m of metas) this.ledger.setMeta(m.key, m.value)
+    } catch (e) {
+      this.log.warn('recap.watermark_failed', { chat: chatId, err: safeError(e) })
+    }
+  }
+
+  /**
+   * 换段后清掉四个跨聊天水位：群近况、群图（私聊/群）、私聊近况。
+   * /compact 的种子只有私聊摘要与最近私聊原话，群近况和群图从来不在其中；自动换段同理。
+   * 挂在「换段」这个动作上（rollSegment + cmdClear），而不是列入口清单，才覆盖所有丢上下文的路径。
+   */
+  async resetCrossChatWatermarks(chatId: string): Promise<void> {
+    const keys = [`group_recap:${chatId}`, `group_images_dm:${chatId}`, `group_images:${chatId}`, `dm_recap:${chatId}`]
+    for (const key of keys) {
+      try { this.ledger.deleteMeta(key) } catch (e) { this.log.warn('recap.watermark_reset_failed', { chat: chatId, err: safeError(e) }) }
+    }
   }
 
   /** 此刻生效的生图引擎（约定 v1.1 5.21）：配置写 off 就不生图；设了 gateway.global_cfg 就每次现读共用开关，读不到退回 image_provider */
@@ -1125,11 +1173,16 @@ export class Engine {
     await this.restartForRouteIfNeeded(this.brain.provider).catch(e => this.log.warn('dsh.restart_for_route_failed', { err: safeError(e) }))
     // 新消息一进来就会超预算：先换段再处理
     await this.maybeRoll(chatId, batch)
-    // 群记录里别人发的图（水位之后、30 分钟内，最多 2 张）：附在这一轮文字之后；读不出来就当没有
-    // 群回合附本群的新图；私聊回合附所有群的新图（见 groupImages 里的说明）
-    const sharedBlocks = this.groupImages(chatId)
+    // 私聊回合先计划群近况（含附图），群图通道再跳过它认领过的行和已读过的图；
+    // 两边的水位都只算好、不落盘，由 runBatch 在首次内容 prompt 成功后统一写。
+    const recap = !isGroupChat(chatId) && batch.some(r => r.kind === 'user') ? this.planGroupRecap(chatId) : null
+    const images = this.groupImages(chatId, { skipKeys: recap?.handledKeys, initialSeenReal: recap?.seenReals })
+    const pendingMetas: PendingMeta[] = [
+      ...(recap ? [recap.pendingMeta] : []),
+      ...(images.pendingMeta ? [images.pendingMeta] : []),
+    ]
     const since = Date.now()
-    const delay = await this.runBatch(chatId, batch, sharedBlocks)
+    const delay = await this.runBatch(chatId, batch, images.blocks, recap, pendingMetas)
     // 这一轮说了"三点提醒你"却没登记：能换算时间的替它登记，下一轮告诉它；换算不了的下一轮提醒它自己登记
     // 承诺、被晾追问只在私聊里（群里谁说话由导演决定）
     if (!isGroupChat(chatId)) {
@@ -1142,7 +1195,7 @@ export class Engine {
     return delay
   }
 
-  private async runBatch(chatId: string, batch: InboundRow[], sharedImages: Block[] = []): Promise<number> {
+  private async runBatch(chatId: string, batch: InboundRow[], sharedImages: Block[] = [], groupRecap: GroupRecapPlan | null = null, pendingMetas: PendingMeta[] = []): Promise<number> {
     const ids = batch.map(b => b.id)
     let seg: SegmentRow
     let seed: string | null
@@ -1163,23 +1216,23 @@ export class Engine {
     const commitHints = this.pendingHints(chatId)
     if (commitHints.length) this.ledger.setMeta(`hints:${chatId}`, '')
     const life = batch.some(r => r.kind === 'user') ? this.lifeLines(chatId, seg.id, this.ledger.segmentTurnCount(seg.id) === 0) : []
-    // 跨聊天近况：私聊回合带群聊近况（私聊 → 群），群回合带与主人的私聊近况（群 → 私聊），互斥。
+    // 跨聊天近况：私聊回合带群聊近况（私聊 → 群，已在 runChat 里计划好），群回合带与主人的私聊近况（群 → 私聊）。
     // 群消息在 poller 里只走 observe、不写 inbound，群回合由导演经 /v1/inject 以
     // kind='synthetic' + meta.source='director' 触发，所以两边门控要分开看。
     const directorTurn = batch.some(r => r.kind === 'synthetic' && safeMeta(r.meta)?.source === 'director')
-    const recap = isGroupChat(chatId)
-      ? (directorTurn ? this.dmRecap(chatId) : null)
-      : (batch.some(r => r.kind === 'user') ? this.groupRecap(chatId) : null)
-    if (recap) life.push(recap)
+    const dmRecapText = isGroupChat(chatId) ? (directorTurn ? this.dmRecap(chatId) : null) : null
+    if (dmRecapText) life.push(dmRecapText)
     // 对方发来的图片：附在消息后面（模型看不了图时，runPrompt 里换成一句说明）
     const images: Block[] = batch.flatMap(r => { const m = rowMedia(r); return m?.kind === 'photo' && m.path ? [{ image: m.path }] : [] })
-    let blocks: Block[] = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone }), ...images, ...sharedImages]
+    // 群近况的图文块放在 hints/life 之后、新消息之前：图必须紧跟自己那一行，不能全堆在最后
+    let blocks: Block[] = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), ...(groupRecap?.blocks ?? []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone }), ...images, ...sharedImages]
     const contentBlocks = blocks // 换段重试时用同样的内容（不带新段的补充说明）
     let kind: TurnKind = 'message'
     let attempt = 0
     let rootId: number | undefined
     let nudgedNoAction = false
     let recovered = false
+    let metasCommitted = false
     const g = this.cfg.gw
 
     for (;;) {
@@ -1198,6 +1251,11 @@ export class Engine {
 
       if (outcome.type === 'ok') {
         this.lastTurnErrored.delete(chatId)
+        // 两阶段水位：首次内容 prompt 成功后落盘。nudge/补救提示成功不算（那些轮没发近况和群图）
+        if (!metasCommitted && blocks === contentBlocks) {
+          metasCommitted = true
+          this.commitPendingMetas(chatId, pendingMetas)
+        }
         this.ledger.finishTurn(turn.id, 'ok', { stopReason: outcome.stopReason, usedTokens: outcome.used })
         if (done) { this.ledger.settleInbound(ids, 'done'); return 0 }
         if (!nudgedNoAction) { nudgedNoAction = true; kind = 'nudge'; blocks = [NUDGE_NO_ACTION]; continue }
@@ -1549,6 +1607,8 @@ export class Engine {
    */
   async rollSegment(chatId: string, seg: SegmentRow, reason: string, focus?: string, o?: { inSessionMs?: number; skipInSession?: boolean }): Promise<{ how: 'in-session' | 'ledger' | 'none' | 'crashed'; chars: number; summary: string | null }> {
     this.log.info('segment.roll_start', { chat: chatId, segment: seg.id, reason, used: seg.used_tokens, budget: this.budgetFor(seg) })
+    // 换段 = 丢掉上下文：四个跨聊天水位一起清，下一条消息重新注入群近况/群图/私聊近况
+    await this.resetCrossChatWatermarks(chatId)
     const got: { summary: string | null; how: 'in-session' | 'ledger' | 'none' } = { summary: null, how: 'none' }
     let crashed = false
     const acquire = async (): Promise<void> => {
@@ -1703,6 +1763,9 @@ export class Engine {
 
   /** 清空 = 这一段收尾写一份摘要（写不出来或为空就沿用上一份，不覆盖）+ 下一条消息开新段、不再带清空前的原话 */
   private async cmdClear(chatId: string): Promise<string> {
+    // /clear 走 closeSegment（没有活动段时也不经过 rollSegment），这里单独清一次水位；
+    // 群聊里 /clear@bot 的 chatId 是群 id，四个键一起清正好覆盖群侧的 group_images 和 dm_recap
+    await this.resetCrossChatWatermarks(chatId)
     const seg = this.ledger.activeSegment(chatId)
     if (seg) {
       try {
