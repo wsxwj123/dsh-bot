@@ -154,3 +154,15 @@ test('force缺省且自动判断无素材(code=3)_返回skip文案且不标错',
     expect(res.text).toContain('被挡住了（no material）')
   } finally { r.done() }
 })
+
+test('force=true_只带visibility_用空串占住topic位置_可见性不被当成主题', async () => {
+  // 安全回归：位置参数不能错位。topic 空但 visibility 有值时，argv[2] 必须是空串，
+  // 否则 bot_post_moment.py 会把 "private" 当主题读走，本该 private 的圈按默认可见性发出去。
+  const r = rig(() => ({ code: 0, out: POSTED_OUT, err: '' }))
+  try {
+    await r.actions.moments({ action: 'post', force: true, visibility: 'private' })
+    expect(r.calls).toHaveLength(1)
+    expect(scriptName(r.calls[0]!.argv)).toBe(FORCE_SCRIPT)
+    expect(r.calls[0]!.argv.slice(1)).toEqual([BOT_ID, '', 'private'])
+  } finally { r.done() }
+})

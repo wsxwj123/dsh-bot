@@ -289,8 +289,11 @@ export class LifeActions {
         break
       }
       case 'post':
-        // topic 为空时不传空串：脚本按位置读 argv[2]，传空串会让它以为「给了个空主题」
-        argv = [join(scripts, 'bot_post_moment.py'), this.d.botId, ...(s('topic') ? [s('topic')] : []),
+        // 位置参数不能错位：topic 为空但 visibility 有值时，必须用空串占住 argv[2]，
+        // 否则 visibility 会被脚本当成主题读走，本该 private 的圈会按默认可见性发出去。
+        // 两者都空时才只传 bot_id。
+        argv = [join(scripts, 'bot_post_moment.py'), this.d.botId,
+                ...(s('topic') || s('visibility') ? [s('topic')] : []),
                 ...(['public', 'private'].includes(s('visibility')) ? [s('visibility')] : [])]
         break
       case 'set_image': {
