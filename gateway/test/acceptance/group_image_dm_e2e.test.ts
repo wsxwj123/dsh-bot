@@ -297,3 +297,22 @@ test('场景8 私聊 /clear 之后：下一条私聊重新带近况和图', asyn
   expect(p2.text).toContain('带图近况戊')
   expect(p2.images).toBe(1)
 })
+
+test('契约 图边长超 2048：近况不附 image 块（maxSide 接线回归）', async () => {
+  // 这条专门守 engine 传给 readSharedImage 的 { maxSide } 接线：删掉那个参数，这条会红。
+  // 用 2049×1 的真 PNG——体积很小（不会被 2 MiB 挡掉），只有边长超限这一条路能拒它。
+  const PNG_2049 = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAACAEAAAABCAYAAABZ1T0kAAAAGUlEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAwG0QAAF3sQ2zAAAAAElFTkSuQmCC',
+    'base64',
+  )
+  let img = ''
+  const { tg, b } = await setup({ prepare: d => { img = join(d.shared, 'wide.png'); writeFileSync(img, PNG_2049) } })
+  seed(b, {
+    ts: Date.now() - 31 * MIN, text: '',
+    attachment_kind: 'photo', image_path: realpathSync(img),
+  })
+  tg.pushText(OWNER, '这张宽图')
+  const p = (await until(() => promptWith(b, '这张宽图'), '私聊提示', 20_000))!
+  expect(p.text).toContain('[图片]')
+  expect(p.images ?? 0).toBe(0)
+})

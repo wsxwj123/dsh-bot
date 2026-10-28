@@ -11,7 +11,7 @@ import { Logger } from '../../src/log'
 const BOT_ID = 'testbot'
 const FORCE_SCRIPT = 'bot_post_moment.py'
 // 2026-10-28：`post` 分支实际只调 bot_post_moment.py，`force` 已是死参数（脚本内部自己判断）
-const ORIGINAL_SCRIPT = 'bot_post_moment.py'
+const SCRIPT = 'bot_post_moment.py'
 
 type PyCall = { argv: string[]; extra: Record<string, string | undefined>; timeoutMs: number }
 
@@ -116,7 +116,7 @@ test('force缺省_也走bot_post_moment.py', async () => {
   try {
     const res = await r.actions.moments({ action: 'post', topic: '周末去哪玩' })
     expect(r.calls).toHaveLength(1)
-    expect(scriptName(r.calls[0]!.argv)).toBe(ORIGINAL_SCRIPT)
+    expect(scriptName(r.calls[0]!.argv)).toBe(SCRIPT)
     // TODO(契约): code=3 是「正常跳过」不是错误，但实现一直返回 isError:true（既有行为，非本次改动）
     expect(res.isError).toBeFalsy()
     expect(res.text).toContain('已发布一条朋友圈')
@@ -128,7 +128,7 @@ test('force=false_也走bot_post_moment.py', async () => {
   try {
     await r.actions.moments({ action: 'post', force: false })
     expect(r.calls).toHaveLength(1)
-    expect(scriptName(r.calls[0]!.argv)).toBe(ORIGINAL_SCRIPT)
+    expect(scriptName(r.calls[0]!.argv)).toBe(SCRIPT)
   } finally { r.done() }
 })
 
@@ -138,16 +138,16 @@ test.each([['"true"', 'true'], ['1', 1], ['null', null]] as const)(
     try {
       await r.actions.moments({ action: 'post', force: value })
       expect(r.calls).toHaveLength(1)
-      expect(scriptName(r.calls[0]!.argv)).toBe(ORIGINAL_SCRIPT)
+      expect(scriptName(r.calls[0]!.argv)).toBe(SCRIPT)
     } finally { r.done() }
   })
 
-test('force缺省且自动判断无素材(code=3)_返回skip文案且不标错', async () => {
+test('force缺省且自动判断无素材(code=3)_返回跳过文案（注意：实现会标 isError，属既有缺陷）', async () => {
   const r = rig(() => ({ code: 3, out: '', err: '[testbot] moment skip: no material\nFAIL 没生成：no material' }))
   try {
     const res = await r.actions.moments({ action: 'post' })
     expect(r.calls).toHaveLength(1)
-    expect(scriptName(r.calls[0]!.argv)).toBe(ORIGINAL_SCRIPT)
+    expect(scriptName(r.calls[0]!.argv)).toBe(SCRIPT)
     // TODO(契约): code=3 是「正常跳过」不是错误，但实现一直返回 isError:true（既有行为，非本次改动）
     expect(res.isError).toBe(true)
     // 网关把 `moment skip: X` 的前缀剥掉、包成「被挡住了（X）」

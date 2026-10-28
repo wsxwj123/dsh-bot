@@ -79,7 +79,8 @@ type PendingMeta = { key: string; value: string }
 /** 私聊回合的群近况计划：文本/图片交错，图片紧跟对应行 */
 type GroupRecapPlan = {
   blocks: Block[]
-  /** picked 中全部带 image_path 的行（document/读失败/超上限也算认领），群图通道据此跳过 */
+  /** picked 中**成功读出**、以及 document/超上限这类「换通道也不该再试」的行的键；
+ *  **读失败**的行不认领——留给 groupImages 按它自己的 8 MiB 老规则重试一次。群图通道据此跳过。 */
   handledKeys: ReadonlySet<string>
   /** 本回合已读出的 realpath，群图通道据此不再重复读 */
   seenReals: ReadonlySet<string>
