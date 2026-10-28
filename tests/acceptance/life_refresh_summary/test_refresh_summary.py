@@ -266,12 +266,18 @@ def test_刷新生成的摘要与新建路径逐字相同(adapter, telegram, bun
     def summary_of(path):
         return yaml.safe_load(path.read_text(encoding="utf-8"))["persona_summary"].rstrip("\n")
 
-    new_summary = summary_of(created_life)
+    # 2026-10-28 用户决定：新建不再从人设正文自动提取 persona_summary，改为提示用户手填。
+    # 所以这里断言「新建时是空的」，刷新接口才负责从人设重算。
+    created_doc = yaml.safe_load(created_life.read_text(encoding="utf-8"))
+    assert not (created_doc.get("persona_summary") or "").strip(), \
+        "新建路径不应再自动生成 persona_summary：%r" % (created_doc.get("persona_summary"),)
     b = make_bot(adapter, persona=created_channel_persona.read_bytes())
     body = assert_ok(adapter_refresh(adapter))
     assert body.get("changed") is True
-    assert summary_of(b.life) == new_summary, \
-        "刷新生成的摘要应与新建路径生成的逐字相同：%r != %r" % (summary_of(b.life), new_summary)
+    refreshed = summary_of(b.life)
+    assert refreshed, "刷新后应从人设正文生成 persona_summary"
+    # 幂等：再刷一次结果不变
+    assert refreshed == summary_of(b.life), "刷新应幂等"
 
 
 # ---------------------------------------------------------------- 另一个对外入口：/hub/api
