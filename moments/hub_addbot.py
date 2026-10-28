@@ -571,22 +571,21 @@ def _persona_summary(text):
 
 
 def _life_text(fields):
-    """新建 bot 的生活设定骨架：``id``、``display_name``、默认睡觉时段，其余字段只留注释。
+    """新建 bot 的生活设定骨架：``id``、``display_name``、从人设生成的摘要、默认睡觉时段，
+    其余字段只留注释，用户拿到后直接改。
 
-    ``id`` 是这只的 person（适配服务新建给了 person 时），没有就是编号。
-
-    **不再从人设正文自动提取 ``persona_summary``**（2026-10-28 用户决定）：那是一句话人设
-    简介、给情绪裁判判断好感涨跌用，自动截的 300 字不如手写精准。显式给了就用；没给只留一行
-    注释提醒去填。"""
-    explicit = (fields.get("persona_summary") or "").strip()
+    ``id`` 是这只的 person（适配服务新建给了 person 时），没有就是编号。显式给了摘要字段就
+    用摘要，否则从人设正文提取——用户 2026-10-28 决定：先自动生成草稿、新建后提示去改。
+    不能因为「自动的不如手写」就让字段空着，空着情绪裁判就没有依据。人设为空时整条不写。"""
+    summary = _persona_summary(fields.get("persona_summary") or fields.get("persona"))
     lines = [
-        "# 生活设定：新建 bot 时生成的骨架，可以直接改",
+        "# 生活设定：新建 bot 时按人设生成的骨架，可以直接改",
         "id: %s" % _yaml_str(fields.get("person") or fields["bot_id"]),
         "display_name: %s" % _yaml_str(fields["display_name"]),
     ]
-    if explicit:
+    if summary:
         lines.append("persona_summary: |")
-        lines.extend("  " + line for line in explicit.split("\n"))
+        lines.extend("  " + line for line in summary.split("\n"))
     else:
         lines.append("# persona_summary: |   # 【建议填】一句话人设简介，情绪裁判靠它判断好感涨跌")
     lines.extend([
