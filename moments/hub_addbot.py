@@ -539,13 +539,57 @@ def _planned_life(bot_id, yml_text):
     return life
 
 
+#: 人设里尖括号占位符的形状（``<角色名>`` 这类，不含尖括号嵌套与换行）
+_PLACEHOLDER_RE = re.compile(r"<[^<>\n]+>")
+
+
+def _persona_summary(text):
+    """人设正文 → 摘要，按接口约定的顺序：去 HTML 注释（跨行非贪婪）→ 去行首标题符与紧跟的
+    空格 → 去 ``**`` 与反引号 → 每行去首尾空白 → 连续空行压成一个换行 → 整体去首尾空白 →
+    取前 300 个 Unicode 字符（不是字节；Python 的 str 就是码点，截断不补省略号）→ 按这 300 字
+    算尖括号占位符占比，超过一半视为没填，返回空串（模板里满是 ``<角色名>`` 的不当摘要用）。
+
+    行首的 ``-`` / ``*`` / ``>`` 保留：能看出人设的分条结构。"""
+    if not text:
+        return ""
+    cleaned = re.sub(r"<!--.*?-->", "", str(text), flags=re.S)
+    lines = []
+    for line in cleaned.splitlines():
+        line = re.sub(r"^#+\s*", "", line)          # 标题符与紧跟的空格
+        line = line.replace("**", "").replace("`", "")
+        lines.append(line.strip())
+    cleaned = re.sub(r"\n{2,}", "\n", "\n".join(lines)).strip()
+    summary = cleaned[:300]
+    placeholder_chars = sum(len(m) for m in _PLACEHOLDER_RE.findall(summary))
+    if placeholder_chars * 2 > len(summary):        # 先截断再算占比：长模板后面的正文不能把比例摊薄
+        return ""
+    return summary
+
+
 def _life_text(fields):
-    """最小的合法生活设定：注释一行 + ``id``、``display_name``，其余字段一律不写（读出来都是空/缺省）。
-    ``id`` 是这只的 person（适配服务新建给了 person 时），没有就是编号。"""
-    return ("# 生活设定：新建 bot 时生成的最小版本，没写的字段都按缺省\n"
-            "id: %s\n"
-            "display_name: %s\n"
-            % (_yaml_str(fields.get("person") or fields["bot_id"]), _yaml_str(fields["display_name"])))
+    """新建 bot 的生活设定骨架：``id``、``display_name``、按人设生成的摘要与默认睡觉时段，
+    其余字段只留注释（读出来都是空/缺省），用户拿到后直接改。
+
+    ``id`` 是这只的 person（适配服务新建给了 person 时），没有就是编号。显式给了摘要字段就
+    用摘要，否则从人设正文提取；人设为空时整条 ``persona_summary`` 不写。"""
+    summary = _persona_summary(fields.get("persona_summary") or fields.get("persona"))
+    lines = [
+        "# 生活设定：新建 bot 时按人设生成的骨架，可以直接改",
+        "id: %s" % _yaml_str(fields.get("person") or fields["bot_id"]),
+        "display_name: %s" % _yaml_str(fields["display_name"]),
+    ]
+    if summary:
+        lines.append("persona_summary: |")
+        lines.extend("  " + line for line in summary.split("\n"))
+    lines.extend([
+        "sleep_hours:",
+        '  - "00:00-07:30"',
+        '# bio: ""             # 一句话简介，填了会进生活上下文',
+        '# city: ""            # 城市',
+        '# birthday: ""        # 生日，形如 "1995-03-15"，满 18 岁才会进生图提示词',
+        '# speaking_threshold: |   # 主动开口的分寸，不填就用缺省',
+    ])
+    return "\n".join(lines) + "\n"
 
 
 def _bot_home_taken(home):

@@ -50,7 +50,12 @@ def test_planned_dir_写法落在禁区_回None_不生成(env, monkeypatch):
 
 def test_最小生活设定_只有id与display_name(env):
     text = hub_addbot._life_text({"bot_id": "botnew", "display_name": "小雨: null", "person": "lucy"})
-    assert yaml.safe_load(text) == {"id": "lucy", "display_name": "小雨: null"}
+    parsed = yaml.safe_load(text)
+    assert parsed["id"] == "lucy"
+    assert parsed["display_name"] == "小雨: null"
+    # 2026-10-28 起骨架多带默认作息（life-config-from-persona）；没给人设时不写 persona_summary
+    assert parsed["sleep_hours"] == ["00:00-07:30"]
+    assert "persona_summary" not in parsed
     text = hub_addbot._life_text({"bot_id": "botnew", "display_name": "x"})
     assert yaml.safe_load(text)["id"] == "botnew"
 
