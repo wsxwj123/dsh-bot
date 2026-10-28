@@ -77,7 +77,7 @@ def main():
     cfg_force = {**cfg, "moments_daily_limit": 999}
 
     mid = maybe_post_moment(bot_id, cfg_force, now, sit, world, wildcard,
-                            mood, factors, 999, g_force)
+                            mood, factors, 999, g_force, force=True)
     if not mid:
         print("FAIL 没生成（LLM 返回空 / 触发独白闸 / 无素材）", file=sys.stderr); sys.exit(3)
 

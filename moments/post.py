@@ -72,7 +72,7 @@ user 是内部角色标识，不是实际称呼。朋友圈正文不得原样写
 
 def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
                        since_user_min, now: datetime,
-                       db_module=None) -> tuple[bool, str, str]:
+                       db_module=None, force=False) -> tuple[bool, str, str]:
     """朋友圈情境驱动闸——独立于 judge.judge_action。
 
     返回 (go: bool, kind: str, reason: str)。
@@ -158,8 +158,8 @@ def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
         except Exception:
             pass
 
-    # ─── 6. 同 kind 4h 不重发（防过密）───────────────
-    if db_module is not None:
+    # ─── 6. 同 kind 4h 不重发（防过密）；force=True 时跳过（用户明确要求）───
+    if db_module is not None and not force:
         try:
             recent = db_module.list_moments(bot_id=bot_cfg.get("id", ""),
                                             limit=10,
@@ -175,7 +175,7 @@ def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
 
 def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard,
                       mood, mood_factors, since_user_min, global_cfg,
-                      jiwen_info=None) -> int | None:
+                      jiwen_info=None, force=False) -> int | None:
     """决定是否发朋友圈，返回 moment_id 或 None。
 
     新加 jiwen_info 入参（life-context.py 传 jiwen reader.read 的返回 dict）。
@@ -198,7 +198,7 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
     bot_cfg_with_id["id"] = bot_id  # for same_kind 4h 检查
     go, kind, reason = should_post_moment(
         situation, world, wildcard, mood, jiwen_info,
-        bot_cfg_with_id, since_user_min, now, db_module=db,
+        bot_cfg_with_id, since_user_min, now, db_module=db, force=force,
     )
     if not go:
         sys.stderr.write(f"[{bot_id}] moment skip: {reason}\n")

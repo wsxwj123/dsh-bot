@@ -207,7 +207,7 @@ def test_force_true_无契机_仍按无素材挡住(monkeypatch, tmp_path, capsy
 
 def test_force_true_每日上限已到_返回None且不生成(monkeypatch, tmp_path, capsys):
     # 每日上限是 5（bot_cfg / global_cfg 里都写死 5），count_today=5 即"已到"
-    stub_db = StubDb(recent_same_kind=_recent_same_kind_row(), count_today=5)
+    stub_db = StubDb(rows=[_recent_same_kind_row()], count_today=5)
     stub_llm = StubLlm()
 
     result = _invoke(monkeypatch, tmp_path, stub_db, stub_llm,
