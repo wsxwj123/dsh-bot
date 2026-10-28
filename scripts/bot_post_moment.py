@@ -31,10 +31,23 @@ from moments.post import maybe_post_moment
 SitNS = namedtuple("Situation", ["recurring", "sporadic", "hobby"])
 
 
+USAGE = """用法：bot_post_moment.py <bot_id> [topic_hint] [visibility]
+
+参数：
+  bot_id          要发圈的 bot 标识（不是选项）
+  topic_hint      可选：这条圈想说什么（不传会自动找素材）
+  visibility      可选：public / private
+
+说明：在聊天里被要求「发条朋友圈」时由 moments 工具调用。这条路径会绕过
+静默阈值、每日上限、睡觉/上课和素材判定——是"对方让我发"，不是"程序自己决定发"。
+"""
+
+
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help", "help"):
+        print(USAGE); sys.exit(0)
     if len(sys.argv) < 2:
-        print("usage: bot_post_moment.py <bot_id> [topic_hint] [visibility]",
-              file=sys.stderr); sys.exit(2)
+        print(USAGE, file=sys.stderr); sys.exit(2)
     bot_id = sys.argv[1]
     topic_hint = sys.argv[2] if len(sys.argv) > 2 else None
     visibility_hint = sys.argv[3] if len(sys.argv) > 3 else None

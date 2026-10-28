@@ -287,6 +287,12 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
         raw = call_aux(prompt, timeout=60, model="sonnet").strip()
         quota.record_call("moment_text", quota.MOMENT_TEXT_WEIGHT)
         text, visibility = _parse_moment_output(raw)
+        if not text:
+            # LLM 偶尔吐不合格式的输出（真机：一次 --help 被当参数、一次 moment_parse_failed，
+            # 整轮拖到 1 分 53 秒）。解析为空时重生成一次，比让这一轮直接失败划算
+            raw = call_aux(prompt, timeout=60, model="sonnet").strip()
+            quota.record_call("moment_text", quota.MOMENT_TEXT_WEIGHT)
+            text, visibility = _parse_moment_output(raw)
         if not text or len(text) > 200:
             return None
         # 防独白闸：第一句以"突然/突然觉得/心里/想念/想起"开头的，跳过
