@@ -542,32 +542,79 @@ def _planned_life(bot_id, yml_text):
 #: 人设里尖括号占位符的形状（``<角色名>`` 这类，不含尖括号嵌套与换行）
 _PLACEHOLDER_RE = re.compile(r"<[^<>\n]+>")
 
+#: 摘要到此为止的小节：标题文本含任一即命中（标题不要求精确相等；陈露露是「说话特点」）
+_SUMMARY_STOP_WORDS = ("说话方式", "说话特点", "语言风格", "对话风格", "说话风格", "语气")
 
-def _persona_summary(text):
-    """人设正文 → 摘要，按接口约定的顺序：去 HTML 注释（跨行非贪婪）→ 去行首标题符与紧跟的
-    空格 → 去 ``**`` 与反引号 → 每行去首尾空白 → 连续空行压成一个换行 → 整体去首尾空白 →
-    取前 300 个 Unicode 字符（不是字节；Python 的 str 就是码点，截断不补省略号）→ 按这 300 字
-    算尖括号占位符占比，超过一半视为没填，返回空串（模板里满是 ``<角色名>`` 的不当摘要用）。
+#: 找到停止小节的硬上限、没找到时的截断长度（Unicode 字符数，截断不补省略号）
+_SUMMARY_SECTION_MAX = 4000
+_SUMMARY_TRUNCATE_MAX = 300
 
-    行首的 ``-`` / ``*`` / ``>`` 保留：能看出人设的分条结构。"""
+#: 小节标题行：``#`` 到 ``###`` 加一个空格；更深的标题属于所在小节内部，不构成边界
+_HEADING_RE = re.compile(r"(#{1,3})[ \t]+(.*)\Z")
+
+
+def _heading(line):
+    """标题行 → ``(层级, 标题文本)``；不是 ``#`` 到 ``###`` 的标题回 None。"""
+    m = _HEADING_RE.match(line)
+    return (len(m.group(1)), m.group(2)) if m else None
+
+
+def _summary_section(lines):
+    """按小节切分（**必须在剥 ``#`` 之前**做）：找第一个 ``##`` / ``###`` 标题且标题文本含
+    停止词的「停止小节」，返回 ``(从文件开头到该小节结束的行, True)``；没有回 ``(全部行, False)``。
+
+    小节结束 = 下一个同级或更高级标题之前（``###`` 小节里的 ``####`` 仍算它自己的内容；
+    文件末尾没有下一个标题就到末尾）。"""
+    for i, line in enumerate(lines):
+        heading = _heading(line)
+        if heading is None or heading[0] == 1:      # 停止小节只认 ## / ###
+            continue
+        level, title = heading
+        if not any(word in title for word in _SUMMARY_STOP_WORDS):
+            continue
+        end = len(lines)
+        for j in range(i + 1, len(lines)):
+            other = _heading(lines[j])
+            if other is not None and other[0] <= level:
+                end = j
+                break
+        return lines[:end], True
+    return lines, False
+
+
+def _persona_summary_ex(text):
+    """人设正文 → ``(摘要, method)``，``method`` 是 ``"section"`` 或 ``"truncate"``。
+
+    顺序：去 HTML 注释（跨行非贪婪）→ **在剥标题符之前**按「说话方式」一类小节切到该小节结束
+    （见 ``_summary_section``）→ 去行首标题符与紧跟的空格 → 去 ``**`` 与反引号 → 每行去首尾空白
+    → 连续空行压成一个空行 → 整体去首尾空白 → 按 Unicode 字符截断（命中小节到 4000，没命中到
+    300；不是字节）→ 按这截断后的字算尖括号占位符占比，超过一半视为没填，返回空串。
+
+    行首的 ``-`` / ``*`` / ``>`` 保留：能看出人设的分条结构。空文本回 ``("", "truncate")``。"""
     if not text:
-        return ""
+        return "", "truncate"
     cleaned = re.sub(r"<!--.*?-->", "", str(text), flags=re.S)
-    lines = []
-    for line in cleaned.splitlines():
+    lines, found = _summary_section(cleaned.splitlines())
+    out = []
+    for line in lines:
         # C0/C1 控制字符（NUL、ESC 等）会让 PyYAML 解析块标量时直接抛错，
         # 文件读不出来的话这只 bot 的 jiwen tick 会整条停掉，所以先剔掉
         line = re.sub(r"[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f]", "", line)
         line = re.sub(r"^#+[ \t]*", "", line)       # 标题符与紧跟的空格（只去行首，不吃换行）
         line = line.replace("**", "").replace("`", "")
-        lines.append(line.strip())
+        out.append(line.strip())
     # 连续多个空行压成一个空行（保留段落分隔）；单个空行不动
-    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
-    summary = cleaned[:300]
+    summary = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+    summary = summary[:_SUMMARY_SECTION_MAX if found else _SUMMARY_TRUNCATE_MAX]
     placeholder_chars = sum(len(m) for m in _PLACEHOLDER_RE.findall(summary))
     if placeholder_chars * 2 > len(summary):        # 先截断再算占比：长模板后面的正文不能把比例摊薄
-        return ""
-    return summary
+        return "", "section" if found else "truncate"
+    return summary, "section" if found else "truncate"
+
+
+def _persona_summary(text):
+    """人设正文 → 摘要字符串（签名不变）；规则与 ``method`` 见 ``_persona_summary_ex``。"""
+    return _persona_summary_ex(text)[0]
 
 
 def _life_text(fields):
