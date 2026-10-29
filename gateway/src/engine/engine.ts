@@ -1266,7 +1266,12 @@ export class Engine {
         this.log.info('turn.empty_response', { turn: turn.id, delivered, silent })
         outcome = { type: 'ok', stopReason: 'empty_response', used: outcome.used }
       }
-      this.log.info('turn.end', { turn: turn.id, kind, attempt, outcome: outcome.type, delivered, silent })
+      this.log.info('turn.end', {
+        turn: turn.id, kind, attempt, outcome: outcome.type, delivered, silent,
+        // 报错/崩溃时补上原因（err 必须过 safeError：原始错误里可能带令牌/地址）
+        ...(outcome.type === 'error' ? { reason: outcome.kind, err: safeError(outcome.err) } : {}),
+        ...(outcome.type === 'crashed' ? { err: safeError(outcome.err) } : {}),
+      })
 
       if (outcome.type === 'ok') {
         this.lastTurnErrored.delete(chatId)
@@ -1307,7 +1312,7 @@ export class Engine {
         this.ledger.finishTurn(turn.id, 'error', { error: outcome.err, usedTokens: outcome.used })
         if (done) {
           // 空内容报错在上面已经转成正常结束，走到这里的是别的报错。记一条：dsh 改了空内容的句子、网关认不出来时，从这里看得出来
-          this.log.warn('turn.error_after_action', { turn: turn.id, delivered, silent })
+          this.log.warn('turn.error_after_action', { turn: turn.id, delivered, silent, reason: outcome.kind, err: safeError(outcome.err) })
           this.ledger.settleInbound(ids, 'done', 'replied before error')
           return 0
         }
@@ -1392,7 +1397,7 @@ export class Engine {
       if (at.toolsInFlight > 0) return
       if (at.cancelledAt === null && now - at.lastProgressAt > g.stallCancelMs) {
         at.cancelledAt = now
-        this.log.warn('turn.stalled_cancel', { turn: turnId, idle_ms: now - at.lastProgressAt })
+        this.log.warn('turn.stalled_cancel', { turn: turnId, idle_ms: now - at.lastProgressAt, chars_out: at.textOut.length })
         conn.notify('session/cancel', { sessionId })
       } else if (at.cancelledAt !== null && now - at.cancelledAt > cancelGrace) {
         at.cancelledAt = Number.POSITIVE_INFINITY
