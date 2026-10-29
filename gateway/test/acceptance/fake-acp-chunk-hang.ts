@@ -58,3 +58,5 @@ for await (const chunk of Bun.stdin.stream()) {
     if (line) void handle(JSON.parse(line))
   }
 }
+
+export {}
