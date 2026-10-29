@@ -111,7 +111,7 @@ def test_主动消息_投递到网关的本机接口_真正投出去才重抽间
     assert path == "/v1/inject" and auth == "Bearer TESTONLY-api-token"
     assert body["chat_id"] == "42" and body["source"] == "self_initiate"
     assert body["text"].startswith("⟦系统·主动开口⟧") and "想她了" in body["text"]
-    assert si.COOLDOWN_MIN <= int(nf.read_text()) - (now + 4000) <= si.COOLDOWN_MAX
+    assert si.DEFAULT_COOLDOWN_MIN_SEC <= int(nf.read_text()) - (now + 4000) <= si.DEFAULT_COOLDOWN_MAX_SEC
     # 4. 手动测试用的 --skip-judge：不问 life-context，直接投默认文本，也不改下次机会的时间
     before = nf.read_text()
     monkeypatch.setattr(si.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该调")))
