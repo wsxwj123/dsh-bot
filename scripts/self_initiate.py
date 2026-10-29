@@ -22,7 +22,7 @@ DEFAULT_COOLDOWN_MAX_SEC = 86400    # 默认最长间隔 24 小时（秒）
 # 想念值满（积温 forced）时可以不等随机闸提前开口，但要守这三条
 EARLY_MIN_GAP = 3 * 3600   # 距上次成功投递（正常或提前）至少 3 小时
 EARLY_DAILY_MAX = 2        # 本地日期当天最多提前投递 2 次
-EARLY_MAX_PER_DAY = EARLY_DAILY_MAX  # 别名，保持兼容
+EARLY_MAX_PER_DAY = EARLY_DAILY_MAX  # 公开常量名，与验收测试对齐
 EARLY_RETRY = 1800         # 提前那次被 life-context 回 SKIP（或投递失败）后 30 分钟内不再提前
 
 
