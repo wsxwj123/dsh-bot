@@ -47,7 +47,8 @@ MAX_RAW_BYTES = 1024 * 1024         # §3.2 检查 2
 REQUIRED_TOP_KEYS = ("user_display_name", "max_calls_per_5h", "moments", "jiwen")
 
 # §3.5：`id` 会拼进文件名，所以它是信任边界 —— 只认这一个形状，`..` / `%00` 一律当"没这份备份"
-BACKUP_ID_RE = re.compile(r"^\d{8}-\d{6}(?:-\d{2})?$")
+#: 用 ``\Z`` 而不是 ``$``：``$`` 会放过结尾换行，而这一段直接拼进备份文件名（信任边界）。
+BACKUP_ID_RE = re.compile(r"^\d{8}-\d{6}(?:-\d{2})?\Z")
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MISSING = object()

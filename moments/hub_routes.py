@@ -1199,7 +1199,7 @@ def params_raw_get():
 @_api
 def params_raw_post():
     """§3.2 的固定校验顺序（0 锁 / 1 body / 2 体积 / 3 YAML / 4 顶层 / 5 关键键 /
-    6 占位符 / 7 版本 / 8 写盘），任一失败均不写盘、不备份。"""
+    6 占位符与回填后复验 / 7 版本 / 8 写盘），任一失败均不写盘、不备份。"""
     body = _cfg_body()
     text = body.get("text")
     if not isinstance(text, str):
@@ -1221,6 +1221,15 @@ def params_raw_post():
     if unresolved:
         raise HubError(400, "placeholder_unresolved",
                        "这些路径上的占位符在现配置里找不到对应的原值：%s" % "、".join(unresolved))
+    # 回填的是磁盘上的原始字节片段（可能是块标量的多行内容）。用户改了缩进后拼进来未必仍是
+    # 合法 YAML：写盘前按回填后的全文再解析一次，坏了就按 bad_yaml 拒，别拿半截文件覆盖配置。
+    try:
+        filled_root = hub_config.compose(filled)
+    except yaml.YAMLError as e:
+        raise HubError(400, "bad_yaml",
+                       hub_config.yaml_error_detail(e, "回填占位符后的 YAML 解析失败"))
+    if not isinstance(filled_root, yaml.MappingNode):
+        raise HubError(400, "bad_yaml", "第 1 行：回填占位符后配置顶层必须是一个映射（key: value）")
     with hub_config.hold_config_lock():
         hub_config.check_version(version)
         backup = hub_config.commit(filled)
