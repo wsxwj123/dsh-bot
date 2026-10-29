@@ -17,12 +17,38 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-COOLDOWN_MIN = 1800     # 最短间隔 30 分钟
-COOLDOWN_MAX = 86400    # 最长间隔 24 小时
+DEFAULT_COOLDOWN_MIN_SEC = 1800     # 默认最短间隔 30 分钟（秒）
+DEFAULT_COOLDOWN_MAX_SEC = 86400    # 默认最长间隔 24 小时（秒）
 # 想念值满（积温 forced）时可以不等随机闸提前开口，但要守这三条
 EARLY_MIN_GAP = 3 * 3600   # 距上次成功投递（正常或提前）至少 3 小时
 EARLY_DAILY_MAX = 2        # 本地日期当天最多提前投递 2 次
+EARLY_MAX_PER_DAY = EARLY_DAILY_MAX  # 别名，保持兼容
 EARLY_RETRY = 1800         # 提前那次被 life-context 回 SKIP（或投递失败）后 30 分钟内不再提前
+
+
+def _valid_positive_int(v) -> bool:
+    """正整数校验：int 且非 bool 且 > 0。"""
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def get_proactive_cooldown_range(bot_cfg: dict, global_cfg: dict) -> tuple[int, int]:
+    """按 bot yml → 全局 → 默认三级取值，返回 (min_sec, max_sec)。
+
+    键名：proactive_cooldown_min_minutes / proactive_cooldown_max_minutes
+    非法值（非正整数）回退默认，min > max 自动交换，返回秒。
+    """
+    def _resolve(key: str, default_min: int) -> int:
+        for cfg in (bot_cfg, global_cfg):
+            v = cfg.get(key)
+            if _valid_positive_int(v):
+                return v
+        return default_min
+
+    min_min = _resolve("proactive_cooldown_min_minutes", DEFAULT_COOLDOWN_MIN_SEC // 60)
+    max_min = _resolve("proactive_cooldown_max_minutes", DEFAULT_COOLDOWN_MAX_SEC // 60)
+    if min_min > max_min:
+        min_min, max_min = max_min, min_min
+    return min_min * 60, max_min * 60
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_DIR = os.path.expanduser("~/.claude/dispatcher/.self-initiate-state")
@@ -263,7 +289,13 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
     # 记上次投递时刻失败只记日志，不能挡住后面写 .next
     _save(sent_f, {"last_sent_at": now}, "上次投递时刻")
     # 真正投出去了：下一次机会按随机间隔（开口时机不可预测，像活人）
-    return schedule(random.randint(COOLDOWN_MIN, COOLDOWN_MAX), "已投递给网关")
+    try:
+        import config_loader as _cl
+        _global_cfg = _cl.load_global()
+    except Exception:
+        _global_cfg = {}
+    cd_min, cd_max = get_proactive_cooldown_range(cfg, _global_cfg)
+    return schedule(random.randint(cd_min, cd_max), "已投递给网关")
 
 
 def main() -> int:
@@ -294,14 +326,21 @@ def main() -> int:
     except Exception:
         last = 0
     try:
+        import config_loader as _cl
+        _bot_cfg = _cl.load_bot(bot)
+        _global_cfg = _cl.load_global()
+    except Exception:
+        _bot_cfg, _global_cfg = {}, {}
+    cd_min, cd_max = get_proactive_cooldown_range(_bot_cfg, _global_cfg)
+    try:
         target = int(open(interval_f, encoding="utf-8").read().strip())
     except Exception:
-        target = COOLDOWN_MIN
+        target = cd_min
     if last and now - last < target:
         print(f"skip: 距上次 {now-last}s < 随机目标 {target}s", file=sys.stderr)
         return 0
     open(marker, "w", encoding="utf-8").write(str(now))
-    open(interval_f, "w", encoding="utf-8").write(str(random.randint(COOLDOWN_MIN, COOLDOWN_MAX)))
+    open(interval_f, "w", encoding="utf-8").write(str(random.randint(cd_min, cd_max)))
 
     bot_dir = os.path.expanduser(f"~/.claude/channels/{bot}")
     inbox = os.path.join(bot_dir, "inbox")
