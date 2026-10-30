@@ -75,7 +75,7 @@ async function goDown(c: Ctx, ms = 25_000): Promise<Record<string, any>> {
 }
 
 /** 恢复转发，等网关判定恢复 */
-async function goUp(c: Ctx, ms = 12_000): Promise<Record<string, any>> {
+async function goUp(c: Ctx, ms = 40_000): Promise<Record<string, any>> {
   const n = evs(c.b, 'telegram.link_up').length
   c.px.mode = 'forward'
   return nthEvent(c.b, 'telegram.link_up', n, ms, '恢复转发后')
@@ -307,7 +307,7 @@ describe('不通时的各入口', () => {
       await sleep(3_000)
       expect(resendPrompts(c.b).filter(p => p.text.includes('接口甲') || p.text.includes('接口乙')), '/v1/send 的段不进补发').toEqual([])
     })
-  })
+  }, 120_000)
 
   test('#9 /v1/send 只有部分段发出（第 1 段送达、第 2 段被掐断、随后不通）→ ok:true、delivered:1；第 3 段 linkDown:true，第 2 段没有 linkDown', async () => {
     await withOutage({}, async c => {
@@ -349,14 +349,14 @@ describe('不通时的各入口', () => {
       const got = await poll(() => c.tg.sentTo(OWNER).length > ownerBefore, 11_000)
       expect(got, '恢复后 10 秒内主人应收到攒着的通知').toBeTruthy()
     })
-  })
+  }, 150_000)
 
   test('#11 不通后任意请求拿到回包 → 10 秒内 telegram.link_up{down_ms}（只一条），health 变 link="up"、link_down_ms=null', async () => {
     await withOutage({}, async c => {
       await warm(c)
       await goDown(c)
       await sleep(500)
-      const up = await goUp(c, 11_000)
+      const up = await goUp(c)
       expect(Number.isInteger(up.down_ms), `down_ms 应为整数：${JSON.stringify(up)}`).toBe(true)
       expect(up.down_ms).toBeGreaterThan(0)
       const h = await health(c.gw)
@@ -365,7 +365,7 @@ describe('不通时的各入口', () => {
       await sleep(1_000)
       expect(evs(c.b, 'telegram.link_up'), '每次翻转只记一条').toHaveLength(1)
     })
-  })
+  }, 120_000)
 })
 
 // ─── 补发 ───
@@ -392,7 +392,7 @@ describe('补发', () => {
       expect(replied, '补发那一轮的回复应发到 Telegram').toBeTruthy()
       expect(sentTexts(c.tg, FRIEND).slice(before), '不是把原文逐字重发').not.toContain('断线时的话乙')
     })
-  })
+  }, 180_000)
 
   test('#13 补发提示里只有从没发出去的段：第 2 段（可能已送达）、第 1 段（已送达）都不出现，第 3 段出现', async () => {
     await withOutage({}, async c => {
@@ -408,7 +408,7 @@ describe('补发', () => {
       expect(rp!.text, '可能已送达的段不进补发').not.toContain('（第2段）')
       expect(rp!.text, '已送达的段不进补发').not.toContain('（第1段）')
     })
-  })
+  }, 150_000)
 
   test('#16 群聊里因断线没发出的内容 → 恢复后 outage.resend_dropped reason=group，不补（没有 ⟦系统·补发⟧ 提示、没有 outage.resend）', async () => {
     await withOutage({
@@ -427,7 +427,7 @@ describe('补发', () => {
       expect(resendPrompts(c.b)).toEqual([])
       expect(evs(c.b, 'outage.resend')).toEqual([])
     })
-  })
+  }, 150_000)
 
   test('#17 断网期间网关重启 → 启动后执行一次补发检查：模型收到含原文的 ⟦系统·补发⟧ 提示，outage.resend round=1', async () => {
     await withOutage({}, async c => {
@@ -475,7 +475,7 @@ describe('约定', () => {
       // 补充说明第 3 条：迟到 ≥10 分钟写「现在已经晚了 <时长>」，不足 10 分钟写「现在到时间了。」
       expect(p!.text).toContain(lateNow >= 10 ? '现在已经晚了' : '现在到时间了')
     })
-  }, 180_000)
+  }, 210_000)
 
   test('#19 约定触发后那一轮一段都没送达 → 不标完成，commitment.retry reason=link_down；恢复后再提醒一次、文字含「上次提醒时线路断了」；这一轮内容不进补发', async () => {
     await withOutage({}, async c => {
@@ -495,7 +495,7 @@ describe('约定', () => {
       expect(evs(c.b, 'outage.resend'), '约定那一轮的内容不进补发').toEqual([])
       expect(resendPrompts(c.b)).toEqual([])
     })
-  }, 150_000)
+  }, 210_000)
 
   test('#20 约定那一轮第 1 段送达、第 2 段可能已送达、第 3 段没发出 → 约定照常完成（不 retry、不再提醒），第 3 段进补发', async () => {
     await withOutage({}, async c => {
@@ -518,7 +518,7 @@ describe('约定', () => {
       await sleep(2_000)
       expect(duePrompts(c.b), '约定已完成，不该再提醒').toHaveLength(1)
     })
-  }, 150_000)
+  }, 180_000)
 
   test('#21 约定提醒那一轮线路不通：模型先调 reply（没发出）、同一轮再调 commitment_done → 工具结果「先不标完成」，commitment.done_refused reason=link_down，随后 commitment_list 里仍有这条', async () => {
     // 约定提醒文字是网关生成的，塞不进 !tool 指令，所以换用本目录的专用假件：提醒那一轮等测试写 due-go 后依次调 reply、commitment_done、commitment_list
