@@ -44,6 +44,7 @@ import {
 } from './format'
 import { compactReply, formatModelList, formatProviders, HELP_TEXT, parseModelChoices, providersOf, resolveModel, splitReply, summaryReply, type KeyStatus, type ModelChoice, type ProviderView } from './commands'
 import { ImagesUnsupportedTracker } from './image_support'
+import { HeldNotices, OutageResend } from './outage'
 import { mergeRoutes, normName, readProviders, ProvidersUnreadable, DEFAULT_CONTEXT, type ProvidersSnapshot, type MergedProviders, type ProviderEntry, type ProviderApi } from '../providers/store'
 
 /**
@@ -232,6 +233,13 @@ export class Engine {
   private restartPending = false
   private stopping = false
   private noticeAt = new Map<string, number>()
+  /** 线路不通时攒着的主人通知（outage-delivery）：只在内存，断线期间重启就丢 */
+  private readonly heldNotices = new HeldNotices(20)
+  /** 恢复后（或启动后）那一次补发检查的定时器：又翻转一次就重新计时 */
+  private resendTimer: ReturnType<typeof setTimeout> | null = null
+  /** 最近一次断网的起止（补发提示里写）；网关重启后不知道，为 null */
+  private lastOutage: { from: number; to: number | null } | null = null
+  readonly outage: OutageResend
   private timers: ReturnType<typeof setInterval>[] = []
   private configMtime = 0
   private personaMtime = 0
@@ -312,6 +320,13 @@ export class Engine {
       isBusy: chatId => this.chat(chatId).running,
       notifyOwner: (key, text) => void this.notifyOwner(key, text),
       retryMs: cfg.gw.commitRetryMs,
+      linkDown: () => api.link.state === 'down',
+    })
+    this.outage = new OutageResend({
+      ledger, log,
+      timeZone: () => this.cfg.gw.timezone,
+      schedule: chatId => this.schedule(chatId),
+      notifyOwner: (key, text) => void this.notifyOwner(key, text),
     })
     // 被晾追问（从旧调度器原样搬来）：状态文件放在 state 目录；追问写成账本里的合成消息
     this.hang = createHangRuntime({
@@ -754,6 +769,43 @@ export class Engine {
     this.timers.push(setInterval(() => { if (this.features.life) void this.situation.get().then(() => this.hang.tick()).catch(e => this.log.error('hang.tick_failed', { err: safeError(e) })) }, g.hangTickMs))
     void this.situation.get()
     for (const chatId of this.ledger.chatsWithPending()) this.schedule(chatId)
+    this.api.link.onChange = (state, ms) => this.onLinkChange(state, ms)
+    // 断网期间重启过：启动后同样等一会儿做一次补发检查（行为清单 #17）
+    this.scheduleResend()
+  }
+
+  /** 线路翻转（LinkMonitor 回调，在 call() 里同步触发）：记日志；恢复时先发攒着的主人通知，再安排补发检查 */
+  private onLinkChange(state: 'up' | 'down', ms: number): void {
+    const now = Date.now()
+    if (state === 'down') {
+      this.log.warn('telegram.link_down', { since_reach_ms: ms })
+      this.lastOutage = { from: now - ms, to: null }
+      return
+    }
+    this.log.info('telegram.link_up', { down_ms: ms })
+    this.lastOutage = { from: this.lastOutage?.from ?? now - ms, to: now }
+    if (this.stopping) return
+    // 放到下一拍：不在那次请求的 finally 里发消息
+    setTimeout(() => {
+      if (this.stopping) return
+      void this.flushHeldNotices().catch(e => this.log.warn('notify_owner_failed', { err: safeError(e) }))
+      this.scheduleResend()
+    }, 0)
+  }
+
+  /** outage_resend_delay_ms 后（到时仍通）做一次补发检查，并顺手查一次约定（断线时延后的约定不用等下一个 30 秒） */
+  private scheduleResend(): void {
+    if (this.resendTimer) clearTimeout(this.resendTimer)
+    this.resendTimer = setTimeout(() => {
+      this.resendTimer = null
+      if (this.stopping || this.api.link.state !== 'up') return
+      try {
+        this.outage.run(Date.now(), this.lastOutage)
+      } catch (e) {
+        this.log.error('outage.resend_failed', { err: safeError(e) })
+      }
+      void this.situation.get().then(() => this.commitments.tick()).catch(e => this.log.error('commitment.tick_failed', { err: safeError(e) }))
+    }, this.cfg.gw.outageResendDelayMs)
   }
 
   private pendingHints(chatId: string): string[] {
@@ -998,6 +1050,7 @@ export class Engine {
   async stop(waitMs = 60_000): Promise<void> {
     this.beginStop()
     for (const t of this.timers) clearInterval(t)
+    if (this.resendTimer) { clearTimeout(this.resendTimer); this.resendTimer = null }
     for (const st of this.chats.values()) if (st.timer) clearTimeout(st.timer)
     // 不打断正在生成的回复：等它们结束（有上限）
     const end = Date.now() + waitMs
@@ -1258,9 +1311,12 @@ export class Engine {
       const turn = this.ledger.startTurn({ chatId, segmentId: seg.id, kind, inboundIds: ids, attempt, rootId })
       rootId ??= turn.id
       let outcome = await this.runPrompt(turn.id, rootId, seg, blocks)
-      const delivered = this.ledger.deliveredInChain(rootId)
+      const { delivered, unsent } = this.ledger.chainOutcome(rootId)
       const silent = this.ledger.silentInChain(rootId)
       const done = delivered > 0 || silent
+      // 一段都没送到、但有段因线路不通没发出：不是模型没回，催促和重试都没用（发不出去），交给恢复后的补发
+      const linkLost = !done && unsent > 0
+      const LINK_LOST_NOTE = 'link down, awaiting resend'
       // 已有动作之后模型回了空内容：话早已送达（或她已决定不回），模型只是照运行规则"发完就结束"。这一轮按正常结束记，不算报错
       if (outcome.type === 'error' && outcome.kind === 'empty-response' && done) {
         this.log.info('turn.empty_response', { turn: turn.id, delivered, silent })
@@ -1271,6 +1327,7 @@ export class Engine {
         // 报错/崩溃时补上原因（err 必须过 safeError：原始错误里可能带令牌/地址）
         ...(outcome.type === 'error' ? { reason: outcome.kind, err: safeError(outcome.err) } : {}),
         ...(outcome.type === 'crashed' ? { err: safeError(outcome.err) } : {}),
+        ...(unsent > 0 ? { link_lost: unsent } : {}),
       })
 
       if (outcome.type === 'ok') {
@@ -1282,6 +1339,7 @@ export class Engine {
         }
         this.ledger.finishTurn(turn.id, 'ok', { stopReason: outcome.stopReason, usedTokens: outcome.used })
         if (done) { this.ledger.settleInbound(ids, 'done'); return 0 }
+        if (linkLost) { this.ledger.settleInbound(ids, 'done', LINK_LOST_NOTE); return 0 }
         if (!nudgedNoAction) { nudgedNoAction = true; kind = 'nudge'; blocks = [NUDGE_NO_ACTION]; continue }
         this.log.warn('turn.no_reply', { turn: turn.id })
         this.ledger.settleInbound(ids, 'done', 'model neither replied nor chose silence')
@@ -1292,6 +1350,7 @@ export class Engine {
         this.abandonSegment(seg, 'crash')
         this.loaded.delete(seg.session_id ?? '')
         if (done) { this.ledger.settleInbound(ids, 'done', 'replied before crash'); return 0 }
+        if (linkLost) { this.ledger.settleInbound(ids, 'done', LINK_LOST_NOTE); return 0 }
         const dead: number[] = []
         for (const id of ids) {
           const row = this.ledger.inbound(id)!
@@ -1307,6 +1366,7 @@ export class Engine {
       if (outcome.type === 'cancelled') {
         this.ledger.finishTurn(turn.id, 'cancelled', { stopReason: 'cancelled', usedTokens: outcome.used })
         if (done) { this.ledger.settleInbound(ids, 'done', 'replied before cancel'); return 0 }
+        if (linkLost) { this.ledger.settleInbound(ids, 'done', LINK_LOST_NOTE); return 0 }
       } else {
         this.lastTurnErrored.add(chatId)
         this.ledger.finishTurn(turn.id, 'error', { error: outcome.err, usedTokens: outcome.used })
@@ -1316,6 +1376,8 @@ export class Engine {
           this.ledger.settleInbound(ids, 'done', 'replied before error')
           return 0
         }
+        // 致命错误（密钥、额度）照旧走下面，要通知主人
+        if (linkLost && outcome.kind !== 'fatal') { this.ledger.settleInbound(ids, 'done', LINK_LOST_NOTE); return 0 }
         // 上下文超长 / 历史思考被拒（方案 3.2 第 10、11 条）：立即换段（账本流水写摘要）并重试一次
         const reason: RollReason | null = outcome.kind === 'context-overflow' || outcome.kind === 'thinking-history' ? outcome.kind : null
         if (reason && !recovered) {
@@ -2186,10 +2248,29 @@ export class Engine {
   async notifyOwner(key: string, text: string): Promise<void> {
     const last = this.noticeAt.get(key) ?? 0
     if (Date.now() - last < 10 * 60_000) return
+    // 线路不通：发了也到不了，先攒着（同 key 只留最新），恢复后再发
+    if (this.api.link.state === 'down') {
+      this.heldNotices.hold(key, text)
+      this.log.info('notify_owner_held', { key })
+      return
+    }
+    await this.deliverNotice(key, text)
+  }
+
+  private async deliverNotice(key: string, text: string): Promise<void> {
     this.noticeAt.set(key, Date.now())
     this.ledger.event(null, 'owner_notice', { key })
     for (const owner of this.cfg.gw.owners) {
       await this.sender.send({ chatId: owner, turnId: null, callSeq: 0, text: `【系统】${text}`, kind: 'system' }).catch(e => this.log.warn('notify_owner_failed', { err: safeError(e) }))
+    }
+  }
+
+  /** 恢复后发出攒着的主人通知（每个 key 一条） */
+  private async flushHeldNotices(): Promise<void> {
+    for (const [key, text] of this.heldNotices.drain()) {
+      // 发到一半又断了：剩下的放回去，等下一次恢复
+      if (this.api.link.state === 'down') { this.heldNotices.hold(key, text); continue }
+      await this.deliverNotice(key, text)
     }
   }
 
@@ -2385,7 +2466,10 @@ export class Engine {
       // username：启动时向 Telegram 问到的用户名（不带 @），还没问到为 null。适配服务读它给群设置（适配约定 v0.7 5.12.1）
       // can_read_all、can_join_groups：启动时 getMe 的两项，适配服务读它给"刚发现的群"（约定 v1.1 5.20）
       telegram: { last_ok_ms: pollAge, conflict: extra.pollConflict, last_error: extra.pollError, username: this.botUsername || null,
-        can_read_all: this.botCaps.canReadAll, can_join_groups: this.botCaps.canJoinGroups },
+        can_read_all: this.botCaps.canReadAll, can_join_groups: this.botCaps.canJoinGroups,
+        // link 管「发」（经探测确认），last_ok_ms / problems 照旧管「收」
+        link: this.api.link.state, last_reach_ms: now - this.api.link.lastReachAt,
+        link_down_ms: this.api.link.state === 'down' && this.api.link.downAt !== null ? now - this.api.link.downAt : null },
       dsh: { running: this.dsh.running, pid: this.dsh.pid, generation: this.dsh.generation, version: this.dsh.agentVersion, last_probe_ok_ms: this.lastProbeOkAt ? now - this.lastProbeOkAt : null },
       brain: { provider: this.brain.provider, model: this.brain.model, effort: this.brain.reasoningEffort ?? null },
       turns_running: this.runningCount,
@@ -2396,6 +2480,8 @@ export class Engine {
   healthSource?: () => { pollLastOkAt: number; pollConflict: boolean; pollError: string | null }
 
   private watchHealth(): void {
+    // 线路巡检（规则 a、c）：翻转的日志和恢复后的动作在 onLinkChange 里
+    void this.api.link.tick()
     if (!this.healthSource) return
     const h = this.health(this.healthSource())
     if (!h.ok) {

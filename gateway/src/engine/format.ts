@@ -280,3 +280,50 @@ export function buildGroupRecapBlocks(
   })
   return { blocks, seenReals, unreadKeys }
 }
+
+// ─── 断线补发提示（outage-delivery 方案 5） ───
+
+/** 补发提示的总长上限（字数，按 JS 字符串长度算） */
+export const RESEND_MAX_CHARS = 3000
+export const RESEND_HEAD = '⟦系统·补发⟧'
+
+/** 一段没发出的内容：文字段给 text，图片/文件/表情包段给 file（账本记的原图绝对路径） */
+export type ResendItem = { kind: string; text: string | null; file: string | null }
+
+const FILE_LABEL: Record<string, string> = { photo: '图片', document: '文件', animation: '动图', sticker: '表情包' }
+
+/**
+ * 拼一条补发提示：以 ⟦系统·补发⟧ 开头，列出没发出的每段（文字去重、文件给路径），写明断网起止和现在时刻，
+ * 要求按现在的情况补、过时的不说、恢复后已经补过就 stay_silent。总长不超过 RESEND_MAX_CHARS，放不下的段只报个数。
+ * parts = 实际列进提示的段数（日志 outage.resend.parts 用）。
+ */
+export function formatResendPrompt(items: readonly ResendItem[], o: { from: number; to: number; now: number; timeZone: string }): { text: string; parts: number } {
+  const seen = new Set<string>()
+  const lines: string[] = []
+  for (const it of items) {
+    const isText = it.kind === 'text'
+    const body = isText ? (it.text ?? '').trim() : (it.file ?? '').trim()
+    if (!body) continue
+    const dedupKey = `${isText ? 't' : 'f'}:${body}`
+    if (seen.has(dedupKey)) continue
+    seen.add(dedupKey)
+    // 文字是自己说过的话，也照样换掉 ⟦⟧，免得一段旧话伪装成系统说明
+    lines.push(isText ? `文字：${escapeUserText(body)}` : `${FILE_LABEL[it.kind] ?? '文件'}：${body}`)
+  }
+  const head = `${RESEND_HEAD} Telegram 线路刚才断了（大约 ${clock(o.from, o.timeZone)} 到 ${clock(o.to, o.timeZone)}），下面是你那时用 reply 发、但根本没发出去的内容，对方一条都没看到。现在是 ${clock(o.now, o.timeZone)}。`
+  const tail = '请按现在的情况补给对方：还要紧的用 reply 重新说（不必逐字照抄，可以合并、改口，图片和文件可以用上面的路径重新发），已经过时的就不用再提；如果线路恢复后你已经补过了，就调用 stay_silent。'
+  // 预留"还有 N 段放不下"那一句的位置
+  const omitNote = (n: number) => `（还有 ${n} 段放不下，没列出来）`
+  let budget = RESEND_MAX_CHARS - head.length - tail.length - 2 - omitNote(lines.length).length
+  const listed: string[] = []
+  for (const line of lines) {
+    const numbered = `${listed.length + 1}. ${line}`
+    if (numbered.length + 1 <= budget) { listed.push(numbered); budget -= numbered.length + 1; continue }
+    // 放不下整段：剩下的空间还够看个开头就截断着列出来；后面的段都不再列，只报个数
+    if (budget > 40) listed.push(`${numbered.slice(0, budget - 2)}…`)
+    break
+  }
+  const omitted = lines.length - listed.length
+  const body = [head, ...listed, ...(omitted > 0 ? [omitNote(omitted)] : []), tail].join('\n')
+  return { text: body.slice(0, RESEND_MAX_CHARS), parts: listed.length }
+}

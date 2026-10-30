@@ -11,7 +11,7 @@ import { Ledger } from './ledger'
 import { Logger, registerSecret, safeError } from './log'
 import { collectSharedDirs, fetchGroupPhoto } from './media/media'
 import { McpServer } from './mcp/server'
-import { TelegramApi, type TgUser } from './telegram/api'
+import { linkStaleAfterMs, TelegramApi, type TgUser } from './telegram/api'
 import { isGroupChat } from './telegram/inbound'
 import { GroupsSeen } from './telegram/groups_seen'
 import { Poller } from './telegram/poller'
@@ -83,6 +83,8 @@ async function main(): Promise<void> {
   const releaseLock = await takeGatewayLock(cfg)
   const ledger = new Ledger(join(cfg.stateDir, 'ledger.sqlite'))
   const api = new TelegramApi(token, cfg.gw.telegramApi)
+  // 线路判定的「久」与拉取报警同一个阈值（gateway.link_down_after_ms，缺省按长轮询超时算）
+  api.link.staleAfterMs = linkStaleAfterMs(cfg.gw)
   // 能发出去的文件：网关的媒体目录（收到的、合成的语音）+ 生图结果目录
   const allowDirs = () => [cfg.mediaDir, ...cfg.gw.imageDirs.map(d => d.startsWith('~') ? join(homedir(), d.slice(1)) : d)]
   // 群聊记录：bot 自己在群里发出的话由自己记（Telegram 不把 bot 的消息投给别的 bot）

@@ -122,6 +122,10 @@ export type GatewayOpts = {
   providerKeyGraceMs: number
   /** 跨供应商换段时，在旧会话里写交接摘要最多等多久 */
   providerSwitchSummaryMs: number
+  /** 距最近一次 Telegram 回包多久算"久"（线路判定规则 a 与拉取报警共用）；null = 缺省 max(90 秒, 长轮询超时×3)。只给测试调小 */
+  linkDownAfterMs: number | null
+  /** 线路恢复后等多久再补发（0 = 立即）；网关启动后同样等这么久。只给测试调小 */
+  outageResendDelayMs: number
 }
 
 export type BotConfig = {
@@ -285,6 +289,10 @@ function parseGateway(raw: unknown, access: Access | null): GatewayOpts {
     lastUserDir: resolve(expandHome(str(g.last_user_dir, join(homedir(), '.config', 'claude-dsh-console', 'shared', 'last-user')))),
     groupsRotateBytes: num(g.groups_rotate_bytes, 5 * 1024 * 1024, 'gateway.groups_rotate_bytes'),
     groupTurnTtlMs: msNum(g.group_turn_ttl_ms, 90_000, 'gateway.group_turn_ttl_ms', 100, 3_600_000),
+    // outage-delivery：不写就按长轮询超时算（linkStaleAfterMs），写了最小 1000，免得误判不通把发送拦死
+    linkDownAfterMs: g.link_down_after_ms === undefined || g.link_down_after_ms === null || g.link_down_after_ms === '' ? null
+      : msNum(g.link_down_after_ms, 0, 'gateway.link_down_after_ms', 1_000, 86_400_000),
+    outageResendDelayMs: msNum(g.outage_resend_delay_ms, 30_000, 'gateway.outage_resend_delay_ms', 0, 86_400_000),
   }
 }
 
