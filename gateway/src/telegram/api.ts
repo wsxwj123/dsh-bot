@@ -63,7 +63,17 @@ export class TgNetworkError extends Error {
   }
 }
 
-export type SendClass = 'retryable' | 'undelivered' | 'ambiguous'
+/**
+ * 线路已确认不通（LinkMonitor.state === 'down'），这次发送类请求根本没发出去（outage-delivery 方案 2）。
+ * 继承 TgNetworkError：现有按网络错误处理的地方（删消息重试、向导兜底）照旧走网络错误分支。
+ */
+export class TgLinkDownError extends TgNetworkError {
+  override name = 'TgLinkDownError'
+  constructor(method: string) { super(method, 'LinkDown', 'telegram link is down, request not sent') }
+}
+
+/** link_down：线路不通、请求没发出，肯定没送达（与 retryable 不同：不该原地等着重试） */
+export type SendClass = 'retryable' | 'undelivered' | 'ambiguous' | 'link_down'
 export type SendErrorInfo = { cls: SendClass; reason: string; retryAfterSec?: number }
 
 // 只收录确证属于"请求体发出之前"的失败码（bun 驼峰写法与 Node 大写写法各一份）。不在集合里的一律当"可能已送达"。
@@ -78,6 +88,7 @@ export function classifySendError(e: unknown): SendErrorInfo {
       if (e.status >= 400 && e.status < 500) return { cls: 'undelivered', reason }
       return { cls: 'ambiguous', reason }
     }
+    if (e instanceof TgLinkDownError) return { cls: 'link_down', reason: 'link down' }
     if (e instanceof TgNetworkError) {
       return { cls: PRE_CONNECT_CODES.has(e.code) ? 'retryable' : 'ambiguous', reason: `network ${e.code}` }
     }
@@ -102,12 +113,136 @@ export type FileUpload = { field: string; path: string; filename?: string }
  */
 export type SendFileKind = 'photo' | 'document' | 'voice' | 'animation' | 'sticker'
 
+// ─── 线路判定（outage-delivery 方案 1，claude 侧照同一口径写） ───
+
+export type LinkState = 'up' | 'down'
+
+/** 不通时照常发的方法：拉取、探测、取文件信息。其余一律算"发送类"，不通时不发出 */
+export const LINK_UNGUARDED_METHODS: ReadonlySet<string> = new Set(['getUpdates', 'getMe', 'getFile'])
+
+/** 距最近一次回包多久算"久"：配置 gateway.link_down_after_ms，缺省 max(90 秒, 长轮询超时×3)。拉取报警用同一个阈值 */
+export function linkStaleAfterMs(gw: { pollTimeoutS: number; linkDownAfterMs?: number | null }): number {
+  return gw.linkDownAfterMs ?? Math.max(90_000, gw.pollTimeoutS * 3_000)
+}
+
+/**
+ * Telegram 线路状态。收发各处共用这一个状态。
+ * - 回包 = 拿到带 ok 字段的 JSON（ok 真假、409/429/5xx 都算）；其余是网络层失败。
+ * - 只有一次探测（getMe）以网络层失败结束才进入 down；任何回包立即回到 up。
+ * - 探测时机：a. tick 时距最近回包超过 staleAfterMs 且最近一次结束的请求失败；b. 发送类请求网络层失败（failed(true)）；
+ *   c. 已经 down 时 tick 每 reprobeMs 再探一次。同一时刻只跑一个探测，多处要求合并成一个。
+ */
+export class LinkMonitor {
+  state: LinkState = 'up'
+  lastReachAt: number
+  /** 进入 down 的时刻；up 时为 null */
+  downAt: number | null = null
+  /** 可在构造后改（main 按配置设）；缺省对应长轮询 25 秒时的 90 秒 */
+  staleAfterMs: number
+  /** 状态翻转时回调：down 时 ms = 距最近回包毫秒数，up 时 ms = 不通持续毫秒数。给日志用，回调抛错不影响判定 */
+  onChange: ((state: LinkState, ms: number) => void) | null = null
+  private lastEndedFailed = false
+  /** 回包计数：探测期间有没有别的请求拿到回包，用它判断（不用时间比较，避免同一毫秒的边界） */
+  private reaches = 0
+  private lastProbeAt = 0
+  private inflight: Promise<LinkState> | null = null
+  private readonly now: () => number
+  private readonly reprobeMs: number
+
+  constructor(private readonly probeFn: () => Promise<boolean>, o: { staleAfterMs?: number; reprobeMs?: number; now?: () => number } = {}) {
+    this.now = o.now ?? Date.now
+    this.staleAfterMs = o.staleAfterMs ?? 90_000
+    this.reprobeMs = o.reprobeMs ?? 60_000
+    this.lastReachAt = this.now()
+  }
+
+  /** 某次请求拿到了 Telegram 格式回包 */
+  reached(): void {
+    const now = this.now()
+    this.lastReachAt = now
+    this.lastEndedFailed = false
+    this.reaches++
+    if (this.state === 'down') {
+      const downMs = now - (this.downAt ?? now)
+      this.state = 'up'
+      this.downAt = null
+      this.emit('up', downMs)
+    }
+  }
+
+  /** 某次请求以网络层失败结束；sendClass = 发送类请求（规则 b：立即探测） */
+  failed(sendClass = false): void {
+    this.lastEndedFailed = true
+    if (sendClass && this.state === 'up') void this.probeNow()
+  }
+
+  /** 每 10 秒巡检一次（规则 a、c）。发起或并入了探测时返回它的结果，否则 null */
+  tick(): Promise<LinkState> | null {
+    const now = this.now()
+    if (this.state === 'down') return now - this.lastProbeAt >= this.reprobeMs ? this.probeNow() : null
+    if (this.lastEndedFailed && now - this.lastReachAt > this.staleAfterMs) return this.probeNow()
+    return null
+  }
+
+  /** 马上探测一次（不看缓存）；已有探测在跑就并入它。结果是探测结束后的状态 */
+  probeNow(): Promise<LinkState> {
+    if (this.inflight) return this.inflight
+    this.lastProbeAt = this.now()
+    const reachesBefore = this.reaches
+    const run = (async (): Promise<LinkState> => {
+      let ok = false
+      try { ok = await this.probeFn() } catch { ok = false }
+      if (ok) { this.reached(); return this.state }
+      this.lastEndedFailed = true
+      // 探测期间别的请求拿到过回包：线路明明能通，不因这次探测失败判不通
+      if (this.state === 'up' && this.reaches === reachesBefore) {
+        this.state = 'down'
+        this.downAt = this.now()
+        this.emit('down', this.downAt - this.lastReachAt)
+      }
+      return this.state
+    })()
+    this.inflight = run
+    void run.finally(() => { if (this.inflight === run) this.inflight = null })
+    return run
+  }
+
+  private emit(state: LinkState, ms: number): void {
+    try { this.onChange?.(state, ms) } catch {}
+  }
+}
+
 export class TelegramApi {
-  constructor(private readonly token: string, private readonly base = 'https://api.telegram.org', private readonly timeoutMs = 30_000) {}
+  /** 线路状态（方案 2）：call() 统一上报回包/网络层失败，不通时统一拦下发送类请求 */
+  readonly link: LinkMonitor
+
+  constructor(private readonly token: string, private readonly base = 'https://api.telegram.org', private readonly timeoutMs = 30_000, linkOpts: { staleAfterMs?: number; reprobeMs?: number; now?: () => number } = {}) {
+    // 探测绕过 call()：结果由 LinkMonitor 自己处理，不重复上报
+    this.link = new LinkMonitor(async () => {
+      let reached = false
+      await this.request('getMe', {}, { timeoutMs: 10_000 }, () => { reached = true }).catch(() => {})
+      return reached
+    }, linkOpts)
+  }
 
   private url(method: string): string { return `${this.base}/bot${this.token}/${method}` }
 
   async call<T>(method: string, params: Record<string, unknown> = {}, o: { timeoutMs?: number; file?: FileUpload; signal?: AbortSignal } = {}): Promise<T> {
+    const guarded = !LINK_UNGUARDED_METHODS.has(method)
+    // 不通时发送类请求不发出：这样记"没发出"才是确定的，补发不会重复
+    if (guarded && this.link.state === 'down') throw new TgLinkDownError(method)
+    let reached = false
+    try {
+      return await this.request<T>(method, params, o, () => { reached = true })
+    } finally {
+      if (reached) this.link.reached()
+      // 调用方自己取消的（如停止时打断长轮询）不算线路失败
+      else if (!o.signal?.aborted) this.link.failed(guarded)
+    }
+  }
+
+  /** 发一次请求。拿到 Telegram 格式回包（带布尔 ok 字段的 JSON 对象）时先调 onReached，再按 ok 返回或抛 TgApiError */
+  private async request<T>(method: string, params: Record<string, unknown>, o: { timeoutMs?: number; file?: FileUpload; signal?: AbortSignal }, onReached: () => void): Promise<T> {
     const timeout = o.timeoutMs ?? this.timeoutMs
     const signals = [AbortSignal.timeout(timeout), ...(o.signal ? [o.signal] : [])]
     let res: Response
@@ -132,6 +267,8 @@ export class TelegramApi {
       // 回包读不出来：Telegram 可能已经处理了，按"可能已送达"
       throw new TgNetworkError(method, res.ok ? 'BadResponseBody' : `HTTP${res.status}`, '')
     }
+    // 只有带布尔 ok 字段的才是 Telegram 的回包；代理/中转站自己回的 JSON 页面不算（抛出的错误类型照旧）
+    if (typeof data.ok === 'boolean') onReached()
     if (data.ok) return data.result as T
     throw new TgApiError(method, data.error_code ?? res.status, data.description ?? '', data.parameters?.retry_after)
   }

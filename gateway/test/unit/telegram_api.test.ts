@@ -12,6 +12,8 @@ function fake() {
   return { tg, api: new TelegramApi(tg.token, tg.url, 5_000) }
 }
 const kb = (...labels: string[]) => ({ inline_keyboard: [labels.map((l, i) => ({ text: l, callback_data: `w|abcdefgh|a${i}` }))] })
+// 发送类请求网络层失败后网关会立即用 getMe 探测线路（outage-delivery）；这里的服务只数 deleteMessage，探测照 Telegram 回成功
+const PROBE_OK = () => Response.json({ ok: true, result: { id: 1, is_bot: true, first_name: 'probe' } })
 const waits = () => { const w: number[] = []; return { w, wait: async (ms: number) => { w.push(ms) } } }
 
 test('发带按钮的菜单、编辑文字和按钮、不给按钮就去掉；内容没变报 not modified', async () => {
@@ -73,7 +75,7 @@ test('删消息：429 按 retry_after 等（单次最多 5 秒），最多再试
 
 test('删消息：网络层出错（回包读不出、合法 JSON 但不是对象）再试 2 次后返回 ok:false，不抛', async () => {
   let n = 0
-  const srv = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => (++n % 2 ? new Response('<html>bad gateway') : new Response('null', { status: 502 })) })
+  const srv = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: req => (req.url.endsWith('/getMe') ? PROBE_OK() : ++n % 2 ? new Response('<html>bad gateway') : new Response('null', { status: 502 })) })
   stops.push(() => srv.stop(true))
   const api = new TelegramApi('123:fake', `http://127.0.0.1:${srv.port}`, 2_000)
   const a = waits()
@@ -86,7 +88,7 @@ test('删消息：网络层出错（回包读不出、合法 JSON 但不是对�
 
 test('删消息：上一次回包读不出（可能已删成），重试时报找不到 → 算删掉了', async () => {
   let n = 0
-  const srv = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => (++n === 1 ? new Response('<html>bad gateway') : Response.json({ ok: false, error_code: 400, description: 'Bad Request: message to delete not found' }, { status: 400 })) })
+  const srv = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: req => (req.url.endsWith('/getMe') ? PROBE_OK() : ++n === 1 ? new Response('<html>bad gateway') : Response.json({ ok: false, error_code: 400, description: 'Bad Request: message to delete not found' }, { status: 400 })) })
   stops.push(() => srv.stop(true))
   const api = new TelegramApi('123:fake', `http://127.0.0.1:${srv.port}`, 2_000)
   const a = waits()

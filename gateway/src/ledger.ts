@@ -9,7 +9,8 @@ export type InboundState = 'pending' | 'in_turn' | 'done' | 'dropped' | 'dead'
 export type TurnKind = 'message' | 'retry' | 'nudge' | 'summary'
 export type TurnState = 'preparing' | 'sent' | 'ok' | 'error' | 'cancelled' | 'crashed' | 'aborted'
 export type SegmentState = 'active' | 'closed' | 'abandoned'
-export type OutboundState = 'pending' | 'sent' | 'failed' | 'ambiguous'
+/** unsent：线路已确认不通、请求根本没发出（outage-delivery D3），肯定没送达，补发不会重复。现有读取处只认 sent/ambiguous，它不会被当成已送达 */
+export type OutboundState = 'pending' | 'sent' | 'failed' | 'ambiguous' | 'unsent'
 export type OutboundKind = 'text' | 'photo' | 'document' | 'animation' | 'sticker' | 'reaction' | 'system' | 'api'
 
 export type InboundRow = {
@@ -106,6 +107,12 @@ export type OutboundRow = {
   created_at: number
   sent_at: number | null
 }
+
+/** 没发出的一段，带它所在那串回合的来源（各条消息 meta.source，去重）和补发轮次（meta.round 的最大值，没有为 0） */
+export type UnsentRow = OutboundRow & { root_id: number; sources: string[]; round: number }
+
+/** 算"送达/没发出"的内容段（与 deliveredInChain 一致；表情回应、系统通知不算） */
+const CONTENT_KINDS = "('text','photo','document','animation','sticker')"
 
 export type TranscriptEntry = { who: 'user' | 'bot'; ts: number; text: string; senderName?: string | null }
 
@@ -445,6 +452,24 @@ export class Ledger {
     return this.db.query<{ file: string }, [number, string | null]>(
       `SELECT o.file FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.chat_id = COALESCE(?, t.chat_id) AND o.kind IN ('photo','document','animation','sticker') AND o.state IN ('sent','ambiguous','pending') AND o.file IS NOT NULL`).all(rootId, chatId ?? null).map(r => r.file)
   }
+  /**
+   * 这一串的结局：delivered 与 deliveredInChain 同口径（sent/ambiguous/pending），unsent = 没发出的内容段数。
+   * 用来区分"线路断了一段都没发出去"和"模型就是没回"。
+   */
+  chainOutcome(rootId: number): { delivered: number; unsent: number } {
+    const r = this.db.query<{ n: number }, [number]>(
+      `SELECT COUNT(*) AS n FROM outbound o JOIN turns t ON o.turn_id = t.id WHERE t.root_id = ? AND o.kind IN ${CONTENT_KINDS} AND o.state = 'unsent'`).get(rootId)
+    return { delivered: this.deliveredInChain(rootId), unsent: r?.n ?? 0 }
+  }
+  /**
+   * 按消息 id 查它所在那串的结局（约定结算用）：delivered 与 deliveredForInbound 同口径，unsent 同 chainOutcome。
+   * 消息还没进过任何一轮 → 都是 0。
+   */
+  chainOutcomeForInbound(inboundId: number): { delivered: number; unsent: number } {
+    const root = this.db.query<{ root_id: number }, [number]>('SELECT t.root_id FROM inbound i JOIN turns t ON t.id = i.turn_id WHERE i.id = ?').get(inboundId)
+    if (!root) return { delivered: 0, unsent: 0 }
+    return { delivered: this.deliveredForInbound(inboundId), unsent: this.chainOutcome(root.root_id).unsent }
+  }
   clearSilent(rootId: number): void {
     this.db.query('UPDATE turns SET silent = 0 WHERE root_id = ?').run(rootId)
   }
@@ -483,6 +508,39 @@ export class Ledger {
   outboundResult(id: number, state: Exclude<OutboundState, 'pending'>, o: { tgMessageId?: number | null; error?: string | null } = {}): void {
     this.db.query('UPDATE outbound SET state = ?, tg_message_id = ?, error = ?, sent_at = ? WHERE id = ?')
       .run(state, o.tgMessageId ?? null, o.error ?? null, state === 'sent' ? this.now() : null, id)
+  }
+  /**
+   * 某个聊天里没发出的内容段（补发候选）：属于某个回合、id 大于 afterId（补发水位）、created_at >= sinceMs，按 id 升序。
+   * 要拿到超时的（记 too_old 用）就传 sinceMs = 0。
+   */
+  unsentRows(chatId: string, afterId: number, sinceMs: number): UnsentRow[] {
+    const rows = this.db.query<OutboundRow & { root_id: number; inbound_ids: string }, [string, number, number]>(
+      `SELECT o.*, t.root_id AS root_id, r.inbound_ids AS inbound_ids FROM outbound o JOIN turns t ON o.turn_id = t.id JOIN turns r ON r.id = t.root_id
+       WHERE o.chat_id = ? AND o.state = 'unsent' AND o.kind IN ${CONTENT_KINDS} AND o.id > ? AND o.created_at >= ? ORDER BY o.id`).all(chatId, afterId, sinceMs)
+    const chains = new Map<number, { sources: string[]; round: number }>()
+    const metaQ = this.db.query<{ meta: string | null }, [number]>('SELECT meta FROM inbound WHERE id = ?')
+    return rows.map(({ inbound_ids, ...o }) => {
+      let c = chains.get(o.root_id)
+      if (!c) {
+        c = { sources: [], round: 0 }
+        let ids: unknown = []
+        try { ids = JSON.parse(inbound_ids) } catch {}
+        for (const id of Array.isArray(ids) ? ids : []) {
+          if (typeof id !== 'number') continue
+          let m: { source?: unknown; round?: unknown } | null = null
+          try { m = JSON.parse(metaQ.get(id)?.meta ?? 'null') } catch {}
+          if (typeof m?.source === 'string' && !c.sources.includes(m.source)) c.sources.push(m.source)
+          if (typeof m?.round === 'number' && Number.isFinite(m.round) && m.round > c.round) c.round = m.round
+        }
+        chains.set(o.root_id, c)
+      }
+      return { ...o, sources: [...c.sources], round: c.round }
+    })
+  }
+  /** 有没发出内容段（属于某个回合、created_at >= afterMs）的聊天 */
+  chatsWithUnsent(afterMs: number): string[] {
+    return this.db.query<{ chat_id: string }, [number]>(
+      `SELECT DISTINCT chat_id FROM outbound WHERE state = 'unsent' AND turn_id IS NOT NULL AND kind IN ${CONTENT_KINDS} AND created_at >= ? ORDER BY chat_id`).all(afterMs).map(r => r.chat_id)
   }
   outboundForTurn(turnId: number): OutboundRow[] {
     return this.db.query<OutboundRow, [number]>('SELECT * FROM outbound WHERE turn_id = ? ORDER BY id').all(turnId)

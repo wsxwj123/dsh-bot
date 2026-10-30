@@ -15,7 +15,7 @@ import { buildPatchRows, modelValue, patchText, promptFingerprint, restartFinger
 import type { InboundRow, Ledger, SegmentRow, TurnKind } from '../ledger'
 import { maskChatId, safeError, type Logger } from '../log'
 import type { McpServer, ToolDef } from '../mcp/server'
-import type { TelegramApi } from '../telegram/api'
+import { linkStaleAfterMs, type TelegramApi } from '../telegram/api'
 import { isGroupChat, parseCommand } from '../telegram/inbound'
 import { readSeenGroups } from '../telegram/groups_seen'
 import { dedupGroupKey, dedupTranscriptLines } from '../group/transcript'
@@ -2362,7 +2362,7 @@ export class Engine {
     const g = this.cfg.gw
     const problems: string[] = []
     const pollAge = now - extra.pollLastOkAt
-    if (pollAge > Math.max(90_000, g.pollTimeoutS * 3_000)) problems.push(`Telegram 已经 ${Math.round(pollAge / 1000)} 秒没有拉取成功`)
+    if (pollAge > linkStaleAfterMs(g)) problems.push(`Telegram 已经 ${Math.round(pollAge / 1000)} 秒没有拉取成功`)
     if (extra.pollConflict) problems.push('同一个令牌有别的程序在收消息（旧系统的 bot 停了吗？）')
     const chats = this.ledger.oldestUnprocessed().map(r => {
       const st = this.chats.get(r.chat_id)
