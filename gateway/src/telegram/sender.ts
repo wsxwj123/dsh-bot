@@ -7,7 +7,7 @@ import type { Ledger, OutboundKind } from '../ledger'
 import { MAX_SHARED_IMAGE_BYTES } from '../media/media'
 import { maskChatIdIn, safeError, type Logger } from '../log'
 import { crashPoint, sleep } from '../util'
-import { classifySendError, isReplyNotFound, type TelegramApi } from './api'
+import { classifySendError, isReplyNotFound, TgNetworkError, type TelegramApi } from './api'
 import { buildSendPlan } from './send_plan'
 
 export type PartResult = {
@@ -17,7 +17,12 @@ export type PartResult = {
   messageId?: number
   reason?: string
   retryAfterSec?: number
+  /** 这一段肯定没发出（线路不通被拦下，或连接前就失败、重试用完），账本记 unsent；只和 state:'failed' 一起出现 */
+  linkDown?: boolean
 }
+
+/** 没发出去那一段的说明（/v1/send 的 parts[i].reason 也用它） */
+const LINK_DOWN_REASON = 'Telegram 线路不通，没有发出去'
 
 export type SendRequest = {
   /** 这一次不按空行拆段（access.splitOnParagraph 不生效）：/compact、/summary 的回复要那句话和摘要原文在同一条里 */
@@ -136,6 +141,14 @@ export class Sender {
   private halted = false
   halt(): void { this.halted = true }
 
+  /** 线路已确认不通。用 ?. ：单测里的假 api 没有 link，当作一直通 */
+  private linkDown(): boolean { return this.api.link?.state === 'down' }
+
+  /** 网络层失败后等一次探测结束：call() 已按规则 b 发起的探测在跑时 probeNow 并入它，不会再发一个 */
+  private async awaitProbe(): Promise<void> {
+    try { await this.api.link?.probeNow() } catch {}
+  }
+
   constructor(
     private readonly api: TelegramApi,
     private readonly ledger: Ledger,
@@ -182,7 +195,8 @@ export class Sender {
           continue
         }
         if (stopAfter) { results.push({ index: i + 1, kind: item.kind, state: 'skipped', reason: '被 Telegram 限流', retryAfterSec: stopAfter.retryAfterSec }); continue }
-        if (i > 0 && delay > 0) {
+        // 线路不通时后面的段反正发不出，不再停顿、不发"正在输入"（outage-delivery 方案 3）
+        if (i > 0 && delay > 0 && !this.linkDown()) {
           void this.api.sendChatAction(req.chatId).catch(() => {})
           await sleep(delay)
         }
@@ -208,7 +222,7 @@ export class Sender {
         let attempt = 0
         let useReply = replyTo
         let triedWithoutReply = false
-        const shrunk = fk === 'photo' ? shrinkPhoto(filePath!) : null
+        const shrunk = fk === 'photo' && !this.linkDown() ? shrinkPhoto(filePath!) : null
         if (shrunk) this.log.info('send.photo_shrunk', { chat: logChat, part: i + 1, from: statSync(filePath!).size, to: statSync(shrunk).size })
         for (;;) {
           attempt++
@@ -240,12 +254,31 @@ export class Sender {
             }
             const info = classifySendError(e)
             this.log.warn('send.failed', { chat: logChat, part: i + 1, cls: info.cls, reason: info.reason, err: crossChat ? maskChatIdIn(safeError(e), req.chatId) : safeError(e) })
+            if (info.cls === 'link_down') {
+              // 请求根本没发出：肯定没送达，账本记 unsent（D3），补发靠它。后面的段照样逐段记账，会各自被拦下
+              this.ledger.outboundResult(outId, 'unsent', { error: 'link_down' })
+              results.push({ index: i + 1, kind: item.kind, state: 'failed', reason: LINK_DOWN_REASON, linkDown: true })
+              break
+            }
+            // 连接前就失败（429 不算，那是 TgApiError）：先等探测，确认不通就不必再等，下一次尝试会被直接拦下记 unsent
+            const preConnect = info.cls === 'retryable' && e instanceof TgNetworkError
+            if (preConnect) {
+              await this.awaitProbe()
+              // attempt 封顶：防止线路在通/不通之间来回翻时这里无限循环
+              if (this.linkDown() && attempt < 4) continue
+            }
             if (info.cls === 'retryable') {
               const waitMs = info.retryAfterSec !== undefined ? info.retryAfterSec * 1000 : 1000 * attempt
               if (attempt < 4 && waitMs <= waitBudget) {
                 waitBudget -= waitMs
                 await sleep(waitMs)
                 continue
+              }
+              if (preConnect) {
+                // 连接前就失败、重试用完：同样肯定没发出，不是"被限流"
+                this.ledger.outboundResult(outId, 'unsent', { error: `link_down ${info.reason}` })
+                results.push({ index: i + 1, kind: item.kind, state: 'failed', reason: LINK_DOWN_REASON, linkDown: true })
+                break
               }
               this.ledger.outboundResult(outId, 'failed', { error: info.reason })
               const ra = info.retryAfterSec ?? Math.ceil(waitMs / 1000)
@@ -260,6 +293,8 @@ export class Sender {
             }
             this.ledger.outboundResult(outId, 'ambiguous', { error: info.reason })
             results.push({ index: i + 1, kind: item.kind, state: 'ambiguous', reason: `网络异常，可能已送达（${info.reason}）` })
+            // 已发出的请求网络层失败：照旧算可能已送达，但等探测结束，后面的段按最新线路状态走（不通就直接拦下）
+            if (e instanceof TgNetworkError) await this.awaitProbe()
             break
           }
         }
@@ -280,6 +315,8 @@ export class Sender {
   private async sendVoice(req: SendRequest, part: number, text: string): Promise<void> {
     if (!text.trim() || !req.voice) return
     const logChat = req.logChat ?? req.chatId
+    // 线路不通：语音反正发不出，不白白合成
+    if (this.linkDown()) { this.log.info('send.voice', { chat: logChat, part, ok: false, link_down: true }); return }
     const audio = await req.voice(text)
     let ok = false
     if (audio) {
@@ -298,6 +335,7 @@ export function describeResults(results: PartResult[]): { text: string; delivere
   const amb = results.filter(r => r.state === 'ambiguous')
   const bad = results.filter(r => r.state === 'failed' || r.state === 'skipped')
   const dup = results.filter(r => r.state === 'duplicate')
+  const lost = bad.filter(r => r.linkDown)
   if (bad.length === 0 && amb.length === 0 && dup.length === 0) return { text: `已送达 ${sent.length}/${results.length} 段。${DONE_HINT}`, delivered: sent.length, isError: false }
   const lines = [`送达 ${sent.length}/${results.length} 段。`]
   for (const r of dup) lines.push(`第 ${r.index} 段这一轮已经发过（或正在发），没有重复发送。`)
@@ -307,7 +345,9 @@ export function describeResults(results: PartResult[]): { text: string; delivere
       ? `第 ${r.index} 段未送达：${r.reason}，大约 ${r.retryAfterSec ?? '?'} 秒后才能再发。`
       : `第 ${r.index} 段未送达：${r.reason}。`)
   }
-  if (bad.length) lines.push('未送达的段对方没有看到。需要的话可以稍后用 reply 补发，已送达的段不要重复。')
-  else lines.push(DONE_HINT)
+  // 线路不通没发出的段由程序在恢复后提醒补发：模型此刻重发只会再被拦下，说"已经发了"更是错的
+  if (lost.length) lines.push('Telegram 线路不通，没有发出去，对方没看到；不要再用 reply 重发，也别说已经发了；恢复后程序会提醒你补。')
+  if (bad.length > lost.length) lines.push(lost.length ? '其余未送达的段（不是线路原因）对方也没有看到，已送达的段不要重复。' : '未送达的段对方没有看到。需要的话可以稍后用 reply 补发，已送达的段不要重复。')
+  else if (!bad.length) lines.push(DONE_HINT)
   return { text: lines.join('\n'), delivered: sent.length + amb.length, isError: bad.length > 0 && sent.length + amb.length === 0 }
 }

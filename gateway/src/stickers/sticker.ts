@@ -245,6 +245,11 @@ export class StickerService {
     } catch (err) {
       const info = classifySendError(err)
       this.d.log.warn('tool.sticker_failed', { tier: e.tier, label: e.label, cls: info.cls, reason: info.reason, err: safeError(err) })
+      if (info.cls === 'link_down') {
+        // 线路不通、请求根本没发出：账本记 unsent（补发会带上它），告诉模型别再发
+        this.d.ledger.outboundResult(outId, 'unsent', { error: 'link_down' })
+        return { text: 'Telegram 线路不通，这条表情包没有发出去，对方没看到；不要再发一遍，也别说已经发了；恢复后程序会提醒你补。', isError: true }
+      }
       if (info.cls === 'ambiguous') {
         // 可能已经发出去了：宁可少发一次，绝不重发
         this.d.ledger.outboundResult(outId, 'ambiguous', { error: info.reason })
