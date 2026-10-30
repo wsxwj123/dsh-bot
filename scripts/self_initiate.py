@@ -245,6 +245,13 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
             return 1
         print("已投递给网关（测试，跳过了判断，不改下次机会的时间）" if ok else "投递被拒", file=sys.stderr)
         return 0 if ok else 1
+    # 机会到了、问 life-context（唯一收费的一步）之前先看线路：不通就这次不开口，三个状态文件都不动，
+    # 不扣冷却、不推后下次机会，恢复后下一个周期照常判断（outage-delivery D2）。
+    # 查不清（'unknown'，比如旧网关）照旧往下走；--skip-judge 在上面已经返回，不查线路。
+    import gateway_client
+    if gateway_client.telegram_link(cfg["bot_channel_path"]) == "down":
+        print("skip: Telegram 线路不通，这次不开口（下次机会时间不变）", file=sys.stderr)
+        return 0
     # 提前那次带标记，让 life-context 照跑硬规则预筛、只跳过判官；正常路径不传 env（与原来一致）
     extra = {"env": {**os.environ, "SELF_INITIATE_EARLY": "1"}} if early else {}
     try:

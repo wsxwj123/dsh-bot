@@ -85,6 +85,23 @@ def net_kind(err) -> str | None:
     return None
 
 
+def telegram_link(channel_dir: str, timeout: float = 5.0) -> str:
+    """网关到 Telegram 的线路：``'up'`` / ``'down'``，其余一律 ``'unknown'``（outage-delivery 接口 25 条）。
+
+    读 ``GET /v1/health`` 正文里的 ``telegram.link``；健康接口回 503 时正文照样有这个字段，照读。
+    网关没开、连不上、超时、正文不是 JSON、旧网关没有该字段、缺端口或口令文件 → ``'unknown'``。
+    契约是任何情况都不抛：调用方（主动开口）只把 ``'down'`` 当跳过理由，查不清就照旧，
+    所以这里把所有异常都折成 ``'unknown'``，而不是让一次查询失败挡住正常流程。
+    """
+    try:
+        _status, body = _call(channel_dir, "GET", "/v1/health", timeout=timeout)
+        tg = body.get("telegram") if isinstance(body, dict) else None
+        link = tg.get("link") if isinstance(tg, dict) else None
+    except Exception:
+        return "unknown"
+    return link if link in ("up", "down") else "unknown"
+
+
 def model_info(channel_dir: str, timeout: float = 70) -> dict:
     """现在用的模型、配置文件里的模型、能换哪些（管理台用）。
 
