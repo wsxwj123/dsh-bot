@@ -466,7 +466,8 @@ describe('约定', () => {
       const p = await poll(() => duePrompts(c.b)[0], 10_000)
       expect(p ?? null, '恢复后模型应收到到期提醒').not.toBeNull()
       expect(p!.text).toContain('提醒对方喝水')
-      expect(p!.text).toMatch(/晚了\s*\d+\s*分钟/)
+      // 补充说明第 3 条：迟到 ≥10 分钟写「现在已经晚了 <时长>」，不足 10 分钟写「现在到时间了。」
+      expect(p!.text).toContain(lateNow >= 10 ? '现在已经晚了' : '现在到时间了')
     })
   }, 180_000)
 
@@ -510,6 +511,38 @@ describe('约定', () => {
       expect(rp!.text).not.toContain('（第2段）')
       await sleep(2_000)
       expect(duePrompts(c.b), '约定已完成，不该再提醒').toHaveLength(1)
+    })
+  }, 150_000)
+
+  test('#21 约定提醒那一轮线路不通：模型先调 reply（没发出）、同一轮再调 commitment_done → 工具结果「先不标完成」，commitment.done_refused reason=link_down，随后 commitment_list 里仍有这条', async () => {
+    // 约定提醒文字是网关生成的，塞不进 !tool 指令，所以换用本目录的专用假件：提醒那一轮等测试写 due-go 后依次调 reply、commitment_done、commitment_list
+    const DUE_DONE_ACP = join(import.meta.dir, 'fake-acp-due-done.ts')
+    const DUE_REPLY = '约定那一轮的话丁'
+    const CONTENT = '提醒对方吃药丁'
+    await withOutage({
+      before: b => { b.gw.dsh_command = ['bun', DUE_DONE_ACP, '--state', b.acpState]; writeConfig(b) },
+    }, async c => {
+      await warm(c)
+      const due = Date.now() + 12_000
+      c.tg.pushText(OWNER, commitCreate(CONTENT, due))
+      const created = await poll(() => tools(c.b).find(t => t.name === 'commitment_create'), 15_000)
+      expect(created?.text ?? '', '搭场景：约定应登记').toContain('已登记')
+      await promptArrived(c.b, '⟦系统·承诺到期⟧', 30_000)
+      await goDown(c)
+      writeFileSync(join(c.b.acpState, 'due-go'), '1')
+      const rep = await poll(() => tools(c.b).find(t => t.name === 'reply' && t.args?.text === DUE_REPLY), 15_000)
+      expect(rep ?? null, '搭场景：提醒那一轮模型应先调了 reply').not.toBeNull()
+      expect(attempted(c.px, DUE_REPLY), '前提：线路不通时这段不该发往 Telegram（0 送达）').toEqual([])
+      const all = await poll(() => { const t = tools(c.b); const i = t.findIndex(x => x.name === 'commitment_done'); return i >= 0 && t.slice(i + 1).some(x => x.name === 'commitment_list') ? t : null }, 15_000)
+      expect(all ?? null, '搭场景：同一轮里模型应随后调了 commitment_done 和 commitment_list').not.toBeNull()
+      const iDone = all!.findIndex(x => x.name === 'commitment_done')
+      const done = all![iDone]!
+      expect(Number.isInteger(done.args?.id), `搭场景：假件应从提醒文字里解析出约定编号：${JSON.stringify(done.args)}`).toBe(true)
+      expect(done.text, 'commitment_done 的工具结果').toContain('先不标完成')
+      await nthEvent(c.b, 'commitment.done_refused', 0, 5_000, 'commitment_done 被拒之后', e => e.reason === 'link_down')
+      const list = all!.slice(iDone + 1).find(x => x.name === 'commitment_list')!
+      expect(list.isError, `commitment_list 不该报错：${list.text}`).toBe(false)
+      expect(list.text, '没标完成的约定应仍在 commitment_list 里').toContain(CONTENT)
     })
   }, 150_000)
 })
