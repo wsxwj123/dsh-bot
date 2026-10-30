@@ -2,6 +2,7 @@
 //   到点时 bot 在睡觉 → 顺延到起床，提示里写明迟了多久；
 //   到点那一轮有真正送达的消息才算兑现；没开口就退避重试，最多 3 次，然后标记失败并通知主人。
 //   每天重复的（接口补充「承诺重复」）：这一次做完或彻底失败后不关闭，排到下一天同一时间；停机错过好几天只补最近一次。
+//   Telegram 线路不通（outage-delivery）：到点先不触发；提醒那一轮因断线 0 送达就再提醒（与没开口共用 3 次），也不许模型自己标完成。
 import type { CommitmentRow, Ledger } from '../ledger'
 import type { Logger } from '../log'
 import { escapeUserText } from '../engine/format'
@@ -24,6 +25,8 @@ export type CommitDeps = {
   retryMs: number[]
   /** 生活作息开着没有（约定 v1.1 5.19）：关着时到点就提醒，不按作息顺延；不给按开着 */
   lifeOn?: () => boolean
+  /** Telegram 线路此刻是否确认不通（outage-delivery 方案 3）：不通时到点不触发、不标完成；不给按通 */
+  linkDown?: () => boolean
 }
 
 export function fmtTime(ms: number, tz: string, now = Date.now()): string {
@@ -61,6 +64,8 @@ export function similar(a: string, b: string): number {
 export class Commitments {
   /** 每个聊天最近一次 commitment_list 的时刻：查过列表的那一轮，bot 复述旧承诺很正常，不做兜底识别 */
   private listedAt = new Map<string, number>()
+  /** 这次断线里已经记过 commitment.deferred(link_down) 的约定：每条每次断线只记一次，线路恢复后清空 */
+  private linkDeferred = new Set<number>()
 
   constructor(private readonly d: CommitDeps) {}
 
@@ -126,6 +131,14 @@ export class Commitments {
     const c = Number.isInteger(id) ? this.d.ledger.commitment(id) : null
     if (!c || c.chat_id !== chatId) return { text: `没有 #${args.id} 这个承诺。用 commitment_list 看看有哪些。`, isError: true }
     if (!['pending', 'firing'].includes(c.state)) return { text: `#${c.id} 已经结束了（${c.state}），不用再标。` }
+    // 断网时模型发的 reply 都没出去，却可能照样自己标完成（真机 #14）：提醒那一轮一段都没送到、且确实是线路问题，就先不标
+    if (c.state === 'firing' && c.inbound_id) {
+      const o = this.d.ledger.chainOutcomeForInbound(c.inbound_id)
+      if (o.delivered === 0 && (o.unsent > 0 || this.d.linkDown?.() === true)) {
+        this.d.log.info('commitment.done_refused', { chat: chatId, id: c.id, reason: 'link_down' })
+        return { text: `#${c.id} 先不标完成：Telegram 线路不通，这次提醒你发的消息一段都没送到，对方还没看到。不要再用 reply 重发；线路恢复后程序会再提醒你，到时候再做、再标。` }
+      }
+    }
     const now = Date.now()
     if (this.nextDay(c, 'done', now)) {
       const next = this.d.ledger.commitment(c.id)!
@@ -199,10 +212,21 @@ export class Commitments {
     for (const c of L.commitmentsInState('firing')) {
       const row = c.inbound_id ? L.inbound(c.inbound_id) : null
       if (row && (row.state === 'pending' || row.state === 'in_turn')) continue
-      this.settle(c, c.inbound_id ? L.deliveredForInbound(c.inbound_id) > 0 : false, now)
+      this.settle(c, c.inbound_id ? L.chainOutcomeForInbound(c.inbound_id) : { delivered: 0, unsent: 0 }, now)
     }
+    const linkDown = this.d.linkDown?.() === true
+    if (!linkDown) this.linkDeferred.clear()
     const due = L.commitmentsInState('pending', now)
     if (due.length === 0) return
+    if (linkDown) {
+      // 线路不通：发了也到不了，干脆不触发、不改库（也不补 catchUp），等恢复后的 tick 按实际迟到时间提醒
+      for (const c of due) {
+        if (this.linkDeferred.has(c.id)) continue
+        this.linkDeferred.add(c.id)
+        this.d.log.info('commitment.deferred', { chat: c.chat_id, id: c.id, reason: 'link_down', late_min: Math.max(0, Math.round((now - c.due_at) / MIN)) })
+      }
+      return
+    }
     const sit = this.d.situation.current(now)
     for (const pending of due) {
       const c = this.catchUp(pending, now)
@@ -230,24 +254,38 @@ export class Commitments {
     const lateText = late >= 10
       ? `现在已经晚了 ${humanMin(late)}${c.note === 'deferred_sleep' ? '（那会儿你在睡觉）' : ''}，回的时候自然地说一下。`
       : '现在到时间了。'
-    const retry = c.attempts > 0 ? `这是第 ${c.attempts + 1} 次提醒，上次没有发出消息。` : ''
+    // 上一次提醒那一轮是因为断线一段都没送到（inbound_id 还指着那一轮），就别说成"上次没有发出消息"，免得模型以为是自己没开口
+    const prev = c.attempts > 0 && c.inbound_id ? this.d.ledger.chainOutcomeForInbound(c.inbound_id) : null
+    const retry = c.attempts === 0 ? ''
+      : prev && prev.delivered === 0 && prev.unsent > 0 ? `这是第 ${c.attempts + 1} 次提醒，上次提醒时线路断了，对方没收到。`
+      : `这是第 ${c.attempts + 1} 次提醒，上次没有发出消息。`
     return `⟦系统·承诺到期⟧ 你答应过对方：${escapeUserText(c.text)}${quote}，约定的是 ${fmtTime(c.due_at, tz, now)}。${lateText}${retry}按你的性子去做，用 reply 发给对方；如果已经不需要了，用 commitment_cancel 取消 #${c.id} 并写明原因。`
   }
 
-  private settle(c: CommitmentRow, delivered: boolean, now: number): void {
+  /** outcome：提醒那一轮（含补救轮）的结局；delivered>0（含可能已送达）就算兑现，0 送达且有段没发出是线路问题 */
+  private settle(c: CommitmentRow, outcome: { delivered: number; unsent: number }, now: number): void {
     const L = this.d.ledger
     if (L.commitment(c.id)?.state !== 'firing') return // 那一轮里模型自己取消了
-    if (delivered) {
+    if (outcome.delivered > 0) {
       if (!this.nextDay(c, 'done', now)) L.updateCommitment(c.id, { state: 'done' })
       this.d.log.info('commitment.done', { chat: c.chat_id, id: c.id, attempts: c.attempts + 1 })
       return
     }
+    const linkLost = outcome.unsent > 0
+    // 断线和没开口共用 3 次机会（D1）；断线也必须 +1，否则投递去重键 commit:<id>:<attempts> 与上次相同、永远触发不了
     const attempts = c.attempts + 1
     if (attempts >= MAX_ATTEMPTS) {
       const daily = this.nextDay(c, 'failed', now)
       if (!daily) L.updateCommitment(c.id, { state: 'failed', attempts })
-      this.d.log.warn('commitment.failed', { chat: c.chat_id, id: c.id, attempts })
-      this.d.notifyOwner(`commitment:${c.id}`, `有一件答应过的事提醒了 ${attempts} 次都没开口，${daily ? '这一次已放弃（每天的事，下一天照常提醒）' : '已放弃'}：「${c.text.slice(0, 60)}」`)
+      this.d.log.warn('commitment.failed', { chat: c.chat_id, id: c.id, attempts, ...(linkLost ? { reason: 'link_down' } : {}) })
+      const why = linkLost ? `提醒了 ${attempts} 次都没送到对方（最后一次是因为 Telegram 线路断了没送到）` : `提醒了 ${attempts} 次都没开口`
+      this.d.notifyOwner(`commitment:${c.id}`, `有一件答应过的事${why}，${daily ? '这一次已放弃（每天的事，下一天照常提醒）' : '已放弃'}：「${c.text.slice(0, 60)}」`)
+      return
+    }
+    if (linkLost) {
+      // 不等退避：next_at=现在，线路一恢复下一次 tick 就再提醒（不通时 tick 会先拦住）
+      L.updateCommitment(c.id, { state: 'pending', attempts, next_at: now })
+      this.d.log.info('commitment.retry', { chat: c.chat_id, id: c.id, attempts, in_min: 0, reason: 'link_down' })
       return
     }
     const wait = this.d.retryMs[Math.min(attempts, this.d.retryMs.length) - 1] ?? 15 * MIN
