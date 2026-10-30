@@ -307,8 +307,9 @@ export function formatResendPrompt(items: readonly ResendItem[], o: { from: numb
     const dedupKey = `${isText ? 't' : 'f'}:${body}`
     if (seen.has(dedupKey)) continue
     seen.add(dedupKey)
-    // 文字是自己说过的话，也照样换掉 ⟦⟧，免得一段旧话伪装成系统说明
-    lines.push(isText ? `文字：${escapeUserText(body)}` : `${FILE_LABEL[it.kind] ?? '文件'}：${body}`)
+    // 文字是自己说过的话，也照样换掉 ⟦⟧，免得一段旧话伪装成系统说明；
+    // 文件名同样可能带 ⟦⟧ 或换行（换行能另起一行冒充系统标记），路径也转义并压成一行
+    lines.push(isText ? `文字：${escapeUserText(body)}` : `${FILE_LABEL[it.kind] ?? '文件'}：${escapeUserText(body.replace(/[\r\n]+/g, ' '))}`)
   }
   const head = `${RESEND_HEAD} Telegram 线路刚才断了（大约 ${clock(o.from, o.timeZone)} 到 ${clock(o.to, o.timeZone)}），下面是你那时用 reply 发、但根本没发出去的内容，对方一条都没看到。现在是 ${clock(o.now, o.timeZone)}。`
   const tail = '请按现在的情况补给对方：还要紧的用 reply 重新说（不必逐字照抄，可以合并、改口，图片和文件可以用上面的路径重新发），已经过时的就不用再提；如果线路恢复后你已经补过了，就调用 stay_silent。'

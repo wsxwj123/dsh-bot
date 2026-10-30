@@ -9,6 +9,7 @@ import { Logger } from '../../src/log'
 import { LinkMonitor, TelegramApi, TgLinkDownError, TgNetworkError } from '../../src/telegram/api'
 import { describeResults, Sender } from '../../src/telegram/sender'
 import { StickerService } from '../../src/stickers/sticker'
+import { OutageResend } from '../../src/engine/outage'
 
 const TOKEN = '123:abc'
 const cleanups: (() => void)[] = []
@@ -121,6 +122,53 @@ test('连接前就失败、探测成功但重试用完：这段记 unsent（肯�
   const rows = r.ledger.outboundForTurn(r.turn.id)
   expect(rows.map(x => x.state)).toEqual(['unsent', 'sent'])
   expect(rows[0]!.error).toStartWith('link_down')
+})
+
+test('线路一直通、某段连接前就失败且重试用完记了 unsent：主动要一次补发检查（onUnsentWhileUp），这段随后进补发', async () => {
+  let sends = 0
+  const link = new LinkMonitor(async () => true)
+  const api = {
+    link,
+    sendMessage: async (_c: string, text: string) => {
+      sends++
+      if (text === '一') { link.failed(true); throw new TgNetworkError('sendMessage', 'ECONNREFUSED', '') }
+      link.reached()
+      return { message_id: sends }
+    },
+    sendChatAction: async () => true,
+  } as unknown as TelegramApi
+  const r = rig(api, { maxSendWaitMs: 0 })
+  // 与 engine 同样的接法：回调里跑补发检查（engine 里是 scheduleResend，延时后到时仍通才跑同一个 OutageResend.run）
+  const scheduled: string[] = []
+  const resend = new OutageResend({ ledger: r.ledger, log: new Logger({ console: false }), timeZone: () => 'Asia/Shanghai', schedule: c => { scheduled.push(c) }, notifyOwner: () => {} })
+  let asked = 0
+  r.sender.onUnsentWhileUp = () => { asked++ }
+  const res = await r.sender.send({ chatId: '1', turnId: r.turn.id, callSeq: 1, text: '一\n\n二' })
+  expect(res.map(x => x.state)).toEqual(['failed', 'sent'])
+  expect(link.state).toBe('up')
+  expect(asked).toBe(1)
+  expect(resend.run(Date.now(), null)).toEqual(['1'])
+  expect(scheduled).toEqual(['1'])
+  const synth = r.ledger.pendingFor('1').filter(x => x.ukey.startsWith('int:outage:'))
+  expect(synth).toHaveLength(1)
+  expect(synth[0]!.text).toContain('一')
+  expect(synth[0]!.text).not.toContain('二')
+})
+
+test('线路已判不通时记 unsent：不走 onUnsentWhileUp（恢复那一刻会安排补发）', async () => {
+  const link = new LinkMonitor(async () => false)
+  const api = {
+    link,
+    sendMessage: async () => { link.failed(true); throw new TgNetworkError('sendMessage', 'ECONNREFUSED', '') },
+    sendChatAction: async () => true,
+  } as unknown as TelegramApi
+  const r = rig(api, { maxSendWaitMs: 0 })
+  let asked = 0
+  r.sender.onUnsentWhileUp = () => { asked++ }
+  await r.sender.send({ chatId: '1', turnId: r.turn.id, callSeq: 1, text: '一' })
+  expect(link.state).toBe('down')
+  expect(r.ledger.outboundForTurn(r.turn.id).map(x => x.state)).toEqual(['unsent'])
+  expect(asked).toBe(0)
 })
 
 test('线路已不通：段间停顿和"正在输入"都跳过，每段各自记 unsent', async () => {

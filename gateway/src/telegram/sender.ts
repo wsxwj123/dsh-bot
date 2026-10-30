@@ -141,6 +141,12 @@ export class Sender {
   private halted = false
   halt(): void { this.halted = true }
 
+  /**
+   * 线路是通的、却有段记成了 unsent（连接前就失败、重试用完）时回调：线路不会翻转，没有"恢复"来触发补发，
+   * 由调用方（engine）安排补发检查。用可写属性而不是依赖 engine，sender 不认识 engine；回调抛错不影响发送
+   */
+  onUnsentWhileUp: (() => void) | null = null
+
   /** 线路已确认不通。用 ?. ：单测里的假 api 没有 link，当作一直通 */
   private linkDown(): boolean { return this.api.link?.state === 'down' }
 
@@ -278,6 +284,8 @@ export class Sender {
                 // 连接前就失败、重试用完：同样肯定没发出，不是"被限流"
                 this.ledger.outboundResult(outId, 'unsent', { error: `link_down ${info.reason}` })
                 results.push({ index: i + 1, kind: item.kind, state: 'failed', reason: LINK_DOWN_REASON, linkDown: true })
+                // 线路不通时恢复那一刻会安排补发；线路一直通就没人管它，这里主动要一次
+                if (!this.linkDown()) { try { this.onUnsentWhileUp?.() } catch {} }
                 break
               }
               this.ledger.outboundResult(outId, 'failed', { error: info.reason })

@@ -184,8 +184,16 @@ export class Ledger {
   }
   /** 这条消息所在的那一轮（含补救）有没有真正送达的回复 */
   deliveredForInbound(inboundId: number): number {
+    const root = this.db.query<{ root_id: number }, [number]>('SELECT t.root_id FROM inbound i JOIN turns t ON t.id = i.turn_id WHERE i.id = ?').get(inboundId)
+    return root ? this.deliveredForRoot(root.root_id) : 0
+  }
+  /**
+   * 这一串（含补救）真正送达的出站条数：sent/ambiguous，各种 kind 都算（含表情回应），不算 pending。
+   * 约定结算（deliveredForInbound）和补发的约定过滤共用这一条，两处对"有没有送达"的判断不会分叉。
+   */
+  deliveredForRoot(rootId: number): number {
     return (this.db.query<{ n: number }, [number]>(`SELECT COUNT(*) AS n FROM outbound WHERE state IN ('sent', 'ambiguous') AND turn_id IN (
-      SELECT id FROM turns WHERE root_id IN (SELECT root_id FROM turns WHERE id = (SELECT turn_id FROM inbound WHERE id = ?)))`).get(inboundId))?.n ?? 0
+      SELECT id FROM turns WHERE root_id = ?)`).get(rootId))?.n ?? 0
   }
   /** 这个聊天 since 之后 bot 真正发出去的文字（兜底识别许诺用） */
   sentTextsSince(chatId: string, since: number): string[] {

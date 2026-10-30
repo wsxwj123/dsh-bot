@@ -47,12 +47,13 @@ export class OutageResend {
       const deliveredByRoot = new Map<number, number>()
       const delivered = (rootId: number) => {
         let n = deliveredByRoot.get(rootId)
-        if (n === undefined) { n = L.chainOutcome(rootId).delivered; deliveredByRoot.set(rootId, n) }
+        if (n === undefined) { n = L.deliveredForRoot(rootId); deliveredByRoot.set(rootId, n) }
         return n
       }
       for (const r of rows) {
         const reason: DropReason | null = isGroupChat(chatId) ? 'group'
-          // 与约定结算同一条件：那一串 0 送达，约定会自己重新提醒，这里再补就说两遍
+          // 与约定结算同一口径（Ledger.deliveredForRoot，chainOutcomeForInbound 也用它：表情回应算送达、pending 不算）：
+          // 那一串 0 送达，约定会自己重新提醒，这里再补就说两遍；有送达（哪怕只是表情回应），约定按已兑现结算，没发出的文字只能靠这里补
           : r.sources.includes('commitment') && delivered(r.root_id) === 0 ? 'commitment'
           : now - r.created_at > RESEND_MAX_AGE_MS ? 'too_old'
           : r.round >= RESEND_MAX_ROUNDS ? 'rounds'

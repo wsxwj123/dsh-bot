@@ -764,14 +764,22 @@ export class Engine {
     this.timers.push(setInterval(() => this.watchConfig(), g.configPollMs))
     this.timers.push(setInterval(() => void this.probe(), g.probeMs))
     this.timers.push(setInterval(() => this.watchHealth(), Math.min(10_000, g.heartbeatMs)))
-    this.timers.push(setInterval(() => void this.situation.get().then(() => this.commitments.tick()).catch(e => this.log.error('commitment.tick_failed', { err: safeError(e) })), g.commitPollMs))
     // 被晾之后追问属于"生活作息"：开关关着就不跑（约定 v1.1 5.19）
     this.timers.push(setInterval(() => { if (this.features.life) void this.situation.get().then(() => this.hang.tick()).catch(e => this.log.error('hang.tick_failed', { err: safeError(e) })) }, g.hangTickMs))
     void this.situation.get()
     for (const chatId of this.ledger.chatsWithPending()) this.schedule(chatId)
     this.api.link.onChange = (state, ms) => this.onLinkChange(state, ms)
-    // 断网期间重启过：启动后同样等一会儿做一次补发检查（行为清单 #17）
-    this.scheduleResend()
+    // 线路通着、却有段连接前就失败记了 unsent：不会有"恢复"来触发补发，走同一条补发检查路径
+    this.sender.onUnsentWhileUp = () => { if (!this.stopping) this.scheduleResend() }
+    // LinkMonitor 刚建好时默认"通"，断网期间重启要等 90 秒才判得出不通。先探一次（getMe）拿到真实状态，
+    // 再开始约定巡检、安排启动补发检查：探测失败就已进入不通（onLinkChange 记 telegram.link_down），
+    // 这时不补发、约定到点按不通延后，等恢复那一刻再由 onLinkChange 安排补发
+    void this.api.link.probeNow().then(state => {
+      if (this.stopping) return
+      this.timers.push(setInterval(() => void this.situation.get().then(() => this.commitments.tick()).catch(e => this.log.error('commitment.tick_failed', { err: safeError(e) })), this.cfg.gw.commitPollMs))
+      // 断网期间重启过、启动时线路已通：同样等一会儿做一次补发检查（行为清单 #17）
+      if (state === 'up') this.scheduleResend()
+    })
   }
 
   /** 线路翻转（LinkMonitor 回调，在 call() 里同步触发）：记日志；恢复时先发攒着的主人通知，再安排补发检查 */
