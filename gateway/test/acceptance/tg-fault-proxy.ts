@@ -107,7 +107,8 @@ export class TgFaultProxy {
     }
     client.on('data', d => {
       if (dead) return
-      buf = Buffer.concat([buf, d])
+      // 没调过 setEncoding，'data' 收到的总是 Buffer；类型声明是 string | Buffer，这里只收窄类型，不改行为
+      buf = Buffer.concat([buf, d as Buffer])
       for (;;) {
         const req = takeRequest(buf)
         if (!req) break

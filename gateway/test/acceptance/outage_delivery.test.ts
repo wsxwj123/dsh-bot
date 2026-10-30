@@ -331,6 +331,12 @@ describe('不通时的各入口', () => {
   test('#10 不通时产生给主人的通知（模型鉴权失败）→ notify_owner_held{key}，主人收不到；恢复后 10 秒内主人收到', async () => {
     await withOutage({}, async c => {
       await warm(c)
+      // 搭场景：假模型的状态目录要等模型进程第一次启动才建，网关又只在有消息要处理时才起模型进程——
+      // 先让主人发一条普通消息并等这一轮结束。用 !silent（模型调 stay_silent、不回话），
+      // 这样转发层不会记下发给主人的 sendMessage，不污染下面「不通期间不该给主人发」的核对。
+      c.tg.pushText(OWNER, '在吗 !silent')
+      await nthEvent(c.b, 'turn.end', 0, 20_000, '搭场景：主人的普通消息这一轮结束')
+      expect(existsSync(c.b.acpState), '搭场景：模型进程起来后假模型状态目录应已建好').toBe(true)
       await goDown(c)
       writeFileSync(join(c.b.acpState, 'next-error.txt'), 'MISSING_CREDENTIAL deepseek-official requires DEEPSEEK_API_KEY')
       const ownerBefore = c.tg.sentTo(OWNER).length
