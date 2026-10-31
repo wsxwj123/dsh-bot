@@ -12,8 +12,8 @@ import type { ImageEngine } from './image_switch'
 const REPO_ROOT = resolve(import.meta.dir, '..', '..', '..')
 // 生图一般要一分钟左右（真机 M4：7 次都超过 45 秒），久等只是让这一轮干等。短等一下（默认 10 秒 = gateway.image_wait_ms），
 // 没好就先让模型回话，好了再通知它
-// 一次要出多张时：互不依赖的多张并发跑（上限 4，和旧系统"同一条命令 & 起进程"等价），
-// 同一动作换视角的两张仍要串行 + reuse_seed，所以多张与 reuse_seed 互斥
+// 一次要出多张时：一次调用传 images。NovelAI 同一账号一次只接一个任务，网关逐张生成；ComfyUI 并发（上限 4）。
+// 同一动作的几个机位加 same_seed：网关挑一个种子每张共用，一次调用出全部机位；reuse_seed 只用于续上一轮的单张
 
 /** 单张生图的结果：idx 是这一批里的第几张（0 起） */
 /** bad：脚本退出码 3（intermediate 的角色字段写错，没发请求）时的 stderr 原文（原因 + 正确写法示例），要回给模型让它改了重跑 */
@@ -52,8 +52,10 @@ export async function runPool<T>(tasks: (() => Promise<T>)[], limit: number): Pr
 // 要点列表用可选组：用户删了要点就只换到代码块，不会因为找不到要点而整段不换（也不会贪婪吃后面别的代码块）。
 const MULTI_SECTION_RE = /\*\*一轮要出多张图[（(]mode=new[）)][\s\S]*?\n```\n(?:(?:\n- [^\n]*)+\n)?/
 const NEW_MULTI_SECTION = `**一轮要出多张图（mode=new）——新系统怎么发**：
-- 互不依赖的多张（不同构图/不同场景，比如朋友圈配图 2–4 张）：**一次调用 generate_image，用 images 数组传多份描述**（每份 {intermediate, ratio}）。网关会并发跑这些脚本（最多 4 张同时），跑完把路径一次给你。不要拼 bash、不要 &、不要 wait（你没有 Bash）。
-- 同一动作换视角的两张（人设《图片内容规则》要求的两张）：**串行**，先正常出第一张（定下 seed），再单独调一次 generate_image、带 reuse_seed: true 出第二张；不许并行，也不要把这两张放进 images（多张和 reuse_seed 互斥）。
+- 一轮要几张图（2 张、3 张或更多），就**先把每一张的描述都写好，一次调用 generate_image，用 images 数组全部传进去**（每份 {intermediate, ratio}）。网关逐张生成，跑完把路径一次给你。不要拼 bash、不要 &、不要 wait（你没有 Bash），也不要拆成好几次调用。
+- 同一动作换视角的几张（人设《图片内容规则》要求的机位图）：同样一次传 images，**再加 same_seed: true**——网关会让这几张共用同一个种子，场景、床、灯光保持一致，只换机位。各张的机位按规则取不同条目。
+- 构图明显不同、各自独立的几张（比如朋友圈配图）：一次传 images，不加 same_seed。
+- reuse_seed 只用于续上一轮已经发过的图（单张），不能和 images 一起用。
 - 某一张失败不影响其余：成功的照常发，工具会告诉你是第几张没出来，不要因为一张挂了就整批不发。`
 
 /** 把 SKILL.md 里"用一条 bash 命令 & 并发、wait 收口"那段换成新系统说法；没匹配到就原样返回（converted=false） */
@@ -65,8 +67,9 @@ export function convertGuideSection(guide: string): { text: string; converted: b
 /** 交付给模型的"新系统说明"：一开始就点明没有 Bash、两分法怎么走 */
 const SYS_GUIDE: Record<'novelai' | 'comfyui', string> = {
   novelai: `【新系统说明】你没有 Bash，不用（也不能）拼脚本、用 & 并行、wait 收口。生图统一走 generate_image：
-- 互不依赖的多张（不同构图/不同场景，比如朋友圈配图 2–4 张）：一次调用 generate_image，用 images 数组传多份 {intermediate, ratio}，网关会并发跑（最多 4 张同时），跑完把所有路径给你。
-- 同一动作换视角的两张（人设《图片内容规则》要求的两张）：分两次串行——先正常出第一张（定下 seed），再单独调一次、带 reuse_seed: true 出第二张；绝不并行，也不要放进 images（多张与 reuse_seed 互斥）。
+- 一轮要几张图（2 张、3 张或更多）：先把每张的描述都写好，一次调用 generate_image，用 images 数组全部传进去（每份 {intermediate, ratio}），网关逐张生成，跑完把所有路径给你。不要拆成好几次调用。
+- 同一动作换视角的几张（人设《图片内容规则》要求的机位图）：一次传 images 并加 same_seed: true，网关让这几张共用同一个种子，场景一致只换机位。
+- 构图明显不同、各自独立的几张（比如朋友圈配图）：一次传 images，不加 same_seed。reuse_seed 只用于续上一轮的单张，不能和 images 一起用。
 - 部分失败：成功的照常发，失败的那张会告诉你是第几张。
 下面原文里凡是用"跑 bash 命令 & 并发"的写法，都按上面的方式替换。`,
   comfyui: `【新系统说明】你没有 Bash，不用（也不能）拼脚本、用 & 并行、wait 收口。生图统一走 generate_image：
@@ -177,13 +180,14 @@ export class LifeActions {
     mkdirSync(ws, { recursive: true })
     const stamp = `${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
 
-    // 多张：images 数组一次传几份描述，网关并发跑（对齐旧系统"一条命令 & 起进程"）；
-    // 同一动作换视角要串行 + reuse_seed，所以多张和 reuse_seed 互斥
+    // 多张：images 数组一次传几份描述。same_seed（同一动作的几个机位）时网关替这一组挑一个种子、每张共用，
+    // 一次调用就能出全部机位（省掉"先出一张拿种子、再调一次"那一轮）；reuse_seed 是续上一轮的图，只配单张
     const imagesIn = Array.isArray(args.images) ? args.images : null
     const multi = !!imagesIn && imagesIn.length > 0
     if (multi && args.reuse_seed === true) {
-      return { text: '续图只能一张一张来：先出第一张，再带 reuse_seed 出第二张。多张（images）和 reuse_seed 不能一起用。', isError: true }
+      return { text: '多张（images）和 reuse_seed 不能一起用：同一动作的几个机位一次传 images 并加 same_seed: true；reuse_seed 只用于续上一轮的单张。', isError: true }
     }
+    const sharedSeed = multi && args.same_seed === true && provider !== 'comfyui' ? 1 + Math.floor(Math.random() * (2 ** 31 - 2)) : null
     const items: Record<string, unknown>[] = multi ? (imagesIn as Record<string, unknown>[]) : [args]
     const noun = provider === 'comfyui' ? 'prompt' : 'intermediate'
     for (let i = 0; i < items.length; i++) {
@@ -193,6 +197,14 @@ export class LifeActions {
       if (!bad) continue
       if (multi) return { text: `第 ${i + 1} 张的 ${noun} 不能为空。`, isError: true }
       return { text: provider === 'comfyui' ? 'prompt 不能为空（英文描述）。先调用 image_guide 看写法。' : 'intermediate 不能为空。先调用 image_guide 看写法。', isError: true }
+    }
+
+    // same_seed：把共用种子写进这一组专用的配置副本（其余参数与 default_config.json 相同），每张都用它
+    let sharedCfg: string | null = null
+    if (sharedSeed !== null) {
+      const base = join(expand(this.d.imageSkillDir('novelai')), 'assets', 'default_config.json')
+      sharedCfg = join(ws, `cfg-${stamp}.json`)
+      writeFileSync(sharedCfg, JSON.stringify({ ...JSON.parse(readFileSync(base, 'utf8')), seed: sharedSeed }, null, 1))
     }
 
     // 单张沿用原来的文件名（im-<stamp>.json / res-<stamp>.json）；多张加 -<序号>，互不覆盖
@@ -217,7 +229,8 @@ export class LifeActions {
       writeFileSync(imPath, typeof im === 'string' ? im : JSON.stringify(im, null, 1))
       const skill = expand(this.d.imageSkillDir('novelai'))
       const ratio = ['portrait', 'landscape', 'square', 'wide'].includes(String(it.ratio)) ? String(it.ratio) : 'portrait'
-      const argv = [join(skill, 'scripts', 'generate_novelai_image.py'), '--intermediate', imPath, '--config', join(skill, 'assets', 'default_config.json'),
+      const cfgPath = sharedCfg ?? join(skill, 'assets', 'default_config.json')
+      const argv = [join(skill, 'scripts', 'generate_novelai_image.py'), '--intermediate', imPath, '--config', cfgPath,
         '--ratio', ratio, '--agent-name', this.d.imageAgent, '--session-name', `telegram-${chatId}`, '--output-json', resPath, ...(it.reuse_seed === true ? ['--reuse-seed'] : [])]
       return this.py(argv, { NOVELAI_BEARER_TOKEN: this.d.credRef('NOVELAI_BEARER_TOKEN') ?? undefined, NOVELAI_SKILL_ROOT: skill }, 600_000).then(r => {
         // 退出码 3：输入写错，把 stderr 原文（去掉 [novelai] 前缀，限 600 字）回给模型；不算生图服务故障

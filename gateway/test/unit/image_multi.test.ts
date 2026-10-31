@@ -114,6 +114,35 @@ test('NovelAI 多张逐张生成：6 张同时来，同一时刻只跑 1 个脚�
   } finally { s.cleanup() }
 })
 
+test('same_seed：一次传 3 张同一动作的机位 → 3 张共用同一个配置副本，种子相同且为正整数，其余配置不变', async () => {
+  const py = fakePy()
+  const s = setup({ py: py.run })
+  try {
+    writeFileSync(join(s.skillDir, 'assets', 'default_config.json'), JSON.stringify({ seed: -1, width: 832, model: 'nai-x' }))
+    const images = Array.from({ length: 3 }, (_, i) => ({ intermediate: { prompt: `angle${i}` } }))
+    const r = await s.actions.generateImage('42', { images, same_seed: true })
+    expect(r.isError ?? false).toBe(false)
+    const cfgs = py.calls.map(c => c.argv[c.argv.indexOf('--config') + 1]!)
+    expect(new Set(cfgs).size).toBe(1)
+    expect(cfgs[0]).not.toBe(join(s.skillDir, 'assets', 'default_config.json'))
+    const cfg = JSON.parse(readFileSync(cfgs[0]!, 'utf8'))
+    expect(Number.isInteger(cfg.seed) && cfg.seed > 0).toBe(true)
+    expect({ width: cfg.width, model: cfg.model }).toEqual({ width: 832, model: 'nai-x' })
+    expect(py.calls.some(c => c.reuse)).toBe(false)
+    expect(py.peak()).toBe(1)
+  } finally { s.cleanup() }
+})
+
+test('不加 same_seed：多张照旧用默认配置（各自随机种子）', async () => {
+  const py = fakePy()
+  const s = setup({ py: py.run })
+  try {
+    await s.actions.generateImage('42', { images: [{ intermediate: { prompt: 'a' } }, { intermediate: { prompt: 'b' } }] })
+    const cfgs = py.calls.map(c => c.argv[c.argv.indexOf('--config') + 1])
+    expect(cfgs).toEqual([join(s.skillDir, 'assets', 'default_config.json'), join(s.skillDir, 'assets', 'default_config.json')])
+  } finally { s.cleanup() }
+})
+
 test('ComfyUI 多张仍并发：6 张同时来，最多 4 个脚本同时在跑', async () => {
   let running = 0, peak = 0, calls = 0
   const run: RunPy = async args => {
@@ -150,7 +179,8 @@ test('reuse_seed 与多张互斥：直接报错、不跑脚本', async () => {
   try {
     const r = await s.actions.generateImage('42', { images: [{ intermediate: { prompt: 'a' } }], reuse_seed: true })
     expect(r.isError).toBe(true)
-    expect(r.text).toContain('续图只能一张一张来')
+    expect(r.text).toContain('不能一起用')
+    expect(r.text).toContain('same_seed')
     expect(r.text).toContain('reuse_seed')
     expect(py.calls).toHaveLength(0)
   } finally { s.cleanup() }

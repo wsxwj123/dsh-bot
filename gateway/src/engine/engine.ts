@@ -407,17 +407,18 @@ export class Engine {
       },
       {
         name: 'generate_image',
-        description: '生成图片（自拍、给对方看的照片、朋友圈配图）。按 image_guide 的规则写好描述再调用。互不依赖的多张（比如朋友圈配图 2–4 张不同构图）一次传 images，网关会并发跑（最多 4 张同时）；同一动作换视角要分两次、第二次带 reuse_seed，不要放进 images。返回图片路径（多张时全部返回）；生成得慢时先返回"还在生成"，好了程序会告诉你。',
+        description: '生成图片（自拍、给对方看的照片、朋友圈配图）。按 image_guide 的规则写好描述再调用。一轮要几张（2 张、3 张或更多）就先把每张描述写好、一次传 images（不要拆成几次调用）；同一动作换视角的几个机位再加 same_seed: true，几张共用一个种子、场景一致；NovelAI 由网关逐张生成。返回图片路径（多张时全部返回）；生成得慢时先返回"还在生成"，好了程序会告诉你。',
         inputSchema: {
           type: 'object',
           properties: {
             intermediate: { type: 'object', description: 'NovelAI：单张时用，按 image_guide 写好的结构化描述（intermediate.json 的内容）' },
             prompt: { type: 'string', description: 'ComfyUI：单张时用，英文描述' },
             ratio: { type: 'string', enum: ['portrait', 'landscape', 'square', 'wide'], description: '画幅' },
-            reuse_seed: { type: 'boolean', description: '同一动作换视角的第二张才用：为 true 沿用上一张的 seed。只能和单张配合，不能和 images 一起用' },
+            reuse_seed: { type: 'boolean', description: '续上一轮已经发过的图才用：为 true 沿用上一张的 seed。只能和单张配合，不能和 images 一起用' },
+            same_seed: { type: 'boolean', description: '和 images 一起用：这几张是同一动作的不同机位时设 true，网关让它们共用同一个种子（场景一致、只换机位）；各张构图互不相关时不设' },
             images: {
               type: 'array',
-              description: '要一次出的多张（互不依赖：不同构图/不同场景，例如朋友圈配图 2–4 张）。每项给 intermediate（NovelAI）或 prompt（ComfyUI），可带 ratio。网关会并发跑（最多 4 张同时），全部跑完一次性返回路径；某张失败不影响其余。不要和 reuse_seed 一起用',
+              description: '这一轮要出的所有图（2 张、3 张或更多，一次写全）。每项给 intermediate（NovelAI）或 prompt（ComfyUI），可带 ratio。NovelAI 逐张生成、ComfyUI 最多 4 张同时，全部跑完一次性返回路径；某张失败不影响其余。同一动作的几个机位加 same_seed: true。不要和 reuse_seed 一起用',
               items: {
                 type: 'object',
                 properties: {
