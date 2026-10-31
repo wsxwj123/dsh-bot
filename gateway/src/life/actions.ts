@@ -24,8 +24,10 @@ const IM_BAD_INPUT_CODE = 3
 /** 正确写法示例只在共享脚本的 stderr 第二行维护一份（与 CBL 侧 2026-10-21 约定），网关只转发、不另写 */
 const IM_BAD_INPUT_TAIL = '按上面说的改好 intermediate 再调用一次 generate_image（这次没有发出请求，不是生图服务的问题）。'
 
-/** 并发上限 4：旧系统同账号并发多张实测不撞锁；再高没有收益，还容易吃服务端 5xx */
+/** ComfyUI 本机自带排队，并发上限 4；再高没有收益 */
 const IMAGE_CONCURRENCY = 4
+/** NovelAI 同一账号一次只接一个任务（中转站回 429「你有正在进行的任务」），同一条回复里的几张逐张生成 */
+const NOVELAI_CONCURRENCY = 1
 
 /** 并发跑 tasks，最多 limit 个同时进行；返回顺序与 tasks 一致（失败由调用方从结果里看） */
 export async function runPool<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
@@ -224,7 +226,7 @@ export class LifeActions {
       })
     }
 
-    const batch = runPool(items.map((it, idx) => () => runOne(it, idx)), IMAGE_CONCURRENCY)
+    const batch = runPool(items.map((it, idx) => () => runOne(it, idx)), provider === 'comfyui' ? IMAGE_CONCURRENCY : NOVELAI_CONCURRENCY)
 
     // 整批一起算：全部好的算成功、部分失败只报失败那几张；成功的照常给路径
     const outcome = (rs: ImgResult[]): { result: Result; late: string } => {

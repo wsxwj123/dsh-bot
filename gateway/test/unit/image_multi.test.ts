@@ -102,7 +102,7 @@ test('多张：一次传 images 跑 3 次脚本、结果一次返回 3 条路径
   } finally { s.cleanup() }
 })
 
-test('多张并发：6 张同时来，最多 4 个脚本同时在跑（受控假 py 数同时在跑的调用数）', async () => {
+test('NovelAI 多张逐张生成：6 张同时来，同一时刻只跑 1 个脚本（同一账号一次只接一个任务）', async () => {
   const py = fakePy()
   const s = setup({ py: py.run })
   try {
@@ -110,7 +110,26 @@ test('多张并发：6 张同时来，最多 4 个脚本同时在跑（受控假
     const r = await s.actions.generateImage('42', { images })
     expect(r.text).toContain('第 6 张：')
     expect(py.calls).toHaveLength(6)
-    expect(py.peak()).toBe(4) // 串行的话最多 1；上限被改大就会大于 4
+    expect(py.peak()).toBe(1)
+  } finally { s.cleanup() }
+})
+
+test('ComfyUI 多张仍并发：6 张同时来，最多 4 个脚本同时在跑', async () => {
+  let running = 0, peak = 0, calls = 0
+  const run: RunPy = async args => {
+    calls++
+    running++; if (running > peak) peak = running
+    await Promise.resolve()
+    running--
+    writeFileSync(args[args.indexOf('--out') + 1]!, 'png')
+    return { code: 0, out: '', err: '' }
+  }
+  const s = setup({ py: run, provider: 'comfyui' })
+  try {
+    const images = Array.from({ length: 6 }, (_, i) => ({ prompt: `p${i}` }))
+    await s.actions.generateImage('42', { images })
+    expect(calls).toBe(6)
+    expect(peak).toBe(4)
   } finally { s.cleanup() }
 })
 
