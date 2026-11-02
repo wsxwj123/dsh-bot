@@ -9,6 +9,7 @@ import json
 from typing import Optional
 
 from . import engine
+from .merge import threshold_values
 
 
 DEFAULT_STATE_DIR = os.path.expanduser("~/.claude/dispatcher/.jiwen-state")
@@ -29,10 +30,23 @@ def dsh_state_dir(bot_cfg: dict) -> Optional[str]:
 def resolve(bot_id: str, jcfg: dict) -> tuple[bool, str]:
     """(启用没有, 状态目录)。新系统的 bot 默认启用（除非写了 enabled: false），状态放在自己的 state 目录；
     旧系统的 bot 照旧：看 _global.yml 的 jiwen.enabled 和 jiwen.state_dir。"""
-    jcfg = jcfg or {}
+    return _resolve_with(_load_bot_or_none(bot_id), jcfg)
+
+
+def _load_bot_or_none(bot_id: str):
+    """读这只 bot 的配置（load_bot 浅合并结果）；读不出返回 None，调用方按旧系统处理。"""
     try:
         import config_loader
-        d = dsh_state_dir(config_loader.load_bot(bot_id))
+        return config_loader.load_bot(bot_id)
+    except Exception:
+        return None
+
+
+def _resolve_with(bot_cfg, jcfg: dict) -> tuple[bool, str]:
+    """resolve 的本体：bot 配置已经读好时直接用，read() 借此只读一次 bot 配置。"""
+    jcfg = jcfg or {}
+    try:
+        d = dsh_state_dir(bot_cfg)
     except Exception:
         d = None
     if d:
@@ -57,7 +71,8 @@ def read(bot_id: str, chat_id: str, global_cfg: dict) -> Optional[dict]:
     若 jiwen 未启用 / 文件不存在 / 解析失败 → None。
     """
     jcfg = (global_cfg or {}).get("jiwen") or {}
-    enabled, state_dir = resolve(bot_id, jcfg)
+    bot_cfg = _load_bot_or_none(bot_id)   # 读一次：开关判定与阈值覆盖两处用
+    enabled, state_dir = _resolve_with(bot_cfg, jcfg)
     if not enabled:
         return None
     path = _state_path(state_dir, bot_id, chat_id)
@@ -71,21 +86,10 @@ def read(bot_id: str, chat_id: str, global_cfg: dict) -> Optional[dict]:
     except Exception:
         return None
 
-    # thresholds 走 _global.yml 配置；缺省走 engine 默认
-    # float() 强转防御 YAML 偶尔被写成字符串
-    th_cfg = jcfg.get("thresholds") or {}
-    try:
-        thresholds = engine.Thresholds(
-            notice=float(th_cfg.get("notice", 0.20)),
-            consider=float(th_cfg.get("consider", 0.35)),
-            forced=float(th_cfg.get("forced", 0.50)),
-            pride_block=float(th_cfg.get("pride_block", 0.5)),
-            valence_activity=float(th_cfg.get("valence_activity", -0.6)),
-            arousal_agitation=float(th_cfg.get("arousal_agitation", 0.7)),
-            immersion_block=float(th_cfg.get("immersion_block", 0.3)),
-        )
-    except (TypeError, ValueError):
-        thresholds = engine.Thresholds()  # fallback to defaults
+    # thresholds：全局 jiwen.thresholds ← bot 的 thresholds_override（兼容旧写法 thresholds）。
+    # 逐项校验、坏值回落、绝不抛（jiwen/merge.py）；改动前全局一项坏了整组回默认。
+    bot_jiwen = bot_cfg.get("jiwen") if isinstance(bot_cfg, dict) else None
+    thresholds = engine.Thresholds(**threshold_values(jcfg, bot_jiwen))
 
     triggers = engine.get_triggers(state, thresholds)
     description = engine.get_state_description(state)

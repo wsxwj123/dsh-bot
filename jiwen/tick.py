@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(HERE))  # claudebotlife/
 import engine
 import deepseek_delta
 import config_loader
+from jiwen import merge as jiwen_merge  # 包内导入（仓根已在 sys.path）：merge 用 `from . import engine`
 from moments import features as feature_switch
 from moments import config_sources
 from chat_history import _project_slug_for  # slug 规则唯一实现（仓根 chat_history.py，与 worker-manager.ts 同规则）
@@ -54,46 +55,12 @@ def get_bot_jiwen_overrides(bot_id: str) -> dict:
 def merge_rates(global_jiwen: dict, bot_overrides: dict) -> engine.Rates:
     """合并全局 rates + bot 覆盖 → engine.Rates。
 
-    bot 级 override 路径：bot_yml.jiwen.rates_override（兼容老 jiwen.rates）
+    bot 级 override 路径：bot_yml.jiwen.rates_override（兼容老 jiwen.rates，两者都在时旧写法生效）。
+    逐项口径在 jiwen/merge.py：bot 层越界/文字/布尔当没设，坏值不抛。
+    这里用本模块的 engine 构造（merge 只回 dict，避免「两个 Rates 类」）。
     """
-    rates_dict = dict((global_jiwen or {}).get("rates", {}))
-    bot_jw = bot_overrides or {}
-    # 兼容两种写法：rates_override（推荐，更明确）或 rates（旧）
-    rates_dict.update(bot_jw.get("rates_override", {}))
-    rates_dict.update(bot_jw.get("rates", {}))
-
-    # 默认 immersion_map（dict 类型不能用 float() 强转）
-    default_immersion_map = {
-        "reading": 0.6, "cooking": 0.5, "search": 0.4,
-        "browse": 0.35, "observe": 0.15, "selfcare": 0.5,
-    }
-    immersion_map = rates_dict.get("immersion_map") or default_immersion_map
-
-    return engine.Rates(
-        connection_per_min=float(rates_dict.get("connection_per_min", 0.0007)),
-        pride_decay_per_min=float(rates_dict.get("pride_decay_per_min", 0.003)),
-        valence_decay_per_min=float(rates_dict.get("valence_decay_per_min", 0.005)),
-        arousal_decay_per_min=float(rates_dict.get("arousal_decay_per_min", 0.01)),
-        accel_threshold_min=float(rates_dict.get("accel_threshold_min", 5.0)),
-        connection_accel=float(rates_dict.get("connection_accel", 1.0)),
-        valence_severe_low=float(rates_dict.get("valence_severe_low", -0.5)),
-        valence_severe_multiplier=float(rates_dict.get("valence_severe_multiplier", 0.3)),
-        valence_mild_low=float(rates_dict.get("valence_mild_low", -0.2)),
-        valence_mild_multiplier=float(rates_dict.get("valence_mild_multiplier", 1.5)),
-        # 新增 11 项
-        valence_lock_threshold=float(rates_dict.get("valence_lock_threshold", 0.5)),
-        valence_lock_factor=float(rates_dict.get("valence_lock_factor", 0.3)),
-        arousal_connection_rise_threshold=float(rates_dict.get("arousal_connection_rise_threshold", 0.5)),
-        arousal_connection_rise_rate=float(rates_dict.get("arousal_connection_rise_rate", 0.002)),
-        pride_defend_threshold=float(rates_dict.get("pride_defend_threshold", 0.4)),
-        pride_defend_target=float(rates_dict.get("pride_defend_target", 0.6)),
-        pride_defend_rate=float(rates_dict.get("pride_defend_rate", 0.003)),
-        pride_arousal_conflict_rate=float(rates_dict.get("pride_arousal_conflict_rate", 0.001)),
-        pride_erosion_rate=float(rates_dict.get("pride_erosion_rate", 0.002)),
-        immersion_decay_per_min=float(rates_dict.get("immersion_decay_per_min", 0.010)),
-        activity_connection_relief=float(rates_dict.get("activity_connection_relief", 0.0005)),
-        immersion_map=dict(immersion_map),
-    )
+    return engine.Rates(**jiwen_merge.rate_values(global_jiwen, bot_overrides),
+                        immersion_map=jiwen_merge.immersion_map(global_jiwen, bot_overrides))
 
 
 # ─── 状态文件读写（原子写）─────────────────────────────────
@@ -434,14 +401,7 @@ def tick_one_bot(bot_id: str, jiwen_cfg: dict, state_dir: str, dry_run: bool = F
 
     summary["state"] = engine.state_to_dict(state)
     summary["triggers"] = engine.get_triggers(
-        state,
-        engine.Thresholds(
-            notice=float((jiwen_cfg or {}).get("thresholds", {}).get("notice", 0.20)),
-            consider=float((jiwen_cfg or {}).get("thresholds", {}).get("consider", 0.35)),
-            forced=float((jiwen_cfg or {}).get("thresholds", {}).get("forced", 0.50)),
-            pride_block=float((jiwen_cfg or {}).get("thresholds", {}).get("pride_block", 0.5)),
-        ),
-    )
+        state, engine.Thresholds(**jiwen_merge.threshold_values(jiwen_cfg, bot_overrides)))
     summary["description"] = engine.get_state_description(state)
     return summary
 
