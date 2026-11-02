@@ -26,26 +26,17 @@ EARLY_MAX_PER_DAY = EARLY_DAILY_MAX  # 公开常量名，与验收测试对齐
 EARLY_RETRY = 1800         # 提前那次被 life-context 回 SKIP（或投递失败）后 30 分钟内不再提前
 
 
-def _valid_positive_int(v) -> bool:
-    """正整数校验：int 且非 bool 且 > 0。"""
-    return isinstance(v, int) and not isinstance(v, bool) and v > 0
-
-
 def get_proactive_cooldown_range(bot_cfg: dict, global_cfg: dict) -> tuple[int, int]:
     """按 bot yml → 全局 → 默认三级取值，返回 (min_sec, max_sec)。
 
-    键名：proactive_cooldown_min_minutes / proactive_cooldown_max_minutes
-    非法值（非正整数）回退默认，min > max 自动交换，返回秒。
+    键名：proactive_cooldown_min_minutes / proactive_cooldown_max_minutes，逐键回退。
+    bot 层认整数与整数串、范围 1–960 / 1–1440；全局层只认正整数（同改动前）；
+    非法值回退下一层（口径在 rhythm_config.py），min > max 自动交换，返回秒。
     """
-    def _resolve(key: str, default_min: int) -> int:
-        for cfg in (bot_cfg, global_cfg):
-            v = cfg.get(key)
-            if _valid_positive_int(v):
-                return v
-        return default_min
+    import rhythm_config   # 仓根在模块中段才进 sys.path，这里按需导入
 
-    min_min = _resolve("proactive_cooldown_min_minutes", DEFAULT_COOLDOWN_MIN_SEC // 60)
-    max_min = _resolve("proactive_cooldown_max_minutes", DEFAULT_COOLDOWN_MAX_SEC // 60)
+    min_min = rhythm_config.resolve("proactive_cooldown_min_minutes", bot_cfg, global_cfg)
+    max_min = rhythm_config.resolve("proactive_cooldown_max_minutes", bot_cfg, global_cfg)
     if min_min > max_min:
         min_min, max_min = max_min, min_min
     return min_min * 60, max_min * 60
@@ -194,6 +185,28 @@ def _early_block(bot: str, chat: str, now: int, sent: dict, early: dict, cfg: di
     return ""
 
 
+def _fallback_proactive_cap(bot: str, cfg: dict) -> tuple[int, int] | None:
+    """FALLBACK 投递前的主动上限检查：over → (used, cap)，否则 None。
+
+    计数按 person（bot4 → chenlulu，heartbeat_log 里实际存的名字）。cap=0 时
+    check_proactive_quota 直接回 ok、不查库。全局配置读不出按空表；查库出错放行并记类名。
+    """
+    try:
+        import config_loader
+        global_cfg = config_loader.load_global()
+    except Exception:
+        global_cfg = {}
+    try:
+        import quota
+        from moments import config_sources
+        state, cap, used = quota.check_proactive_quota(
+            config_sources.person_key(cfg, bot), global_cfg, cfg)
+    except Exception as e:
+        print(f"主动上限检查失败（放行）：{type(e).__name__}", file=sys.stderr)
+        return None
+    return (used, cap) if state == "over" else None
+
+
 def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_judge: bool = False) -> int:
     # 功能开关（约定 v1.1 5.19）："主动找你聊"关着就什么都不做，不问 life-context、不投递、不改下次机会的时间
     from moments import features as feature_switch
@@ -272,6 +285,14 @@ def run_dsh(bot: str, chat: str, cfg: dict, now: int, force: bool = False, skip_
         return schedule(retry_after(reason, now, wake), f"skip: {reason}")
     if action == "TEXT":
         text = "⟦系统·主动开口⟧ " + str(out.get("text", ""))[:4000]
+    else:
+        # FALLBACK（life-context 出错/超时/坏输出）不经过 life-context 里的主动上限闸，也不记心跳，
+        # 投默认文本前在这里补查一次；over 就不投、按 SKIP 排下次机会。查库出错放行。
+        cap_hit = _fallback_proactive_cap(bot, cfg)
+        if cap_hit:
+            used, cap = cap_hit
+            reason = f"主动找你上限({used}/{cap})"
+            return schedule(retry_after(reason, now), f"skip: {reason}")
     if early:
         # 提前那次先记账再投递：记账写不进去就不发。投出去之后才写，一旦写失败，
         # 3 小时间隔和每日名额就守不住，会连发；先记了再投递失败，最多保守多等 3 小时

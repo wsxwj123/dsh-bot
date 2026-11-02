@@ -13,8 +13,11 @@ Max 订阅按"消息数 / 5h 窗口"限额。这里不精确知道 Anthropic 的
 """
 import time
 import db
+import rhythm_config
 
 DEFAULT_MAX_CALLS_PER_5H = 30
+# 每 bot「每 5 小时最多主动找你几次」的缺省：0 = 不限（与 rhythm_config 的默认一致，单测钉住）
+DEFAULT_PROACTIVE_MAX_PER_5H = 0
 
 WORKER_TRIGGER_WEIGHT = 5
 JUDGE_WEIGHT = 1
@@ -35,6 +38,22 @@ def check_quota(global_cfg: dict) -> str:
     if weighted >= cap * 0.85:
         return "warn"
     return "ok"
+
+
+def check_proactive_quota(person: str, global_cfg: dict, bot_cfg: dict | None = None):
+    """每 bot 的「每 5 小时主动找你几次」闸。返回 ``(state, cap, used)``，state ∈ {'ok','over'}。
+
+    cap 取 bot 覆盖 ``proactive_max_calls_per_5h`` → 全局同名顶层键 → 0（rhythm_config）。
+    cap=0 表示不限：直接 ``("ok", 0, 0)``，不查库。
+    ``person`` 是 ``heartbeat_log.bot_id`` 里实际存的名字（``config_sources.person_key``，
+    bot4 → chenlulu），传编号会永远数到 0。计数：最近 5 小时 ``judge_speak=1 且 skipped=0``
+    的条数，>= cap 即 over。查库异常不在这里吞，向上抛，由调用方放行并记类名。
+    """
+    cap = rhythm_config.resolve("proactive_max_calls_per_5h", bot_cfg, global_cfg)
+    if cap == 0:
+        return "ok", 0, 0
+    used = db.count_self_initiates_since(person, int(time.time()) - 5 * 3600)
+    return ("over" if used >= cap else "ok"), cap, used
 
 
 def record_call(kind: str, weight: int):

@@ -5,6 +5,8 @@
 
 核心原则：用户和 bot 在聊天时（静默期内），框架完全静默。
 """
+import rhythm_config
+
 DEFAULT_SILENCE_THRESHOLD_MIN = 30
 
 
@@ -16,15 +18,16 @@ def positive_int_or_default(value, default=DEFAULT_SILENCE_THRESHOLD_MIN) -> int
 
 
 def hard_prefilter(now, situation, world, wildcard, mood, since_user_min,
-                    recent_msgs, global_cfg) -> str | None:
+                    recent_msgs, global_cfg, bot_cfg=None) -> str | None:
+    """``bot_cfg``（load_bot 结果，可省）里的 ``proactive_silence_threshold_minutes`` 覆盖全局
+    顶层 ``silence_threshold_minutes``；0 = 不设静默期。取值口径见 rhythm_config.py。"""
     # 例外：CLAUDEBOTLIFE_BYPASS_SILENCE=1 时**跳过所有硬规则**
     # 用于 /clear hook —— 用户主动唤醒，让 judge + speaking_threshold 自己决定
     import os
     if os.environ.get("CLAUDEBOTLIFE_BYPASS_SILENCE") == "1":
         return None
 
-    silence_threshold = positive_int_or_default(
-        (global_cfg or {}).get("silence_threshold_minutes"))
+    silence_threshold = rhythm_config.resolve("silence_threshold_minutes", bot_cfg, global_cfg)
 
     # 1. 静默期判定（核心）
     if since_user_min is not None and since_user_min < silence_threshold:

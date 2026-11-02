@@ -350,6 +350,21 @@ def last_self_initiate_ts(bot_id: str, chat_id: str | None = None) -> int | None
         return int(row["ts"]) if row and row["ts"] else None
 
 
+def count_self_initiates_since(bot_id: str, ts_start: int) -> int:
+    """该 bot 在 ts_start 之后真发出去的主动消息条数（judge_speak=1 且 skipped=0）。
+
+    SQL 与 claude 侧逐字相同。dsh 的心跳记在 person 名下（bot4 记 chenlulu），
+    调用方传 ``config_sources.person_key(bot_cfg, bot_id)``，不是编号。
+    """
+    with _connect() as c:
+        row = c.execute(
+            "SELECT COUNT(*) AS n FROM heartbeat_log "
+            "WHERE bot_id=? AND judge_speak=1 AND skipped=0 AND ts>=?",
+            (bot_id, ts_start),
+        ).fetchone()
+        return int(row["n"])
+
+
 # ─── moments ───────────────────────────────────────────────────
 def insert_moment(bot_id: str, ts: int, text: str, image_path: str,
                   metadata: dict, kind: str, visibility: str = "public") -> int:
