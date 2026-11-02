@@ -587,9 +587,31 @@ def _person(bot):
     return bot["id"]
 
 
+def _chat_id(cfg):
+    """主人私聊编号：bot 自己 yml 顶层的 ``chat_id``，正整数或只含 ASCII 数字的串（转成整数），其余为 None。
+
+    切换底层时对面靠它新建目标 bot。不从频道 ``.env`` 兜底，只认配置里写下的值。
+    """
+    value = cfg.get("chat_id")
+    if isinstance(value, bool):             # bool 是 int 的子类，True 不能当成 1
+        return None
+    if isinstance(value, str):
+        # str.isdigit() 会放行全角、上标等非 ASCII 数字，所以先限定 ASCII
+        if not (value.isascii() and value.isdigit()):
+            return None
+        try:
+            value = int(value)
+        except ValueError:                  # 位数超过解释器整数转换上限
+            return None
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
 def _bot_row(bot, seams, moved_to=None):
     """列表里的一行（约定 5.2 的八个键，v0.6 起加 ``person``，13.1 加 ``enabled``、``polling``、``username``、
-    ``moved_to``）。在线程池里跑：只用传进来的值，不读环境与配置（迁出标记由 ``_bots`` 先读好传进来）。"""
+    ``moved_to``，bots-chat-id 加 ``chat_id``）。在线程池里跑：只用传进来的值，不读环境与配置（迁出标记由
+    ``_bots`` 先读好传进来）。"""
     bot_id = bot["id"]
     brain = _config_brain(bot["cfg"])
     live = None
@@ -626,7 +648,7 @@ def _bot_row(bot, seams, moved_to=None):
             "provider": {"id": provider, "name": provider, "model": model, "effort": effort},
             "provider_source": source, "pending": None, "detail": detail,
             "enabled": bot["enabled"], "polling": polling, "username": _username(health, bot["cfg"]),
-            "moved_to": moved_to}
+            "moved_to": moved_to, "chat_id": _chat_id(bot["cfg"])}
 
 
 # ---------------------------------------------------------------- 五个接口
