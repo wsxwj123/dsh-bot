@@ -573,6 +573,25 @@ def test_written_values_are_what_consumers_read(w):
 # ======================================================================== 定位失败沿用生活设定
 
 
+def test_no_life_config_is_no_file_even_without_allowed_dir(w):
+    # INTERFACE 3.2：没写 life_config 一律「没有单独的生活设定文件」；允许目录不存在时 locate 本身会先回
+    # 「不在允许位置」，那句话对没有文件的 bot 不对
+    w.life_dir.rmdir()
+    w.own.pop("life_config")
+    for call in (w.view, lambda: rs.save(w.bot, [w.bot], {DAILY: 1}, [], "v")):
+        with pytest.raises(ls.LifeError) as e:
+            call()
+        assert _err(e)[:3] == (501, "unsupported", ls.NO_FILE)
+    w.own["life_config"] = "   "
+    with pytest.raises(ls.LifeError) as e:
+        w.view()
+    assert _err(e)[:3] == (501, "unsupported", ls.NO_FILE)
+    w.own["life_config"] = str(w.life)                    # 写了但允许目录不在：照 locate 回「不在允许位置」
+    with pytest.raises(ls.LifeError) as e:
+        w.view()
+    assert _err(e)[:3] == (501, "unsupported", ls.NOT_ALLOWED)
+
+
 def test_locate_errors_propagate(w):
     w.own.pop("life_config")
     with pytest.raises(ls.LifeError) as e:

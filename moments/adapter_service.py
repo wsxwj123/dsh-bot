@@ -10,6 +10,7 @@ v0.9 的技能读写、语音的两个语言键照 v0.9 两份草案（``INTERFA
 v1.0 的新建、归档与恢复、删除、显示名照 ``INTERFACE-适配约定-v1.0-dsh侧.md`` 与补充文件第 12 节；新建与显示名调管理台
 新建页、编辑页那几个函数（``hub_addbot``），停 bot 用 9.2 的「停」。
 v1.0 的补充（列表四个键、迁出标记、新建新字段、归档 shell_meta、删除先抹 .env、令牌转交、停着换供应商）照补充文件第 13 节。
+情绪与节奏（约定 5.24，``/bots/<bot_id>/rhythm``）照 ``.devflow/dsh-rhythm-INTERFACE.md``，逻辑在 ``moments/rhythm_settings.py``。
 起服务：仓库根执行 ``python3 -m moments.adapter_service``；测试用 ``create_app()``。
 只支持这一种启动方式：监听地址只许回环、令牌文件不在就拒绝启动，这两道检查都在 ``main()`` 里。
 ``flask run`` 等别的方式拉起 ``create_app()`` 会绕过它们（例如对外监听），不要这样起。
@@ -56,6 +57,7 @@ from werkzeug.exceptions import HTTPException, InternalServerError, RequestEntit
 
 import gateway_client
 from moments import bot_launchd, bots_client, config_sources, hub_addbot, hub_routes, life_settings, redact
+from moments import rhythm_settings
 from moments import features as feature_switch
 from moments import handoff, skill_templates
 from moments.provider_model import HubError
@@ -366,8 +368,8 @@ def _dispatch():
             _require_method(method, ", ".join(methods))
             if not _valid_bot_id(parts[0]):
                 refuse = _invalid("bot 编号不合规：只能用字母、数字、点、下划线、横线，1 到 64 个字符")
-                if parts[1] == "life":
-                    refuse.fields = {}      # 生活设定的 422 一律带 fields（INTERFACE-生活设定 第 1 节）
+                if parts[1] in ("life", "rhythm"):
+                    refuse.fields = {}      # 生活设定、情绪与节奏的 422 一律带 fields（各自 INTERFACE）
                 raise refuse
             return methods[method](parts[0], *parts[2:])
     head = PREFIX + "/archives/"
@@ -1293,6 +1295,43 @@ def _life_put(bot_id):
     except life_settings.LifeError as e:
         raise _life_refuse(e) from None
     return {"ok": True, "applied": True, "queued": False, "message": message}
+
+
+# ---------------------------------------------------------------- 情绪与节奏（约定 5.24）
+
+def _rhythm_get(bot_id):
+    """情绪与节奏 GET（dsh-rhythm INTERFACE 3.2）：不看请求体与查询串；bot 停用时照常返回。
+
+    判定顺序：鉴权 → 方法 → bot_id 写法（``_respond`` / ``_dispatch`` 已做）→ 名单 → 生活设定文件。
+    """
+    bots = _own_bots()
+    bot = _require_bot(bot_id, bots)
+    try:
+        return dict(ok=True, **rhythm_settings.view(bot, bots))
+    except life_settings.LifeError as e:
+        raise _life_refuse(e) from None
+
+
+def _rhythm_put(bot_id):
+    """情绪与节奏 PUT（INTERFACE 3.3）：请求体（第 3–6 步）→ 名单（第 7 步）→ 交给 rhythm_settings。
+
+    请求体形状必须在查名单之前判（``check_body``）：名单外的 bot 带着坏请求体回的是 422 不是 404。
+    停用的 bot 照常能改，不重启任何进程。
+    """
+    try:
+        body = _json_object()                           # 第 3 步：不是 JSON 对象或超过 64 KiB
+    except Refuse as r:
+        r.fields = {}
+        raise
+    set_values, remove_keys, version = body.get("set", {}), body.get("remove", []), body.get("version")
+    try:
+        rhythm_settings.check_body(set_values, remove_keys, version)      # 第 4–6 步
+        bots = _own_bots()
+        bot = _require_bot(bot_id, bots)                                 # 第 7 步（Refuse，不经下面翻译）
+        result = rhythm_settings.save(bot, bots, set_values, remove_keys, version)
+    except life_settings.LifeError as e:
+        raise _life_refuse(e) from None
+    return dict(ok=True, **result)
 
 
 # ---------------------------------------------------------------- v0.6、v0.7（补充文件第 9 节）
@@ -3308,6 +3347,7 @@ _BOT_ROUTES = {
     "restart": {"POST": _restart},
     "notify": {"POST": _notify},
     "life": {"GET": _life_get, "PUT": _life_put},
+    "rhythm": {"GET": _rhythm_get, "PUT": _rhythm_put},
     "enabled": {"POST": _set_enabled},
     "groups": {"GET": _groups_get, "POST": _groups_post},
     "features": {"GET": _features_get, "PUT": _features_put},

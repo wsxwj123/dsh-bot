@@ -141,6 +141,19 @@ def _read_global():
     return (data, True) if isinstance(data, dict) else ({}, False)
 
 
+def _locate(bot, bots):
+    """定位只走 ``life_settings.locate``；只把「没写 life_config」提到最前面判。
+
+    INTERFACE 3.2：没写 life_config 一律 501「没有单独的生活设定文件」。``locate`` 先查允许目录，
+    允许目录不存在时连没写 life_config 的 bot 也回「不在允许位置」——对没有文件的 bot 这句话不对。
+    其余判定（允许目录、软链、硬链、共用、不见了）原样交给 ``locate``。
+    """
+    raw = bot["cfg"].get("life_config")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ls._unsupported(ls.NO_FILE)
+    return ls.locate(bot, bots)
+
+
 # ---------------------------------------------------------------- GET（3.2）
 
 
@@ -214,7 +227,7 @@ def _collect(doc, own):
 
 def view(bot, bots):
     """GET：``{"bot_id", "version", "schema", "overrides", "warnings"}``。定位或读文件不成立抛 LifeError。"""
-    path, st = ls.locate(bot, bots)
+    path, st = _locate(bot, bots)
     _data, doc, cur = _load(path, st)
     global_cfg, readable = _read_global()
     schema = []
@@ -566,7 +579,7 @@ def save(bot, bots, set_values, remove_keys, version):
     新文与原文逐字节相同时不备份、不写盘、版本不变。
     """
     set_values, remove = check_body(set_values, remove_keys, version)   # 第 4–6 步
-    path, st = ls.locate(bot, bots)                                     # 第 8 步
+    path, st = _locate(bot, bots)                                       # 第 8 步
     _data, _doc, cur = _load(path, st)
     errors = _field_errors(set_values, remove, bot["cfg"])              # 第 9 步
     if errors:
