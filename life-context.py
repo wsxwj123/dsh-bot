@@ -177,11 +177,37 @@ def main():
             f"[{bot_id}] jiwen forced 但距用户消息 {since_user_min}min<15，降级走正常流程\n")
         jiwen_forced = False
 
-    # ─── 3.8 每 bot「每 5 小时最多主动找你几次」（必须在硬规则预筛之前）────
-    # 用户给这只 bot 设的上限就是上限：jiwen forced、想念值满的提前开口（SELF_INITIATE_EARLY=1）
+    # ─── 4. 硬规则预筛（省 LLM 配额）────────────────────
+    # 随机闸没到、因想念值满被提前叫起（SELF_INITIATE_EARLY=1）：硬规则照跑，只跳过判官，
+    # 免得"提前"这条路绕开静默期/忙碌/刚说过相同话题这些底线
+    early = os.environ.get("SELF_INITIATE_EARLY") == "1"
+    if jiwen_forced and not early:
+        skip_reason = ""  # 强制开口，跳过 prefilter
+        sys.stderr.write(f"[{bot_id}] jiwen forced：bypass prefilter\n")
+    else:
+        skip_reason = prefilter.hard_prefilter(
+            now, situation, world_snap, wildcard_pick, mood_val,
+            since_user_min, recent_msgs, global_cfg, bot_cfg=bot_cfg,
+        )
+    if skip_reason:
+        db.log_heartbeat(
+            person, int(now.timestamp()), mood_val, mood_factors,
+            situation.recurring.name,
+            (situation.sporadic or {}).get("name", ""),
+            (situation.hobby or {}).get("name", ""),
+            (wildcard_pick.card if wildcard_pick else ""),
+            False, "", True, skip_reason, "",
+        )
+        # prefilter SKIP：朋友圈也跟着安静（prefilter 是"是否值得评估"硬闸）
+        emit("SKIP", reason=skip_reason)
+        return
+
+    # ─── 4a. 每 bot「每 5 小时最多主动找你几次」（只拦私聊开口，排在硬规则预筛之后）────
+    # 预筛判 SKIP 的（用户睡了、bot 在忙、刚聊过）在上面就已经返回，与没有上限时逐字一致，朋友圈也跟着安静；
+    # 走到这里的是预筛放行（或 jiwen forced 跳过预筛）的轮次：上限到顶才记一条 skipped 心跳（不计数），
+    # 自我活动与朋友圈照常，私聊在 5b 之前 SKIP。jiwen forced、想念值满的提前开口（SELF_INITIATE_EARLY=1）
     # 都受它约束；/clear 唤醒（bypass）不查。cap=0（缺省）时 check_proactive_quota 直接回 ok、不查库。
-    # 按 person 计数（heartbeat_log 里存的名字，bot4 → chenlulu）。命中只置标志、不立刻 return：
-    # 朋友圈与自我活动照常走（不该连坐），到私聊判定之前再 SKIP。dry-run 照查（只读）但不写心跳。
+    # 按 person 计数（heartbeat_log 里存的名字，bot4 → chenlulu）。dry-run 照查（只读）但不写心跳。
     proactive_cap = None
     if not bypass_quota:
         try:
@@ -202,33 +228,6 @@ def main():
                 )
             sys.stderr.write(
                 f"[{bot_id}] 主动上限命中({used}/{cap})：私聊跳过，朋友圈与活动照常\n")
-
-    # ─── 4. 硬规则预筛（省 LLM 配额）────────────────────
-    # 随机闸没到、因想念值满被提前叫起（SELF_INITIATE_EARLY=1）：硬规则照跑，只跳过判官，
-    # 免得"提前"这条路绕开静默期/忙碌/刚说过相同话题这些底线
-    early = os.environ.get("SELF_INITIATE_EARLY") == "1"
-    if proactive_cap:
-        skip_reason = ""  # 上限命中：跳过预筛（心跳已记），朋友圈与活动照常，私聊在 5b 拦
-    elif jiwen_forced and not early:
-        skip_reason = ""  # 强制开口，跳过 prefilter
-        sys.stderr.write(f"[{bot_id}] jiwen forced：bypass prefilter\n")
-    else:
-        skip_reason = prefilter.hard_prefilter(
-            now, situation, world_snap, wildcard_pick, mood_val,
-            since_user_min, recent_msgs, global_cfg, bot_cfg=bot_cfg,
-        )
-    if skip_reason:
-        db.log_heartbeat(
-            person, int(now.timestamp()), mood_val, mood_factors,
-            situation.recurring.name,
-            (situation.sporadic or {}).get("name", ""),
-            (situation.hobby or {}).get("name", ""),
-            (wildcard_pick.card if wildcard_pick else ""),
-            False, "", True, skip_reason, "",
-        )
-        # prefilter SKIP：朋友圈也跟着安静（prefilter 是"是否值得评估"硬闸）
-        emit("SKIP", reason=skip_reason)
-        return
 
     # ─── 4b. find_activity 集成：jiwen 触发时让 bot 自己做事 ───
     # 心情差/嘴硬/焦躁时，挑一个 SFW hobby 注入 situation.hobby

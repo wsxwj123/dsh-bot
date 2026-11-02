@@ -165,7 +165,7 @@ def test_hard_prefilter_bot_silence_override():
 class LifeWorld:
     """把 life-context 依赖的「外部输入」换成固定值；记录预筛、判官、朋友圈各被调了几次。"""
 
-    def __init__(self, tmp_path, monkeypatch, bot_cfg_extra=None, global_cfg=None, jiwen=None):
+    def __init__(self, tmp_path, monkeypatch, bot_cfg_extra=None, global_cfg=None, jiwen=None, since=120):
         import chat_history
         import config_loader
         import formatter
@@ -203,7 +203,7 @@ class LifeWorld:
         m.setattr(config_loader, "load_bot", lambda bot_id: dict(self.bot_cfg))
         m.setattr(config_loader, "in_sleep_hours", lambda cfg, now: False)
         m.setattr(chat_history, "is_dsh_bot", lambda *a, **k: True)    # dsh bot 不查全站 5h 配额
-        m.setattr(chat_history, "mins_since_last_user_msg", lambda *a, **k: 120)
+        m.setattr(chat_history, "mins_since_last_user_msg", lambda *a, **k: since)
         m.setattr(chat_history, "last_user_msg_ts", lambda *a, **k: 0)
         m.setattr(pause, "is_paused", lambda bot_id: None)
         m.setattr(situation, "collect", lambda *a, **k: sit)
@@ -243,7 +243,7 @@ def test_life_context_over_skips_dm_keeps_moments_logs_person(tmp_path, monkeypa
     _speak(tmp_db, PERSON, 1200)
     out, err = w.run(LC, capsys)
     assert out == {"action": "SKIP", "reason": "proactive_cap:2/2"}
-    assert w.calls == {"prefilter": 0, "judge": 0, "moment": 1}, "预筛判官都跳过，朋友圈照走"
+    assert w.calls == {"prefilter": 1, "judge": 0, "moment": 1}, "预筛照常判（放行），判官跳过，朋友圈照走"
     assert "主动上限命中(2/2)" in err
     rows = _rows(tmp_db, PERSON)
     assert rows[-1] == (0, "proactive_cap:2/2", 1, "proactive_cap:2/2", "")   # 记一条 skipped，不计数
@@ -273,6 +273,41 @@ def test_life_context_over_also_binds_jiwen_forced_and_early(tmp_path, monkeypat
     out, _ = w.run(LC, capsys, name="lc_early")
     assert out == {"action": "SKIP", "reason": "proactive_cap:1/1"}
     assert w.calls["judge"] == 0
+
+
+def test_life_context_over_but_prefilter_skips_identical_to_before(tmp_path, monkeypatch, capsys, tmp_db):
+    # 上限到顶 × 预筛 SKIP（刚聊完 5 分钟 < 静默 30）：与改动前逐字一致——回预筛的原因、朋友圈也安静、
+    # 只记预筛那一条心跳，不查上限、不记上限心跳
+    w = LifeWorld(tmp_path, monkeypatch, {"proactive_max_calls_per_5h": 1}, since=5)
+    _speak(tmp_db, PERSON, 60)
+    out, err = w.run(LC, capsys, name="lc_cap_pre_new")
+    assert out == {"action": "SKIP", "reason": "非静默期(距上次5min<30min)"}
+    assert w.calls == {"prefilter": 1, "judge": 0, "moment": 0}
+    assert "主动上限" not in err
+    rows = _rows(tmp_db, PERSON)
+    assert len(rows) == 2 and rows[-1] == (0, "", 1, "非静默期(距上次5min<30min)", "")
+    assert tmp_db.count_self_initiates_since(PERSON, int(time.time()) - 5 * 3600) == 1
+    old = _baseline_copy(tmp_path, "life-context.py")
+    if old is None:
+        pytest.skip("取不到改动前的原文（%s），只做了结构断言" % BASELINE_REV)
+    calls_new = dict(w.calls)
+    w.calls = {"prefilter": 0, "judge": 0, "moment": 0}
+    out_old, err_old = w.run(old, capsys, name="lc_cap_pre_old")
+    assert (out_old, err_old, w.calls) == (out, err, calls_new)
+    assert _rows(tmp_db, PERSON)[-1] == rows[-1]
+
+
+def test_life_context_over_prefilter_passes_moments_and_cap_skip(tmp_path, monkeypatch, capsys, tmp_db):
+    # 上限到顶 × 预筛放行：预筛判过了，私聊按上限跳过，朋友圈照常；上限心跳只记一条、不计数
+    w = LifeWorld(tmp_path, monkeypatch, {"proactive_max_calls_per_5h": 1}, since=120)
+    _speak(tmp_db, PERSON, 60)
+    out, err = w.run(LC, capsys)
+    assert out == {"action": "SKIP", "reason": "proactive_cap:1/1"}
+    assert w.calls == {"prefilter": 1, "judge": 0, "moment": 1}
+    assert "主动上限命中(1/1)" in err
+    rows = _rows(tmp_db, PERSON)
+    assert len(rows) == 2 and rows[-1] == (0, "proactive_cap:1/1", 1, "proactive_cap:1/1", "")
+    assert tmp_db.count_self_initiates_since(PERSON, int(time.time()) - 5 * 3600) == 1
 
 
 def test_life_context_bypass_does_not_check(tmp_path, monkeypatch, capsys, tmp_db):
