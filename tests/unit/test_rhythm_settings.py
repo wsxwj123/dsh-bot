@@ -627,3 +627,35 @@ def test_save_tiny_rate_writes_float_not_string(w, value):
     assert isinstance(got, float) and got == value
     assert w.view()["overrides"][CONN] == value
     assert "invalid_value:" + CONN not in w.view()["warnings"]
+
+
+# ======================================================================== 删除：改动前就空的父节原样保留
+
+
+@pytest.mark.parametrize("original, want", [
+    ("jiwen:\n  rates_override: {}\n  rates:\n    connection_per_min: 0.1\n",
+     "jiwen:\n  rates_override: {}\n"),
+    ("jiwen:\n  rates_override:\n  rates:\n    connection_per_min: 0.1\n",
+     "jiwen:\n  rates_override:\n"),
+    ("jiwen:\n  rates: {}\n  rates_override:\n    connection_per_min: 0.1\nx: 1\n",
+     "jiwen:\n  rates: {}\nx: 1\n"),
+    ("jiwen: {}\nmoments_daily_limit: 3\n", "jiwen: {}\n"),
+], ids=["override_flow_empty", "override_null", "legacy_flow_empty", "jiwen_empty_remove_behavior"])
+def test_remove_keeps_parents_that_were_already_empty(w, original, want):
+    w.write(original)
+    key = DAILY if "moments_daily_limit" in original else CONN
+    out = w.save(remove=[key])
+    assert out["changed"] == [key]
+    assert w.text() == want
+    assert yaml.safe_load(w.text()) == yaml.safe_load(want)
+
+
+def test_expected_del_only_drops_parents_emptied_now():
+    expected = {"jiwen": {"rates_override": {}, "rates": {"connection_per_min": 0.1}}}
+    rs._expected_del(expected, ["jiwen", "rates_override", "connection_per_min"])
+    assert expected == {"jiwen": {"rates_override": {}, "rates": {"connection_per_min": 0.1}}}
+    rs._expected_del(expected, ["jiwen", "rates", "connection_per_min"])
+    assert expected == {"jiwen": {"rates_override": {}}}
+    gone = {"jiwen": {"rates_override": {"connection_per_min": 0.1}}, "x": 1}
+    rs._expected_del(gone, ["jiwen", "rates_override", "connection_per_min"])
+    assert gone == {"x": 1}

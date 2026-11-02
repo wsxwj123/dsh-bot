@@ -496,7 +496,11 @@ def _expected_set(expected, parts, value):
 
 
 def _expected_del(expected, parts):
-    """照 bot_rhythm._expected_del：删叶子，因此变空的父 dict 一并删。"""
+    """照 bot_rhythm._expected_del：删叶子，因此变空的父 dict 一并删。
+
+    只删「这次删除造成」的空父节：叶子本来就不在时什么都不动。改动前就是 ``{}`` 的父节
+    （如 ``rates_override: {}``）文本编辑不会删，预期这边也必须留着，否则写后自检必败（500）。
+    """
     cur, stack = expected, []
     for part in parts[:-1]:
         nxt = cur.get(part)
@@ -504,10 +508,13 @@ def _expected_del(expected, parts):
             return
         stack.append((cur, part))
         cur = nxt
-    cur.pop(parts[-1], None)
+    if parts[-1] not in cur:
+        return
+    del cur[parts[-1]]
     for parent, key in reversed(stack):
-        if isinstance(parent.get(key), dict) and not parent[key]:
-            parent.pop(key)
+        if parent[key]:
+            break
+        parent.pop(key)
 
 
 def _set_path(row, doc):
