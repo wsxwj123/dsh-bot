@@ -76,13 +76,13 @@ def main():
     if sit.recurring is not None and sit.recurring.state in ("sleeping", "busy_class"):
         sit = SitNS(dataclasses.replace(sit.recurring, state="free"), sit.sporadic, sit.hobby)
 
-    # 关掉每日上限（用户主动要求，应优先于自动节流）；静默期由 force=True 跳过
-    cfg_force = {**cfg, "moments_daily_limit": 999}
-
+    # 用户主动要求，应优先于自动节流：每日上限由 ignore_daily_limit=True 跳过（原来是把
+    # moments_daily_limit 临时改成 999，现在 999 超出 bot 层范围会被当没设）；
+    # 静默期、最小间隔、同类型由 force=True 跳过
     why = {}
-    mid = maybe_post_moment(bot_id, cfg_force, now, sit, world, wildcard,
+    mid = maybe_post_moment(bot_id, cfg, now, sit, world, wildcard,
                             mood, factors, FORCE_SINCE_USER_MIN, g,
-                            force=True, out=why)
+                            force=True, out=why, ignore_daily_limit=True)
     if not mid:
         # 2026-10-28：把真因照实写出来。原来笼统一句「LLM 返回空 / 触发独白闸 / 无素材」
         # 会把上游给的具体原因（daily_limit(N) / same_kind(X) within 4h 等）盖掉，排查被误导过。

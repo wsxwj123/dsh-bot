@@ -78,8 +78,7 @@ def main():
             sit = Situation(sit.recurring, sit.sporadic, picked_dict)
             print(f"  [测试] 注入短期痴迷: [{picked.get('theme')}] {picked['name']}")
 
-    # 直接强制发，绕过 limit；静默期由 FORCE_SINCE_USER_MIN 绕过
-    cfg_force = {**cfg, "moments_daily_limit": 999}  # 关上限
+    # 直接强制发：每日上限由 ignore_daily_limit=True 绕过；静默期由 FORCE_SINCE_USER_MIN 绕过
 
     print(f"\n--- {bot_id} 当前情境 ---")
     print(f"活动: {sit.recurring.name} ({sit.recurring.description})")
@@ -91,8 +90,9 @@ def main():
     print(f"新闻命中: {len(world.matched_news) if world else 0}")
 
     from moments.post import maybe_post_moment
-    mid = maybe_post_moment(person, cfg_force, now, sit, world, wildcard,
-                            mood, mood_factors, FORCE_SINCE_USER_MIN, g, force=True)
+    mid = maybe_post_moment(person, cfg, now, sit, world, wildcard,
+                            mood, mood_factors, FORCE_SINCE_USER_MIN, g, force=True,
+                            ignore_daily_limit=True)
 
     if mid:
         m = db.get_moment(mid)

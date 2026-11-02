@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
 import quota
-from prefilter import DEFAULT_SILENCE_THRESHOLD_MIN, positive_int_or_default
+import rhythm_config
 from school_calendar import IN_SESSION, TERM_LABEL_ZH
 from claude_cli import call_aux
 
@@ -81,11 +81,14 @@ def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
 
     决策顺序：
     1. 状态硬闸：sleeping → 否；busy_class → 否；busy_work → 仅强信号
-    2. 静默期：since_user_min < moments.silence_threshold_minutes（缺省/非法 30）
+    2. 静默期：since_user_min < 静默分钟（bot 覆盖 moments_silence_threshold_minutes →
+       全局 moments.silence_threshold_minutes → 30；0 = 不设静默期）
        且无 sporadic/wildcard → 否；force=True 时跳过本条
     3. 触发素材命中（按优先级取首个）→ kind
     4. 概率门：弱信号按概率发；强信号必发
-    5. 同 kind 4h 不重发（防过密）
+    5. 最小间隔（moments_min_interval_minutes / moments.min_interval_minutes，缺省 60 分钟）
+    6. 同 kind N 小时不重发（moments_same_kind_hours / moments.same_kind_hours，缺省 4）
+    5、6 写 0 = 跳过这道闸；force=True 时都跳过。取值口径见 rhythm_config.py。
     """
     state = situation.recurring.state if situation.recurring else "free"
 
@@ -99,9 +102,7 @@ def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
     # ─── 2. 静默期（避免在用户聊天时刷屏）────────────
     has_strong_signal = bool(situation.sporadic or wildcard
                               or (world and world.is_special_date))
-    moments_cfg = (global_cfg or {}).get("moments")
-    threshold = positive_int_or_default(
-        moments_cfg.get("silence_threshold_minutes") if isinstance(moments_cfg, dict) else None)
+    threshold = rhythm_config.resolve("moments.silence_threshold_minutes", bot_cfg, global_cfg)
     if (not force and since_user_min is not None and since_user_min < threshold
             and not has_strong_signal):
         return (False, "skip", f"silence({since_user_min}min<{threshold})")
@@ -158,28 +159,31 @@ def should_post_moment(situation, world, wildcard, mood, jiwen_info, bot_cfg,
         return (False, "skip", f"busy_work blocks {kind}")
 
     # ─── 5. 发不发由 bot 自己(文案 LLM)决定，不用程序随机骰子 ──────────
-    # 只保留"自然间隔"硬门：上条圈发出后 60min 内不再发（真人不会几分钟连发），
+    # 只保留"自然间隔"硬门：上条圈发出后 N 分钟内不再发（真人不会几分钟连发，缺省 60），
     # 强信号(event/special_date)例外可插队。是否真发最终由文案 LLM 判断——
-    # 没到想发的程度就输出空串放弃。
+    # 没到想发的程度就输出空串放弃。N=0 跳过这道闸。
     # ponytail: 被 LLM 拒发(空串)时下一 tick 仍会再问一次；配额吃紧再加"询问节流"。
-    if kind not in ("event", "special_date") and db_module is not None and not force:
+    min_interval = rhythm_config.resolve("moments.min_interval_minutes", bot_cfg, global_cfg)
+    if (min_interval > 0 and kind not in ("event", "special_date")
+            and db_module is not None and not force):
         try:
             recent_any = db_module.list_moments(bot_id=bot_cfg.get("id", ""), limit=1,
-                                                since_ts=int(now.timestamp()) - 60*60)
+                                                since_ts=int(now.timestamp()) - min_interval*60)
             if recent_any:
-                return (False, "skip", "min_interval(60min since last moment)")
+                return (False, "skip", f"min_interval({min_interval}min since last moment)")
         except Exception:
             pass
 
-    # ─── 6. 同 kind 4h 不重发（防过密）；force=True 时跳过（用户明确要求）───
-    if db_module is not None and not force:
+    # ─── 6. 同 kind N 小时不重发（防过密，缺省 4）；N=0 或 force=True 时跳过（用户明确要求）───
+    same_kind_hours = rhythm_config.resolve("moments.same_kind_hours", bot_cfg, global_cfg)
+    if same_kind_hours > 0 and db_module is not None and not force:
         try:
             recent = db_module.list_moments(bot_id=bot_cfg.get("id", ""),
                                             limit=10,
-                                            since_ts=int(now.timestamp()) - 4*3600)
+                                            since_ts=int(now.timestamp()) - same_kind_hours*3600)
             same_kind = sum(1 for m in recent if (m.get("moment_kind") or "") == kind)
             if same_kind >= 1:
-                return (False, "skip", f"same_kind({kind}) within 4h")
+                return (False, "skip", f"same_kind({kind}) within {same_kind_hours}h")
         except Exception:
             pass
 
@@ -195,7 +199,7 @@ def _skip(bot_id, out, reason):
 
     原因取值与 claude 侧对齐：moments_disabled / feature_off / daily_limit(N) /
     llm_empty / too_long(N) / monologue / exception(...)；should_post_moment 的原值
-    （no material / same_kind(X) within 4h / min_interval(...)）**原样透传不改写**——
+    （no material / same_kind(X) within Nh / min_interval(...)）**原样透传不改写**——
     改写一次信息就断了。
     """
     sys.stderr.write(f"[{bot_id}] moment skip: {reason}\n")
@@ -206,7 +210,8 @@ def _skip(bot_id, out, reason):
 
 def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard,
                       mood, mood_factors, since_user_min, global_cfg,
-                      jiwen_info=None, force=False, out=None) -> int | None:
+                      jiwen_info=None, force=False, out=None,
+                      ignore_daily_limit=False) -> int | None:
     """决定是否发朋友圈，返回 moment_id 或 None。
 
     新加 jiwen_info 入参（life-context.py 传 jiwen reader.read 的返回 dict）。
@@ -215,18 +220,25 @@ def maybe_post_moment(bot_id, bot_cfg, now: datetime, situation, world, wildcard
       2. 拼 MOMENT_PROMPT 时注入 style_guidance 调圈文风格
 
     ``force=True``（用户明确要求发朋友圈时由 ``scripts/bot_post_moment.py`` 传）跳过
-    「静默期」和「同 kind 4 小时不重发」两条闸；契机判定（no material）、每日上限都不受影响。
-    别把它当总开关用。
+    「静默期」「最小间隔」「同 kind N 小时不重发」三道闸；契机判定（no material）、
+    每日上限都不受影响。别把它当总开关用。
+
+    ``ignore_daily_limit=True`` 只跳过每日上限，只由 ``scripts/bot_post_moment.py``
+    （用户在聊天里要求发圈）与 ``scripts/force_moment.py``（手动测试）传——替代原来把
+    ``moments_daily_limit`` 临时改成 999 的做法（999 超出 bot 层范围 [0, 50]，现在会被当没设）。
+    每日上限取值：bot 覆盖 ``moments_daily_limit`` → 全局 ``moments.daily_post_limit_per_bot``
+    → 3；写 0 = 当天一条都不发（``force=True`` 也是）。
     """
     moments_cfg = (global_cfg or {}).get("moments", {})
     if not moments_cfg.get("enabled", True):
         return _skip(bot_id, out, "moments_disabled")
 
     # 1. 当日上限（先查，能省一次 should_post_moment 计算）
-    daily_limit = bot_cfg.get("moments_daily_limit") or moments_cfg.get("daily_post_limit_per_bot", 3)
-    today = now.strftime("%Y-%m-%d")
-    if db.count_moments_today(bot_id, today) >= daily_limit:
-        return _skip(bot_id, out, f"daily_limit({daily_limit})")
+    if not ignore_daily_limit:
+        daily_limit = rhythm_config.resolve("moments.daily_post_limit_per_bot", bot_cfg, global_cfg)
+        today = now.strftime("%Y-%m-%d")
+        if db.count_moments_today(bot_id, today) >= daily_limit:
+            return _skip(bot_id, out, f"daily_limit({daily_limit})")
 
     # 2. 情境驱动闸（独立于 judge）—— 决定是否发 + kind
     bot_cfg_with_id = dict(bot_cfg)
