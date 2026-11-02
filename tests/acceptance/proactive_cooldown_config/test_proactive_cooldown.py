@@ -16,7 +16,7 @@
 如果 self_initiate 尚未暴露该函数，测试会在 import 阶段 skip，
 实现后移除 skip 即可全部变绿。
 
-运行：cd /Users/wsxwj/dsh-bot-dev && python3 -m pytest tests/acceptance/proactive_cooldown_config -q
+运行：在仓库根目录  python3 -m pytest tests/acceptance/proactive_cooldown_config -q
 """
 import sys
 from pathlib import Path

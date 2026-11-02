@@ -3,7 +3,7 @@ import { expect, test } from 'bun:test'
 import { dedupTranscriptLines } from '../../src/group/transcript'
 
 const line = (o: Partial<Record<string, unknown>>) => ({
-  ts: '2026-10-27T10:00:00.000Z', chat_id: '-5316971372', message_id: 1, from_id: '42',
+  ts: '2026-10-27T10:00:00.000Z', chat_id: '-1001234567890', message_id: 1, from_id: '42',
   from_username: 'someone', from_name: '某人', is_bot: false, text: '你好', observed_by: 'bot_a',
   ...o,
 } as never)
@@ -83,12 +83,12 @@ import { Logger } from '../../src/log'
 function makeTranscript() {
   const dir = mkdtempSync(join(tmpdir(), 'gt-'))
   const t = new GroupTranscript(dir, () => ({ id: 1, username: 'bot_a', name: 'A' }), new Logger({}))
-  const read = (chat = '-5316971372') => readFileSync(join(dir, `${chat}.jsonl`), 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
+  const read = (chat = '-1001234567890') => readFileSync(join(dir, `${chat}.jsonl`), 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
   return { t, read, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
 const tgMsg = (o: Record<string, unknown> = {}) => ({
-  message_id: 100, date: 1793115717, chat: { id: -5316971372, type: 'supergroup' },
+  message_id: 100, date: 1793115717, chat: { id: -1001234567890, type: 'supergroup' },
   from: { id: 42, username: 'someone', first_name: '某人', is_bot: false }, text: '你好', ...o,
 } as never)
 
@@ -118,7 +118,7 @@ test('不再有 .seen 目录：每只 bot 都写自己的一行', () => {
   const { t, read, cleanup } = makeTranscript()
   try {
     t.observe(tgMsg())   // 同一网关写两次模拟「不同 bot」
-    t.observe(tgMsg({ chat: { id: -5316971372, type: 'supergroup' } }))
+    t.observe(tgMsg({ chat: { id: -1001234567890, type: 'supergroup' } }))
     expect(read()).toHaveLength(2)   // 旧的抢锁会挡掉第二次
   } finally { cleanup() }
 })

@@ -38,8 +38,10 @@ KEY_LEAK = "fk_UniqueMark_a1b2c3d4e5"  # 安全用例专用：带唯一标记，
 
 ENV_EMPTY = "TELEGRAM_BOT_TOKEN=%s\n" % u.FAKE_TOKEN
 ENV_FISH = ENV_EMPTY + "FISH_AUDIO_API_KEY=%s\n" % KEY
-ACCESS_EMPTY = '{"allowFrom": [123456789]}\n'
-ACCESS_VOICE = '{"allowFrom": [123456789], "voiceId": "%s"}\n' % VOICE
+# 新建默认带按空行分段的两个值（a3665e6，2026-10-27），voiceId 排在最后
+ACCESS_EMPTY = '{"allowFrom": [123456789], "splitOnParagraph": true, "paragraphDelay": 1200}\n'
+ACCESS_VOICE = ('{"allowFrom": [123456789], "splitOnParagraph": true, "paragraphDelay": 1200, '
+                '"voiceId": "%s"}\n' % VOICE)
 
 VOICE_BAD_CHARS_DETAIL = "音色 id 只能是字母、数字、下划线或连字符"
 
@@ -296,7 +298,8 @@ def test_新建_音色合法边界_201且原样落盘(
     _arm_ok(bun, telegram, launchctl, heartbeat)
     r = _post(client, u.free_port(), fish_voice_id=voice)
     assert r.status_code == 201, (voice, r.get_json())
-    assert _access_text(sandbox) == '{"allowFrom": [123456789], "voiceId": "%s"}\n' % voice
+    assert _access_text(sandbox) == ('{"allowFrom": [123456789], "splitOnParagraph": true, '
+                                     '"paragraphDelay": 1200, "voiceId": "%s"}\n' % voice)
 
 
 @pytest.mark.parametrize("key", ["abcdefgh", "k" * 256])
