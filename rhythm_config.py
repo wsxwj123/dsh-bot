@@ -14,7 +14,7 @@ bot 真正回退到的值（PLAN dsh-rhythm ① 1.2、③ 3.5）。
   行为逐字不变：
   - `non_negative`：非布尔的 Python int 且 >= 0（发圈每天上限，原 `post.py`）
   - `positive`：非布尔的 Python int 且 > 0（两个静默阈值，原
-    `prefilter.positive_int_or_default`；冷却两键，原 `self_initiate._valid_positive_int`）
+    `prefilter` 原来的正整数判法；冷却两键，原 `self_initiate._valid_positive_int`）
   - `in_range`：非布尔的 Python int 且在可写范围内（改动前不读全局的三个键）
   不合规一律回默认。全局层不认数字串：锁定用例 `silence_threshold_config` 要求
   全局 `"10"` 按 30。

@@ -4,17 +4,13 @@
 返回 None 才进入 judge。
 
 核心原则：用户和 bot 在聊天时（静默期内），框架完全静默。
+
+静默期分钟数的取值口径在 ``rhythm_config``（bot 覆盖 ``proactive_silence_threshold_minutes`` →
+全局顶层 ``silence_threshold_minutes`` 只认正整数 → ``DEFAULT_SILENCE_THRESHOLD_MIN``），这里不另判。
 """
 import rhythm_config
 
-DEFAULT_SILENCE_THRESHOLD_MIN = 30
-
-
-def positive_int_or_default(value, default=DEFAULT_SILENCE_THRESHOLD_MIN) -> int:
-    """配置里的分钟数：只认正整数，0/负数/非数字一律回退默认，绝不抛错阻断启动。"""
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    return default
+DEFAULT_SILENCE_THRESHOLD_MIN = 30     # 与 rhythm_config 两个静默键的默认一致（单测钉住）；hub_config 也在用
 
 
 def hard_prefilter(now, situation, world, wildcard, mood, since_user_min,

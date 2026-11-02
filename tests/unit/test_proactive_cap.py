@@ -159,6 +159,14 @@ def test_hard_prefilter_bot_silence_override():
                                     {"silence_threshold_minutes": 10}) is None
 
 
+def test_prefilter_has_no_dead_positive_int_helper():
+    # 静默期口径统一在 rhythm_config（全局层正整数、bot 层可写 0）；旧的 positive_int_or_default 已无人调用
+    import prefilter
+    assert not hasattr(prefilter, "positive_int_or_default")
+    assert prefilter.DEFAULT_SILENCE_THRESHOLD_MIN == 30          # hub_config 与测试仍在用
+    assert "rhythm_config" in (prefilter.__doc__ or "")
+
+
 # ======================================================================== life-context.py main()
 
 
