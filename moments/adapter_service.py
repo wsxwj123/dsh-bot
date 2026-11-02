@@ -93,6 +93,7 @@ CAPABILITIES = {
     "bot.token_handoff": True,
     "bot.groups_discovered": True,
     "bot.features": True,
+    "bot.rhythm": True,          # 情绪与节奏（约定 5.24）：消费方已按覆盖生效后才打开（PLAN R15）
 }
 DEFAULT_LABEL = "各 bot 配置文件里写的那一组"
 
