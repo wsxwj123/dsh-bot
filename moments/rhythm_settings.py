@@ -528,6 +528,28 @@ def _remove_paths(row):
             ["jiwen", row["_section"], row["_field"]]]
 
 
+def _float_literal(value):
+    """小数写回 YAML 的字面量：``yaml.safe_load`` 读回必须是同值 float。
+
+    PyYAML 按 YAML 1.1 认浮点：科学计数法必须带小数点、指数必须带正负号。``repr`` 给的 ``5e-05``、
+    ``1e+16`` 会被读成字符串，写后自检必败（500）。这里补成 ``5.0e-05``、``1.0e+16``；其余（``0.1``、
+    ``1.0``）照 ``repr``。不改 ``hub_config._literal``：参数页也在用它。
+    """
+    text = repr(float(value))
+    if "e" in text:
+        mantissa, exponent = text.split("e")
+        if "." not in mantissa:
+            mantissa += ".0"
+        if exponent[:1] not in ("+", "-"):
+            exponent = "+" + exponent
+        text = mantissa + "e" + exponent
+    return text
+
+
+def _literal(typed, typ):
+    return _float_literal(typed) if typ == "float" else hub_config._literal(typed, typ)
+
+
 def _edit(text, doc, set_values, remove):
     """在内存里改好新文与预期 dict。写法认不出的键收齐了一起报 422（第 13 步）。"""
     bom = "\ufeff" if text.startswith("\ufeff") else ""
@@ -541,7 +563,7 @@ def _edit(text, doc, set_values, remove):
         try:
             if any(ch in body for ch in _ODD_BREAKS):
                 raise _Unrecognized()
-            body = _set_leaf(body, parts, hub_config._literal(typed, row["type"]))
+            body = _set_leaf(body, parts, _literal(typed, row["type"]))
         except _Unrecognized:
             odd[key] = UNRECOGNIZED
             continue

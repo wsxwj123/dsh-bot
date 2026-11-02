@@ -606,3 +606,24 @@ def test_locate_errors_propagate(w):
     with pytest.raises(ls.LifeError) as e:
         w.save({DAILY: 1}, version="x")
     assert _err(e)[:3] == (500, "internal", ls.BAD_YAML)
+
+
+# ======================================================================== 小数写法：读回必须是同值 float
+
+
+@pytest.mark.parametrize("value", [1e-5, 5e-05, 1e-10, 0.0, 1.0, 0.1, 0.00005, 1e16, 1.5e300, 123456789.25])
+def test_float_literal_round_trips_through_yaml(value):
+    lit = rs._float_literal(value)
+    got = yaml.safe_load("x: %s\n" % lit)["x"]
+    assert isinstance(got, float) and got == value, (lit, got)
+
+
+@pytest.mark.parametrize("value", [0.00005, 1e-5, 1e-10, 0.0])
+def test_save_tiny_rate_writes_float_not_string(w, value):
+    w.write("events: []\n")
+    w.save({CONN: value})
+    doc = yaml.safe_load(w.text())
+    got = doc["jiwen"]["rates_override"]["connection_per_min"]
+    assert isinstance(got, float) and got == value
+    assert w.view()["overrides"][CONN] == value
+    assert "invalid_value:" + CONN not in w.view()["warnings"]
