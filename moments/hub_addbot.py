@@ -1002,7 +1002,8 @@ def _render_yml(fields, target, namespace=None, life_config=None, features=None)
     拼这块，不传这个参数。
 
     ``gateway.botlife_db`` 总是写：网关读不到这个键就退回仓库根的空库，新建的 bot 会看不到任何人的
-    朋友圈。路径与 claude 侧共用一份，``~`` 由网关侧 expandHome 展开。
+    朋友圈。路径与 claude 侧共用一份，``~`` 由网关侧 expandHome 展开。``gateway.global_cfg`` 同样总是
+    写，指向管理台生图引擎开关所在的 ``_global.yml``，新 bot 才会跟着开关切 novelai / comfyui。
     """
     text = ("id: %s\n"
             "display_name: %s\n"
@@ -1018,8 +1019,10 @@ def _render_yml(fields, target, namespace=None, life_config=None, features=None)
     if features is not None:
         # json.dumps 出来的 ``{"voice": false, …}`` 是合法 YAML，键序就是九个键的固定顺序
         text += "features: %s\n" % json.dumps(features, ensure_ascii=False)
-    # 无条件写：缺这个键时网关读默认值（仓库根的空 state.db），新 bot 查不到朋友圈
-    text += "gateway:\n  botlife_db: ~/claudebotlife/state.db\n"
+    # 无条件写：缺 botlife_db 时网关读默认值（仓库根的空 state.db），新 bot 查不到朋友圈；
+    # 缺 global_cfg 时管理台的生图引擎开关（约定 5.21）对新 bot 不起作用，聊天发图固定用 novelai
+    text += ("gateway:\n  botlife_db: ~/claudebotlife/state.db\n"
+             "  global_cfg: ~/claudebotlife/configs/_global.yml\n")
     return text
 
 

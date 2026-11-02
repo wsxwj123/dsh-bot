@@ -48,6 +48,14 @@ def test_渲染_默认参数_写出gateway_botlife_db共享库路径(tmp_path):
     assert gateway["botlife_db"] == EXPECTED_BOTLIFE_DB
 
 
+def test_渲染_默认参数_写出gateway_global_cfg共用生图开关路径(tmp_path):
+    """新建 bot 跟管理台生图引擎开关走（约定 5.21）：gateway.global_cfg 指向 claude 侧的 _global.yml。"""
+    parsed = parsed_of(make_fields(), str(tmp_path / "channel"))
+
+    assert parsed["gateway"]["global_cfg"] == "~/claudebotlife/configs/_global.yml"
+    assert parsed["gateway"]["botlife_db"] == EXPECTED_BOTLIFE_DB
+
+
 def test_渲染_默认参数_原有六个字段一个不少且值不变(tmp_path):
     """行为 2：原有字段 id/display_name/bot_channel_path/chat_id/dispatcher_port/namespace_uuid 全保留。"""
     target = str(tmp_path / "channel")
