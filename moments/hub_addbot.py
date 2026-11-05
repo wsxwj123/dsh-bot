@@ -96,7 +96,8 @@ RESTART_FLAGS = {"bot": True, "moments_web": False}
 RESTART_FLAGS_DONE = {"bot": False, "moments_web": False}
 #: B 段产物清单 = 回滚的精确 unlink 清单（R8-3），两处共用这一份，不许各写各的。
 #: 树根 = `<bot 家>/channel`（§7），文件的相对路径以它为准。
-TREE_FILES = (".env", "access.json", "CLAUDE.md", os.path.join("memory", "MEMORY.md"))
+TREE_FILES = (".env", "access.json", "CLAUDE.md", os.path.join("memory", "MEMORY.md"),
+              "relationship.json")
 TREE_DIRS = ("memory",)
 #: I5：`com.dsh-bot.` 前缀下形状可达的非 bot 单元名。建一只叫这些名字的 bot 会在
 #: register 时 bootout 掉真单元并覆盖其 plist —— 直接拒绝（依据见 PLAN §2.3）。
@@ -378,6 +379,36 @@ def _requested_features(body):
                        "features 要是功能键的数组，不重复，只能用 voice、image、stickers、moments、"
                        "proactive、life、relationship、groups、nsfw")
     return tuple(k for k, _label in feature_switch.KEYS if k in raw)
+
+
+# 关系初始值能填的三个键（按这个顺序校验、报第一个不合格的）；精力不让填，固定取默认 85
+RELATIONSHIP_KEYS = ("affection", "trust", "desire")
+
+
+def _relationship_initial(body):
+    """可选 ``relationship`` 对象 → 只含用户给出的键的 dict（例 ``{"trust": 40}``）。
+
+    页面接口与适配接口共用这一份规则（rel-init 错误契约）：不给或 ``null`` 回 ``{}``；
+    不是对象 → 400 ``bad_body``；有三个键以外的键 → 400 ``bad_field``（不回显陌生键名）；
+    值走 `_int_like`（int 但不含 bool，或 ≤20 位的纯数字串），不在 0-100 → 400 ``bad_field``。
+    默认值 5/5/0/85 不在这里补，统一在 `lay_down` 合并一次。
+    """
+    raw = body.get("relationship")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HubError(400, "bad_body", "relationship 要是对象，只能有 affection、trust、desire 三个键")
+    if any(k not in RELATIONSHIP_KEYS for k in raw):
+        _bad("relationship 只能有 affection、trust、desire 三个键（精力不能填，固定 85）")
+    picked = {}
+    for key in RELATIONSHIP_KEYS:
+        if raw.get(key) is None:
+            continue
+        num = _int_like(raw[key])
+        if num is None or not 0 <= num <= 100:
+            _bad("relationship.%s 必须是 0-100 的整数" % key)
+        picked[key] = num
+    return picked
 
 
 def _feature_ready(fields):
@@ -831,10 +862,12 @@ def _validate(body):
     fish_voice_id = _fish_voice(_optional(body, "fish_voice_id"))
     fish_api_key = _fish_key(_optional(body, "fish_api_key"))
     requested = _requested_features(body)
+    # 关系初始值（rel-init）：排在 features 之后、_plan_features/_checked_yml 与 409 之前
+    relationship_initial = _relationship_initial(body)
     out = {"bot_id": bot_id, "token": fields["telegram_token"], "port": port,
            "chat_id": chat_id, "display_name": name, "persona": persona,
            "fish_voice_id": fish_voice_id, "fish_api_key": fish_api_key,
-           "features": requested}
+           "features": requested, "relationship": relationship_initial}
     # 九个开关的最终值与跳过项（§5.18.1）：就绪判定在写盘之前，末尾落盘的 yml 用的是这一份
     out["features_final"], out["features_skipped"] = _plan_features(out)
     # 写配置之前先读回来核对（§0 第 9 条）：排在 fish_* 之后、环境与冲突错（409）之前，
@@ -1111,6 +1144,12 @@ def lay_down(fields, port_check=None, place_skills=False):
                      json.dumps(access, ensure_ascii=False) + "\n")
         _create_file(os.path.join(chan, "CLAUDE.md"), fields["persona"])
         _create_file(os.path.join(chan, "memory", "MEMORY.md"), MEMORY_SEED)
+        # 关系初始值（rel-init）：不管 features 勾没勾 relationship 都写；用户没给的键取
+        # 陌生人默认（5/5/0/85，只此一处来源）。格式与 tick 的 relationship.save 一致。
+        import relationship                     # 延迟 import：与 config_loader / db 同一写法
+        rel_stats = {**relationship.default_stats("stranger"), **fields.get("relationship", {})}
+        _create_file(os.path.join(chan, "relationship.json"),
+                     json.dumps(relationship.render(rel_stats), ensure_ascii=False, indent=2))
         # 技能也先在 tmp 树里放好（管理台新建页）：随下面那一次 move 一起就位，
         # move 失败时目标位置一个字节都没写过，tmp 整个删掉即可。
         skill_rels = _place_skills(chan, fields) if place_skills else []
