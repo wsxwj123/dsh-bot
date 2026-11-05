@@ -358,11 +358,12 @@ def tick_one_bot(bot_id: str, jiwen_cfg: dict, state_dir: str, dry_run: bool = F
         # 新系统的 bot：关系数值就在它自己的频道目录里（网关从那里读），不碰旧系统目录
         from jiwen import reader as _reader
         _rel_dir = os.path.abspath(os.path.expanduser(channel_dir)) if _reader.dsh_state_dir(bot_cfg) else _bot_dir
-        # profile 只在 relationship.json 还不存在时决定初始值(陌生 or 已确立)；
-        # 示例 bot 出厂已带 relationship.json，所以这里默认 established 即可。
-        # ponytail: 想让某 bot 从陌生起步，出厂 relationship.json 用 stranger 默认值即可
+        # 无文件时按陌生人起步(5/5/0/85)；新建页已经会写 relationship.json，这里只兜底。
+        # 注意：load 的 profile 只决定"无文件/缺键"时的初始值；传给 drift_desire 的
+        # profile 仍是 established(尖峰系数 1.2)，两者拆开，别让所有 bot 的尖峰掉到 0.25。
+        _load_prof = "stranger"
         _prof = "established"
-        _rstats = _rel.load(_rel_dir, _prof)
+        _rstats = _rel.load(_rel_dir, _load_prof)
         # 当前活动/事件(上面 M1/M2 已取，取不到则 None)——喂给 energy/desire 让"当日行为"驱动
         _astate = getattr(_act, "state", None) if "_act" in dir() and _act else None
         _event = _ev if "_ev" in dir() else None
