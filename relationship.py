@@ -58,11 +58,18 @@ def load(bot_dir: str, profile: str = "established") -> dict:
         return default_stats(profile)
 
 
-def save(bot_dir: str, stats: dict) -> None:
-    """写回数值 + 派生的 stage/prompt_snippet(供 worker 读)。原子落地。"""
+def render(stats: dict, now_ts: int | None = None) -> dict:
+    """数值 → 落盘内容：四个数夹到 0-100(浮点) + 派生的 stage/prompt_snippet/updated_ts。
+    纯函数；save() 与新建 bot(hub_addbot.lay_down) 共用，保证两处写出的格式一致。"""
     s = {k: _clamp(stats.get(k, 0)) for k in STATS}
     stage, snippet = describe(s)
-    out = {**s, "stage": stage, "prompt_snippet": snippet, "updated_ts": int(time.time())}
+    ts = int(time.time()) if now_ts is None else int(now_ts)
+    return {**s, "stage": stage, "prompt_snippet": snippet, "updated_ts": ts}
+
+
+def save(bot_dir: str, stats: dict) -> None:
+    """写回数值 + 派生的 stage/prompt_snippet(供 worker 读)。原子落地。"""
+    out = render(stats)
     p = _path(bot_dir)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + ".tmp"
