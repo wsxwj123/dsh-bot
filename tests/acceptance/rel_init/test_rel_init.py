@@ -19,6 +19,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -498,15 +499,34 @@ def test_21_tick_没有关系文件也没有积温状态_写出5_5_0_85_陌生�
     assert rel.get("stage") == "陌生防备", rel.get("stage")
 
 
-def test_22_tick_已有50_50_0_80_跑一次好感信任仍是50(tmp_path, monkeypatch):
+def _spike_p(mins, night, rel_factor, affection):
+    """接口 §6：p = min(0.30, 0.0015 * mins * 夜间系数 * rel * (0.6 + affection/100))。"""
+    return min(0.30, 0.0015 * mins * night * rel_factor * (0.6 + affection / 100.0))
+
+
+def test_22_tick_已有50_50_0_80_好感信任仍是50_尖峰概率用established系数(tmp_path, monkeypatch):
+    """积温状态里的「上次 tick 是 5 分钟前」不手写文件（格式接口没给），而是先跑一次 tick 让它自己写，
+    再把时钟（time.time）拨后 5 分钟跑第二次；"现在"固定在本地时间 21:00。"""
+    import relationship
     root = _tick_bot(tmp_path, monkeypatch, rel={"affection": 50, "trust": 50, "desire": 0, "energy": 80})
-    _run_tick(monkeypatch, "rel_init_tick_kept")
+    probs = []
+    monkeypatch.setattr(relationship.rng, "chance", lambda p: probs.append(p) or False)
+    t21 = datetime.datetime(2026, 11, 5, 21, 0).timestamp()
+    clock = {"t": t21 - 300}
+    monkeypatch.setattr(time, "time", lambda: clock["t"])
+    _run_tick(monkeypatch, "rel_init_tick_kept_1")
+    probs.clear()
+    clock["t"] = t21
+    _run_tick(monkeypatch, "rel_init_tick_kept_2")
     rel = _read_rel(root / "channel" / "relationship.json")
     assert (rel.get("affection"), rel.get("trust")) == (50, 50), rel
     assert "updated_ts" in rel, "tick 没真跑到这只 bot（文件没被重写）"
+    want = _spike_p(5, 1.6, 1.2, 50)
+    assert probs, "第二次 tick 没有调用尖峰判定"
+    assert all(p == pytest.approx(want) for p in probs), (probs, want, "stranger 应为 %r" % _spike_p(5, 1.6, 0.25, 50))
 
 
-# ============================================================ nsfw 脱钩（23-25）
+# ============================================================ nsfw 尖峰回归（23-25，本次不改）
 
 def _rel_mod():
     import relationship
@@ -536,31 +556,33 @@ def _never(monkeypatch, rel):
 AT21 = datetime.datetime(2026, 11, 5, 21, 0)
 
 
-def test_23_好感0与100同一随机序列5000次_desire与概率序列逐项相等_profile无关(monkeypatch):
+def test_23_好感度仍影响尖峰概率_比值1点6比0点6_stranger是established的0点25比1点2(monkeypatch):
     rel = _rel_mod()
 
-    def run(**kw):
+    def run(n=2000, **kw):
         with monkeypatch.context() as mp:
             probs = _seeded(mp, rel)
-            d, seq = 0.0, []
-            for _ in range(5000):
+            d = 0.0
+            for _ in range(n):
                 d = rel.drift_desire({"desire": d}, AT21, 5, **kw)["desire"]
-                seq.append(d)
-            return seq, list(probs)
+            return list(probs)
 
-    base = run(affection=0)
-    assert len(base[1]) > 0, "chance 一次都没被调用"
-    assert run(affection=100) == base, "affection 0 与 100 的序列不一致"
-    assert run(affection=0, profile="stranger") == base, "profile=stranger 改变了结果"
-    assert run(affection=0, profile="established") == base, "profile=established 改变了结果"
+    p100, p0 = run(affection=100), run(affection=0)
+    assert p100 and p0, "chance 一次都没被调用"
+    assert p100[0] / p0[0] == pytest.approx(1.6 / 0.6), (p100[0], p0[0])
+    assert all(p == pytest.approx(p100[0]) for p in p100) and all(p == pytest.approx(p0[0]) for p in p0)
+    stranger, established = run(n=1, profile="stranger"), run(n=1, profile="established")
+    assert stranger and established
+    assert stranger[0] / established[0] == pytest.approx(0.25 / 1.2), (stranger, established)
 
 
 def test_24_夜间系数_21点_4点_10点传入的概率(monkeypatch):
     rel = _rel_mod()
-    for hour, factor in ((21, 1.6), (4, 0.4), (10, 1.0)):
+    for hour, night in ((21, 1.6), (4, 0.4), (10, 1.0)):
         probs = _never(monkeypatch, rel)
-        rel.drift_desire({"desire": 0.0}, datetime.datetime(2026, 11, 5, hour, 0), 5)
-        want = min(0.30, 0.00288 * 5 * factor)
+        rel.drift_desire({"desire": 0.0}, datetime.datetime(2026, 11, 5, hour, 0), 5,
+                         affection=50, profile="established")
+        want = _spike_p(5, night, 1.2, 50)
         assert probs and all(p == pytest.approx(want) for p in probs), (hour, probs, want)
 
 
