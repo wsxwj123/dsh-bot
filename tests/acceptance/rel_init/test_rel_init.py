@@ -7,10 +7,8 @@ GET /adapter/v1/meta 与 POST /adapter/v1/bots、jiwen/tick.py 的 main()、rela
 夹具写法照 bot_ops（getMe 桩、假 bun/launchctl、心跳）、tests/unit/test_hub_pages_dom.py（node 假 DOM）、
 tests/unit/test_m3_life.py（tick 假环境）。
 """
-import builtins
 import datetime
 import importlib.util
-import io
 import json
 import os
 import random
@@ -324,72 +322,77 @@ def test_13_relationship不合规同时端口被占_回400不是409(client, sand
         s.close()
 
 
-class _PortGrabber:
-    """relationship.json 一被写（打开、改名、搬移任一原语碰到这个文件名）之后，立刻在端口上起监听。
-
-    只包标准库的文件原语（同 test_create_bot._boom_moves 的接缝），不碰被测实现。
+class _BoomAfterRel:
+    """搬移/改名（shutil.move、os.replace、os.rename，同 test_create_bot._boom_moves 的接缝）的源里
+    已经有 relationship.json（源就是这个文件，或源目录树里有它）时抛 OSError——保证抛错时文件确实已经写出过。
+    只抛一次，回滚时的搬移照常放行。只包标准库的文件原语，不碰被测实现。
     """
 
-    def __init__(self, monkeypatch, port):
-        self.port = port
-        self.sock = None
-        names = [(builtins, "open"), (io, "open"), (os, "open"), (os, "replace"),
-                 (os, "rename"), (shutil, "move")]
-        for mod, attr in names:
+    def __init__(self, monkeypatch):
+        self.seen = None  # 抛错那一刻源里已有的 relationship.json
+        for mod, attr in ((os, "replace"), (os, "rename"), (shutil, "move")):
             monkeypatch.setattr(mod, attr, self._wrap(getattr(mod, attr)))
 
     def _wrap(self, real):
-        grab = self
+        boom = self
 
         def wrapper(*a, **kw):
-            out = real(*a, **kw)
-            if grab.sock is None and any("relationship.json" in str(x) for x in a[:2]):
-                s = socket.socket()
-                s.bind(("127.0.0.1", grab.port))
-                s.listen(5)
-                grab.sock = s
-            return out
+            src = kw.get("src", a[0] if a else None)
+            if boom.seen is None and src is not None:
+                src = Path(os.fsdecode(src))
+                if src.name == "relationship.json" and src.is_file():
+                    found = [str(src)]
+                elif src.is_dir():
+                    found = _rel_files(src)
+                else:
+                    found = []
+                if found:
+                    boom.seen = found
+                    raise OSError("mocked move failure")
+            return real(*a, **kw)
         return wrapper
-
-    def close(self):
-        if self.sock is not None:
-            self.sock.close()
 
 
 def _rel_files(root):
     return [str(p) for p in Path(root).rglob("relationship.json")]
 
 
-def test_14_文件写完后端口被抢_409_没有bot家也没有relationship_json(hub, sandbox, monkeypatch):
-    port = u.free_port()
+def _post_rel_boom(client, telegram, monkeypatch):
+    """不走 hub.create：它会先替假 bot 写 state/heartbeat，那样 bot 家在请求前就已存在。
+    这里在落盘那步就失败，到不了 register/restart，用不着 bun 和心跳。"""
+    telegram.bot_id = 123456789
     with monkeypatch.context() as mp:
-        grab = _PortGrabber(mp, port)
-        try:
-            r = hub.create(port=port, relationship={"affection": 20, "trust": 30, "desire": 50})
-        finally:
-            grab.close()
-    assert grab.sock is not None, "relationship.json 根本没被写过，端口没机会被抢"
-    assert r.status_code == 409, (r.status_code, r.get_json())
+        boom = _BoomAfterRel(mp)
+        r = client.post("/hub/api/bots", json=_body(relationship={"affection": 20, "trust": 30, "desire": 50}))
+    assert boom.seen, "relationship.json 根本没写出来就失败了，这条测不到回滚"
+    return r, boom
+
+
+def _assert_internal_oserror(r):
+    assert r.status_code == 500, (r.status_code, r.get_json())
+    body = r.get_json()
+    assert body.get("error") == "internal" and body.get("detail") == "OSError", body
+
+
+def test_14_文件写完后落盘失败_500_没有bot家也没有relationship_json(hub, client, sandbox, telegram, monkeypatch):
+    r, boom = _post_rel_boom(client, telegram, monkeypatch)
+    _assert_internal_oserror(r)
     assert not (sandbox.dsh_home / "bots" / "xiaoyu").exists(), "失败后还留着 bot 家"
     assert _rel_files(sandbox.tmp) == [], "失败后还留着 relationship.json"
+    assert [p for p in boom.seen if os.path.exists(p)] == [], "写出过的 relationship.json 没清掉"
 
 
-def test_15_bot家已有state_落盘中途失败_channel删干净_state原样(hub, sandbox, monkeypatch):
+def test_15_bot家已有state_落盘中途失败_channel删干净_state原样(hub, client, sandbox, telegram, monkeypatch):
     home = sandbox.dsh_home / "bots" / "xiaoyu"
     au.put_file(home / "state" / "keep.txt", "别删我")
     before = u.tree_bytes(home / "state")
-    port = u.free_port()
-    with monkeypatch.context() as mp:
-        grab = _PortGrabber(mp, port)
-        try:
-            r = hub.create(port=port, relationship={"affection": 20, "trust": 30, "desire": 50})
-        finally:
-            grab.close()
-    assert grab.sock is not None, "relationship.json 根本没被写过，端口没机会被抢"
-    assert r.status_code == 409, (r.status_code, r.get_json())
+    r, boom = _post_rel_boom(client, telegram, monkeypatch)
+    _assert_internal_oserror(r)
     assert not (home / "channel").exists(), "channel/ 没删干净"
     assert u.tree_bytes(home / "state") == before, "state/ 被动了"
-    assert _rel_files(sandbox.tmp) == []
+    assert (home / "state" / "keep.txt").read_text(encoding="utf-8") == "别删我"
+    assert _rel_files(sandbox.tmp) == [], "失败后还留着 relationship.json"
+    assert [p for p in boom.seen if os.path.exists(p)] == [], "写出过的 relationship.json 没清掉"
 
 
 def test_16_201响应体键集合与改动前相同(hub):
