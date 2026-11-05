@@ -11,7 +11,7 @@
   <h1>添加 bot</h1>
   <div class="sub">填完点创建：配置与频道目录建在新系统这边，装好开机自启并把它拉起来；建完就能在 bot 状态页看到。</div>
 
-  {# 五组卡片（§14）：①②④⑤ 默认展开，③ 语音是可选项、默认收起。元素与文案只换位置。 #}
+  {# 六组卡片（§14 + rel-init）：语音是可选项、默认收起，其余默认展开。元素与文案只换位置。 #}
   <div class="card">
     <h2>基本信息</h2>
     <label for="bot_id">bot id（小写字母开头，2-32 位小写字母/数字/下划线）</label>
@@ -62,6 +62,22 @@
     <label><input type="checkbox" class="feature" value="groups"> 群聊</label>
     <!-- 成人内容没有勾选框（用户 2026-10-27 定：和 claude 侧统一成八个，nsfw 内容写人设里）。
          features 的 nsfw 键保留在契约里，只为老 bot 的既有配置向后兼容。 -->
+  </div>
+
+  {# 关系初始值（rel-init）：三项必填、不预填；页面没有 <form>，required 拦不住，由脚本 relValues() 拦。
+     精力不让填，后端固定 85。不管「关系进展」勾没勾，建 bot 时都会写 relationship.json。 #}
+  <div class="card" id="rel-box">
+    <h2>关系初始值</h2>
+    <div class="muted" style="margin-bottom:8px">三项都要填，0-100 的整数；精力不用填，固定 85。数值低就是刚认识。</div>
+    <label for="rel_affection">好感</label>
+    <input id="rel_affection" name="rel_affection" type="number" min="0" max="100" step="1"
+           inputmode="numeric" required placeholder="0-100">
+    <label for="rel_trust">信任</label>
+    <input id="rel_trust" name="rel_trust" type="number" min="0" max="100" step="1"
+           inputmode="numeric" required placeholder="0-100">
+    <label for="rel_desire">nsfw</label>
+    <input id="rel_desire" name="rel_desire" type="number" min="0" max="100" step="1"
+           inputmode="numeric" required placeholder="0-100">
   </div>
 
   <div class="card">
@@ -141,7 +157,19 @@ $('test').addEventListener('click', async () => {
                              : stageText(b));
 });
 function num(v) { return /^-?\d+$/.test((v || '').trim()) ? parseInt(v, 10) : v.trim(); }
-function payload() {
+// 关系初始值三个框：[输入框 id, 请求体里的键, 提示里的名字]
+const REL_FIELDS = [['rel_affection', 'affection', '好感'], ['rel_trust', 'trust', '信任'], ['rel_desire', 'desire', 'nsfw']];
+// 逐个检查：留空、不是 0-100 的整数都拦下（浏览器里 type=number 输入 abc 读出来是空串，3.5 读出来是 "3.5"）
+function relValues() {
+  const picked = {};
+  for (const [inputId, statKey, label] of REL_FIELDS) {
+    const raw = ($(inputId).value || '').trim();
+    if (!/^\d{1,3}$/.test(raw) || Number(raw) > 100) return {badInput: $(inputId), message: '关系初始值的「' + label + '」要填 0-100 的整数'};
+    picked[statKey] = Number(raw);
+  }
+  return {stats: picked};
+}
+function payload(relStats) {
   const body = {bot_id: $('bot_id').value.trim(), display_name: $('display_name').value.trim(),
                 telegram_token: $('telegram_token').value,
                 dispatcher_port: num($('dispatcher_port').value), chat_id: num($('chat_id').value)};
@@ -155,6 +183,7 @@ function payload() {
   // 功能开关（约定 5.18.1）：勾了才带 features；一个都没勾就不带，等于九个全关
   const features = Array.from(document.querySelectorAll('input.feature:checked')).map((el) => el.value);
   if (features.length) body.features = features;
+  body.relationship = relStats;          // 三个 JSON 整数，relValues() 已校验过
   return body;
 }
 // 步骤表：后端给的是英文内部名（INTERFACE §13d），显示时换成中文；对照表里没有的原样显示。
@@ -180,10 +209,13 @@ function renderSteps(steps) {
   $('steps').style.display = (steps && steps.length) ? '' : 'none';
 }
 $('create').addEventListener('click', async () => {
+  // 第一步先查关系初始值：不合格就不发请求、不禁用按钮，把光标放回那个框
+  const rel = relValues();
+  if (rel.badInput) { hubSay($('create-msg'), rel.message); rel.badInput.focus(); return; }
   $('create').disabled = true;
   hubSay($('create-msg'), '创建中…（要等它启动完成，最多半分钟）');
   hubSay($('hint'), '');
-  const r = await hubApi('/hub/api/bots', {method: 'POST', body: JSON.stringify(payload())});
+  const r = await hubApi('/hub/api/bots', {method: 'POST', body: JSON.stringify(payload(rel.stats))});
   const b = r.body || {};
   $('create').disabled = false;
   renderSteps(b.steps);

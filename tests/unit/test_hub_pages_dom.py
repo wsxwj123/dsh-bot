@@ -886,6 +886,8 @@ STEPS = [{"name": "validate", "state": "done", "detail": ""},
          {"name": "restart", "state": "skipped", "detail": ""},
          {"name": "future_step", "state": "weird", "detail": "后端以后新加的"},
          {"name": "constructor", "state": "toString", "detail": ""}]
+# rel-init：点创建前三个关系初始值框必须填好，否则页面脚本直接拦下、不发请求
+REL_SETS = [{"op": "set", "id": k, "value": "10"} for k in ("rel_affection", "rel_trust", "rel_desire")]
 
 
 def test_添加bot页_端口一栏的占位符不再是旧系统某只bot的端口(tmp_path):
@@ -895,7 +897,7 @@ def test_添加bot页_端口一栏的占位符不再是旧系统某只bot的端�
 
 def test_添加bot页_创建中的提示_成功后的提示_步骤表显示中文(tmp_path):
     out = _run(tmp_path, ADDBOT, [
-        {"op": "click", "id": "create"}, _snap("creating", "create-msg", "create", "hint"),
+        *REL_SETS, {"op": "click", "id": "create"}, _snap("creating", "create-msg", "create", "hint"),
         _respond(CREATE, 201, {"ok": True, "bot_id": "xiaoyu", "username": "xiaoyu_bot", "steps": STEPS}),
         _snap("done", "create-msg", "create", "hint", "steps"),
     ], auto=[TEMPLATES_OK])
@@ -909,7 +911,7 @@ def test_添加bot页_创建中的提示_成功后的提示_步骤表显示中�
 
 def test_添加bot页_步骤表_内部名换成中文_不认识的原样显示(tmp_path):
     out = _run(tmp_path, ADDBOT, [
-        {"op": "click", "id": "create"},
+        *REL_SETS, {"op": "click", "id": "create"},
         _respond(CREATE, 207, {"ok": True, "bot_id": "xiaoyu", "steps": STEPS,
                                "manual_hint": "launchctl bootstrap …"}),
         _snap("s", "hint", "create-msg"),
