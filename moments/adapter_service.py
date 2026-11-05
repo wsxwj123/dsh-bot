@@ -94,6 +94,7 @@ CAPABILITIES = {
     "bot.groups_discovered": True,
     "bot.features": True,
     "bot.rhythm": True,          # 情绪与节奏（约定 5.24）：消费方已按覆盖生效后才打开（PLAN R15）
+    "bot.create.relationship": True,   # 新建带关系初始值（约定 v1.7）：壳看到它为真才显示三个框、才发这个字段
 }
 DEFAULT_LABEL = "各 bot 配置文件里写的那一组"
 
@@ -182,7 +183,7 @@ CREATE_BUDGET = 55.0
 UNDO_RESERVE = 2 * bot_launchd.LAUNCHCTL_TIMEOUT
 CREATE_KEYS = ("bot_id", "telegram_token", "chat_id", "display_name", "persona_text", "persona_template",
                "fish_voice_id", "fish_api_key", "port", "enabled", "person", "telegram_username",
-               "telegram_user_id", "purpose", "features", "appearance")
+               "telegram_user_id", "purpose", "features", "appearance", "relationship")
 #: 约定 v1.1 5.18.1：外貌去首尾空白后最多这么多个码点；不许出现的几样（注释标记与模板占位括号）
 APPEARANCE_MAX = 500
 APPEARANCE_BANNED = ("<!--", "-->", "{{", "}}")
@@ -2518,8 +2519,14 @@ def _create_fields(body, bots):
                        % APPEARANCE_MAX)
     if appearance and "image" not in wanted:
         raise _invalid("appearance 只在勾了生图（features 里有 image）时才能填")
+    # 关系初始值（rel-init）：与新建页同一个校验函数，400 换成 422 invalid，话不变
+    try:
+        relationship_initial = hub_addbot._relationship_initial(body)
+    except HubError as e:
+        raise _hub_invalid(e) from None
     extra = {"enabled": enabled, "person": person, "telegram_username": username, "telegram_user_id": user_id,
-             "features": [k for k, _label in feature_switch.KEYS if k in wanted], "appearance": appearance}
+             "features": [k for k, _label in feature_switch.KEYS if k in wanted], "appearance": appearance,
+             "relationship": relationship_initial}
     name = hub_addbot._optional(body, "display_name")
     try:
         name = bot_id if name is None else hub_addbot._display_name(name)
