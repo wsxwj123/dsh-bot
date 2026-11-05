@@ -14,7 +14,7 @@ from . import botops_util as u
 from .adapter_util import adapter, console_guard  # noqa: F401  夹具
 
 #: 补充文件第 7 节与 9.1：4.1 表里的八个，加 bot.notify、bot.life_settings，再加 bot.enable、
-#: bot.switch_in、bot.group_chat（v0.6/v0.7），再加 bot.persona、bot.voice（v0.8，补充文件 10.1），再加 bot.skills（v0.9，补充文件 11.1），再加 bot.create、bot.archive、bot.delete、bot.profile（v1.0，补充文件 12.1），再加 bot.token_handoff（补充文件 13.8），再加 bot.groups_discovered（约定 v1.1 5.20）、bot.features（5.19），再加 bot.rhythm（dsh-rhythm INTERFACE），恰好二十四个键
+#: bot.switch_in、bot.group_chat（v0.6/v0.7），再加 bot.persona、bot.voice（v0.8，补充文件 10.1），再加 bot.skills（v0.9，补充文件 11.1），再加 bot.create、bot.archive、bot.delete、bot.profile（v1.0，补充文件 12.1），再加 bot.token_handoff（补充文件 13.8），再加 bot.groups_discovered（约定 v1.1 5.20）、bot.features（5.19），再加 bot.rhythm（dsh-rhythm INTERFACE），再加 bot.create.relationship（rel-init），恰好二十五个键
 CAPABILITIES_TEN = {
     "bot.restart.graceful": True,
     "bot.restart.force": True,
@@ -40,6 +40,7 @@ CAPABILITIES_TEN = {
     "bot.groups_discovered": True,
     "bot.features": True,
     "bot.rhythm": True,
+    "bot.create.relationship": True,
 }
 
 
@@ -54,7 +55,7 @@ def test_meta_固定取值与能力表如约(adapter):
     assert isinstance(caps, dict), "capabilities 应是对象：%r" % (caps,)
     missing = sorted(set(CAPABILITIES_TEN) - set(caps))
     extra = sorted(set(caps) - set(CAPABILITIES_TEN))
-    assert not missing and not extra, "能力清单应恰好是约定的二十一个键：缺 %r，多 %r" % (missing, extra)
+    assert not missing and not extra, "能力清单应恰好是约定的二十五个键：缺 %r，多 %r" % (missing, extra)
     for key, want in CAPABILITIES_TEN.items():
         assert caps[key] is want, "能力 %s 应为布尔 %r，实际 %r" % (key, want, caps[key])
 

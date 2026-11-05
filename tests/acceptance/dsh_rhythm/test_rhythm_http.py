@@ -21,8 +21,9 @@ def test_能力表_多了bot_rhythm且为true_其余项不变(w):
     body = ru.expect_ok(w.call("GET", ru.META))
     caps = ru.capabilities_of(body)
     assert caps.get("bot.rhythm") is True, "能力表里应有 bot.rhythm: true，实际 %r" % (caps,)
-    rest = {k: v for k, v in caps.items() if k != "bot.rhythm"}
-    assert rest == ru.CAPABILITIES_BEFORE, "除 bot.rhythm 外其余能力项应与改动前逐项相同：%r" % (rest,)
+    # rel-init 之后又多了 bot.create.relationship（rel-init 接口第 4 节），一并剔除
+    rest = {k: v for k, v in caps.items() if k not in ("bot.rhythm", "bot.create.relationship")}
+    assert rest == ru.CAPABILITIES_BEFORE, "除 bot.rhythm、bot.create.relationship 外其余能力项应与改动前逐项相同：%r" % (rest,)
 
 
 # ======================================================================== GET：schema 与 global

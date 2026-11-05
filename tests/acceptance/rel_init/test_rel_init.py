@@ -403,7 +403,8 @@ def test_17_meta能力表多bot_create_relationship_其余不变(adapter):
     caps = dict(adapter.ok(adapter.call("GET", au.META)).get("capabilities") or {})
     assert caps.get("bot.create.relationship") is True, caps
     caps.pop("bot.create.relationship")
-    assert caps == au.CAPABILITIES_V11, caps
+    before = {k: v for k, v in au.CAPABILITIES_V11.items() if k != "bot.create.relationship"}
+    assert caps == before, caps
 
 
 def _adapter_body(**over):
