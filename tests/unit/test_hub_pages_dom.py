@@ -904,7 +904,10 @@ def test_添加bot页_创建中的提示_成功后的提示_步骤表显示中�
     assert out["creating"]["els"]["create-msg"]["text"] == "创建中…（要等它启动完成，最多半分钟）"
     assert out["creating"]["els"]["create"]["disabled"] is True
     done = out["done"]["els"]
-    assert done["create-msg"]["text"] == "创建成功：xiaoyu（@xiaoyu_bot）"
+    # 成功提示后面还带一段「persona_summary 是空的，去生活设定页补一句」的提醒（e8ceda5）
+    msg = done["create-msg"]["text"]
+    assert msg.startswith("创建成功：xiaoyu（@xiaoyu_bot）"), msg
+    assert "persona_summary 是空的" in msg and "生活设定" in msg
     assert done["hint"]["text"] == "它已经在跑了，去「bot 状态」页就能看到。"
     assert done["create"]["disabled"] is False and done["steps"]["shown"] is True
 

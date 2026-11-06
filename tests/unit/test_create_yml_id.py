@@ -45,6 +45,9 @@ def test_YAML里有特殊含义的词当名字_读回来仍是这个字符串(wo
 
 def test_其余几个键与顺序不变(tmp_path):
     loaded = yaml.safe_load(_render("xbot", tmp_path))
+    # gateway 是 dfc9c5f 起无条件写的（botlife_db + global_cfg），排在最后
     assert list(loaded) == ["id", "display_name", "bot_channel_path", "chat_id",
-                            "dispatcher_port", "namespace_uuid"]
+                            "dispatcher_port", "namespace_uuid", "gateway"]
+    assert loaded["gateway"] == {"botlife_db": "~/claudebotlife/state.db",
+                                 "global_cfg": "~/claudebotlife/configs/_global.yml"}
     assert (loaded["chat_id"], loaded["dispatcher_port"]) == (123, 17990)

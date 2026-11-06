@@ -267,18 +267,30 @@ def test_botid长度边界合法(bot_id):
     assert ab._validate(fields(bot_id=bot_id))["bot_id"] == bot_id
 
 
-@pytest.mark.parametrize("port", [1023, 65536, 0, -1, "17802", 17802.0, None, True])
+#: 纯数字串（"17802"）2026-10-27 起按整数收，不在这里；17802.0 是 float，仍要挡
+@pytest.mark.parametrize("port", [1023, 65536, 0, -1, "17 802", "１２３", 17802.0, None, True])
 def test_端口不合形状_bad_field(port):
     with pytest.raises(HubError) as e:
         ab._validate(fields(dispatcher_port=port))
     assert e.value.error == "bad_field", port
 
 
-@pytest.mark.parametrize("chat_id", ["123", 12.5, None, [1], True])
+def test_端口纯数字串按整数收(_seams):
+    """形状判定只看写法；具体端口是否被占由 _check_port 另判（这里挑一个不可能在用的）。"""
+    assert ab._validate(fields(dispatcher_port="17991"))["port"] == 17991
+
+
+#: "123" 这种纯数字串 2026-10-27 起按整数收（_int_like：网页输入框读出来天生是字符串），
+#: 所以它不在这一列；真·非整数仍要挡
+@pytest.mark.parametrize("chat_id", [12.5, None, [1], True, "12.5", "１２３"])
 def test_chatid非整数_bad_field(chat_id):
     with pytest.raises(HubError) as e:
         ab._validate(fields(chat_id=chat_id))
     assert e.value.error == "bad_field"
+
+
+def test_chatid纯数字串按整数收():
+    assert ab._validate(fields(chat_id="123"))["chat_id"] == 123
 
 
 def test_人设二选一_都给或都不给都是bad_field(_seams):
@@ -317,9 +329,11 @@ def test_显示名非法_bad_field(name):
     assert e.value.error in ("bad_field", "bad_body")
 
 
-def test_模板列表_目录读不到时空列表不是错误(monkeypatch, tmp_path):
+def test_模板列表_目录读不到时只剩内置模板不是错误(monkeypatch, tmp_path):
+    """目录读不到是正常态：不报错，只剩内置的「基础人设」那一条（PERSONA_TEMPLATE）。"""
     monkeypatch.setenv("HUB_CHANNELS_DIR", str(tmp_path / "gone"))
-    assert ab.templates() == []
+    assert ab.templates() == [{"id": ab.PERSONA_TEMPLATE,
+                               "display_name": ab.PERSONA_TEMPLATE_LABEL}]
 
 
 def _existing_bot(root, bot_id="laoda", port=17801, token_head="123456789"):
@@ -393,8 +407,10 @@ def test_落盘产物清单齐全_权限对_token只在env里(_seams):
     chan = home / "channel"
     yml = _seams / "dsh-configs" / "xiaoyu.yml"
     assert (chan / ".env").read_text(encoding="utf-8").strip() == "TELEGRAM_BOT_TOKEN=" + TOKEN
+    # splitOnParagraph / paragraphDelay 是气泡拆分那批加的（claude 侧 splitOnParagraph 同名同义）
     assert json.loads((chan / "access.json").read_text(encoding="utf-8")) == \
-        {"allowFrom": [123456789]}
+        {"allowFrom": [123456789], "splitOnParagraph": True,
+         "paragraphDelay": ab.DEFAULT_PARAGRAPH_DELAY}
     assert (chan / "CLAUDE.md").read_text(encoding="utf-8") == "正文"
     assert (chan / "memory" / "MEMORY.md").exists()
     # §7：频道树里不带 logs（dsh 的日志在 <bot 家>/logs，由网关与 autostart.ts 负责）
