@@ -65,13 +65,5 @@ class World(ru.World):
 
     # -- 断言 --------------------------------------------------------------
     def expect_private_dir_refused(self, resp):
-        """接口错误契约：500 / internal / 逐字文案 / ok false。返回响应体。"""
-        body = ru.body_of(resp)
-        assert resp.status_code == 500, "应为 500，实际 %s：%r" % (resp.status_code, body)
-        assert body.get("ok") is False, "失败响应必有 ok: false：%r" % (body,)
-        # 接口写的是 error 字段，适配服务现用的错误体叫 code；两者都认，值必须是 internal
-        assert (body.get("code") or body.get("error")) == "internal", \
-            "失败码应为 internal，实际 %r（整包 %r）" % (body.get("code") or body.get("error"), body)
-        assert body.get("message") == LINK_MESSAGE, \
-            "message 应逐字为 %r，实际 %r" % (LINK_MESSAGE, body.get("message"))
-        return body
+        """接口错误契约：500 / code=internal / 逐字文案 / ok false。返回响应体。"""
+        return ru.expect_error(resp, 500, "internal", message=LINK_MESSAGE)
