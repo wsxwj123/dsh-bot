@@ -59,6 +59,8 @@ STALE = "生活设定文件刚被别处改过，这次没有保存，请刷新�
 UNSAFE = "这次改动没能安全写进去，文件没有动"
 BACKUP_FAILED = "备份失败，这次没有保存"
 WRITE_FAILED = "写入失败，文件没有动"
+# 6.4 / 6.5：locks、backups 这些私有目录被换成软链时
+PRIVATE_DIR_UNSAFE = "锁或备份目录不在预期位置（可能是软链），这次没有继续"
 SAVED = "已保存，不用重启，各项在下次用到时生效"
 
 
@@ -832,12 +834,25 @@ def _self_check(old, new_text, changes, rendered):
 # ---------------------------------------------------------------- 写（6.4 到 6.6）
 
 def _private_dir(*parts):
-    """逐层建目录，没有的才建、权限 0700，返回最里层。"""
-    path = parts[0]
+    """逐层建目录，没有的才建、权限 0700，返回最里层。
+
+    第一层（本系统家目录）允许本身是软链，先取真实路径当根；根以下每一层都要求是**真目录、不是软链**，
+    最后再确认真实路径仍在根之内。任何一条不成立抛 ``PRIVATE_DIR_UNSAFE``：不建文件、不写内容。
+    """
+    root = os.path.realpath(parts[0])
+    path = root
     for part in parts[1:]:
         path = os.path.join(path, part)
         with contextlib.suppress(FileExistsError):
             os.mkdir(path, 0o700)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            raise _internal(PRIVATE_DIR_UNSAFE) from None
+        if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+            raise _internal(PRIVATE_DIR_UNSAFE)
+    if not _within(os.path.realpath(path), root):
+        raise _internal(PRIVATE_DIR_UNSAFE)
     return path
 
 
