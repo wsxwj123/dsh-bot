@@ -538,19 +538,9 @@ def _remove_paths(row):
 def _float_literal(value):
     """小数写回 YAML 的字面量：``yaml.safe_load`` 读回必须是同值 float。
 
-    PyYAML 按 YAML 1.1 认浮点：科学计数法必须带小数点、指数必须带正负号。``repr`` 给的 ``5e-05``、
-    ``1e+16`` 会被读成字符串，写后自检必败（500）。这里补成 ``5.0e-05``、``1.0e+16``；其余（``0.1``、
-    ``1.0``）照 ``repr``。不改 ``hub_config._literal``：参数页也在用它。
+    科学计数法的形状由 ``hub_config._literal`` 统一处理（参数页与本模块共用一份，别各写各的）。
     """
-    text = repr(float(value))
-    if "e" in text:
-        mantissa, exponent = text.split("e")
-        if "." not in mantissa:
-            mantissa += ".0"
-        if exponent[:1] not in ("+", "-"):
-            exponent = "+" + exponent
-        text = mantissa + "e" + exponent
-    return text
+    return hub_config._literal(value, "float")
 
 
 def _literal(typed, typ):

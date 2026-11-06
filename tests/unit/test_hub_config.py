@@ -120,6 +120,14 @@ def test_行级编辑_float给整数写成浮点_int不写成浮点():
     assert hc._literal(False, "bool") == "false"
 
 
+@pytest.mark.parametrize("value", [1e-5, 5e-05, 1e-10, 0.0, 0.1, 0.00005, 1e16, 1.5e300, -5e-05])
+def test_行级编辑_小数的字面量经YAML读回仍是同值float(value):
+    """PyYAML 按 YAML 1.1 认浮点：`5e-05` 会被读成字符串，写一次就把配置写坏。"""
+    lit = hc._literal(value, "float")
+    got = yaml.safe_load("k: %s\n" % lit)["k"]
+    assert isinstance(got, float) and got == value, (lit, got)
+
+
 def test_遍历_跳过mergekey不重复报锚点里的键():
     paths = [p for p, _, _ in hc.scalars(hc.compose(SRC))]
     assert "_defaults.retry" in paths
