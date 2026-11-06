@@ -608,6 +608,11 @@ def save(bot, bots, set_values, remove_keys, version):
     changed = list(set_values) + remove
     with ls._write_lock():                                              # 第 11 步
         data, doc, now = _load(path)            # 锁内重读：版本与改写用同一次读到的字节
+        # 锁内复核位置：锁外那次 _locate 之后，父目录或文件本身可能被换掉（换目录软链时
+        # O_NOFOLLOW 挡不住）。必须还是刚打开的那一份：同一路径、同一 (st_dev, st_ino)。
+        again_path, again = _locate(bot, bots)
+        if again_path != path or (again.st_dev, again.st_ino) != (now.st_dev, now.st_ino):
+            raise ls._unsupported(ls.NOT_ALLOWED)
         if version_of(now) != version:                                  # 第 12 步
             raise LifeError(409, "stale", STALE)
         if now.st_nlink != 1:                   # 锁外检查之后被人硬链了：同生活设定，改了会连带别处

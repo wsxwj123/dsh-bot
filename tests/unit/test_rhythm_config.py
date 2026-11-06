@@ -283,3 +283,49 @@ def test_no_exceptions_on_weird_inputs():
                 v = rc.resolve(key, bot, glob)
                 assert isinstance(v, int) and not isinstance(v, bool)
                 assert not (isinstance(v, float) and math.isnan(v))
+
+
+# ---------------------------------------------------------------- 锁内复核位置（life-private-dir）
+
+def test_save_rejects_file_swapped_inside_lock(tmp_path, monkeypatch):
+    """锁外 locate 之后文件被换掉：锁内那次 locate 的 (st_dev, st_ino) 与刚打开的不同 → 501，文件不动。"""
+    from types import SimpleNamespace
+
+    from moments import life_settings as ls
+    from moments import rhythm_settings as rs
+
+    dsh = tmp_path / "dsh"
+    configs = dsh / "configs"
+    life_dir = dsh / "life"
+    legacy = tmp_path / "legacy"
+    for d in (configs, life_dir, legacy):
+        d.mkdir(parents=True)
+    monkeypatch.setenv("DSH_BOT_HOME", str(dsh))
+    monkeypatch.setenv("HUB_CONFIGS_DSH_DIR", str(configs))
+    monkeypatch.setenv("HUB_CONFIGS_DIR", str(legacy))
+    monkeypatch.delenv("DSH_CONSOLE_LIFE_DIR", raising=False)
+    life = life_dir / "testlulu.yml"
+    life.write_text("city: 杭州\n", encoding="utf-8")
+    bot = {"id": "testlulu", "cfg": {"life_config": str(life)}}
+
+    before = life.read_bytes()
+    version = rs.view(bot, [bot])["version"]        # 这一调用也走 _locate，先取版本再打桩
+
+    real_locate = rs._locate
+    calls = {"n": 0}
+
+    def fake_locate(b, bots):
+        calls["n"] += 1
+        path, st = real_locate(b, bots)
+        if calls["n"] == 1:                         # 锁外那次：照常
+            return path, st
+        return path, SimpleNamespace(st_dev=st.st_dev, st_ino=st.st_ino + 1)
+
+    monkeypatch.setattr(rs, "_locate", fake_locate)
+
+    with pytest.raises(ls.LifeError) as excinfo:
+        rs.save(bot, [bot], {KEYS[0]: 7}, [], version)
+    assert excinfo.value.status == 501
+    assert calls["n"] == 2
+    assert life.read_bytes() == before, "被拒了文件却变了"
+    assert not (dsh / "backups").exists(), "被拒了不该建备份"
