@@ -268,7 +268,11 @@ def splice(text, spans):
 
 
 def _literal(value, typ):
-    """写回 YAML 的标量字面量。float 一律走 repr，`5` → `5.0`（§2.3：float 接受 int）。"""
+    """写回 YAML 的标量字面量。float 一律走 repr，`5` → `5.0`（§2.3：float 接受 int）。
+
+    科学计数法要补成 PyYAML 认的形状：它按 YAML 1.1 认浮点，尾数必须带小数点、指数必须带正负号，
+    否则 ``5e-05``、``1e+16`` 读回来是**字符串**（参数页写一次就写坏，之后再读校验不过）。
+    """
     if typ == "bool":
         return "true" if value else "false"
     if typ == "int":
@@ -279,7 +283,15 @@ def _literal(value, typ):
         # 就把 _global.yml 的注释与锚点全展平。json.dumps 的双引号串是 YAML 的
         # 合法子集 —— 引号/换行/emoji 都不用自己转义，也就没有"漏一种转义"的洞。
         return json.dumps(str(value), ensure_ascii=False)
-    return repr(float(value))
+    text = repr(float(value))
+    if "e" in text:
+        mantissa, exponent = text.split("e")
+        if "." not in mantissa:
+            mantissa += ".0"
+        if exponent[:1] not in ("+", "-"):
+            exponent = "+" + exponent
+        text = mantissa + "e" + exponent
+    return text
 
 
 def set_scalar(text, root, key, value, typ):
