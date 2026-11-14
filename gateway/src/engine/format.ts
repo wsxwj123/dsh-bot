@@ -168,6 +168,23 @@ export function formatMemoryHint(items: string[]): string {
   return ['⟦系统：你在别的聊天里新记下了这些事（供参考）：', ...items.map(t => `- ${escapeUserText(t)}`), '⟧'].join('\n')
 }
 
+// ─── 电话记录（voicecall-dsh 方案 ①.5）：挂断后转来、state='held' 的那几条，下一轮拼成一个内容块 ───
+
+export const HELD_CONTEXT_HEAD = '⟦系统：下面是你们打电话的记录，电话挂断后由程序转来，已经发生过，不是对方现在发的消息。记在心里，聊到时自然接上；照常回应后面的新消息。⟧'
+export const HELD_CONTEXT_TAIL = '⟦电话记录结束⟧'
+
+/**
+ * 每条一段：时刻用程序收到这条记录的时间（received_at，约等于挂断时），不说「刚才」，隔几天才交出去也不会说错。
+ * 正文是电话页转写拼好的，照样当用户正文转义（⟦⟧ → 〚〛），伪造不了系统说明。没有行返回 null。
+ */
+export function formatHeldContext(rows: readonly Pick<InboundRow, 'text' | 'received_at'>[], o: FormatOpts): string | null {
+  if (rows.length === 0) return null
+  const out = [HELD_CONTEXT_HEAD]
+  for (const r of rows) out.push(`⟦在 ${clock(r.received_at, o.timeZone)} 你们通过电话⟧`, escapeUserText(r.text))
+  out.push(HELD_CONTEXT_TAIL)
+  return out.join('\n')
+}
+
 // ─── 跨聊天近况（cross-chat-recap）：私聊回合附群聊近况，群回合附与主人的私聊近况 ───
 
 /** 私聊 → 群：私聊回合最多带群里最近 30 句、只看 48 小时内 */

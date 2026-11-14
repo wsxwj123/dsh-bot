@@ -36,7 +36,7 @@ import { loadFeatures, readFeatures, type Features } from '../features'
 import { StickerService } from '../stickers/sticker'
 import {
   buildGroupRecapBlocks, buildRecapText,
-  cleanSummary, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
+  cleanSummary, formatHeldContext, formatLedgerSummaryPrompt, formatMemoryHint, formatMessages, formatSeedParts,
   DM_RECAP_LIMIT, DM_RECAP_WINDOW_MS, GROUP_RECAP_LIMIT, GROUP_RECAP_WINDOW_MS,
   MAX_RECAP_IMAGE_BYTES, MAX_RECAP_IMAGE_SIDE, RECAP_IMAGE_PLACEHOLDER,
   NEW_SEGMENT_HINT, NUDGE_NO_ACTION, NUDGE_RETRY, selectRecapRows, summaryPrompt,
@@ -105,6 +105,10 @@ export const OWNER_COMMANDS = new Set(['clear', 'compact', 'summary', 'model', '
 
 /** 预算小的时候，新段开头的原话最多占预算的这个比例（按一个字一个 token 算，宁可少带） */
 const SEED_RECENT_RATIO = 0.1
+/** 电话记录（state='held'）收下后多久没有一轮就作废（INTERFACE-voicecall-dsh ③.3「过期」） */
+const HELD_TTL_MS = 72 * 3600_000
+/** 一轮最多带几条电话记录，更早的标 dropped */
+const HELD_MAX = 5
 
 type ActiveTurn = {
   turnId: number
@@ -961,6 +965,25 @@ export class Engine {
     return { blocks: res.picks.map(p => ({ imageData: p.data, mimeType: p.mimeType })), pendingMeta }
   }
 
+  /**
+   * 取这个私聊挂着的电话记录（voicecall-dsh 方案 ①.5）：收下超过 72 小时的作废（几天后再把「通过电话」当新鲜事说不对），
+   * 剩下的只留最新 HELD_MAX 条、更早的标 dropped，免得攒多了把一轮提示撑大。返回要交给模型的那几条；它们不进 turns.inbound_ids，
+   * 不参与这一轮的结算与重试，只在首次内容提示成功时单独改 done。
+   */
+  private takeHeld(chatId: string): InboundRow[] {
+    const rows = this.ledger.heldFor(chatId)
+    if (rows.length === 0) return []
+    const cutoff = Date.now() - HELD_TTL_MS
+    const expired = rows.filter(r => r.received_at < cutoff)
+    const fresh = rows.filter(r => r.received_at >= cutoff)
+    const superseded = fresh.slice(0, Math.max(0, fresh.length - HELD_MAX))
+    const keep = fresh.slice(superseded.length)
+    if (expired.length) this.ledger.settleInbound(expired.map(r => r.id), 'dropped', 'call record expired')
+    if (superseded.length) this.ledger.settleInbound(superseded.map(r => r.id), 'dropped', 'superseded by newer call records')
+    this.log.info('call.context', { chat: chatId, rows: keep.length, dropped: expired.length + superseded.length })
+    return keep
+  }
+
   /** 两阶段水位的第二阶段：内容 prompt 成功后统一落盘。逐键处理：一个键写失败不影响另一个，
    *  写失败的水位下轮重新计划（宁可重复，不永久丢）。 */
   private commitPendingMetas(chatId: string, metas: readonly PendingMeta[]): void {
@@ -1303,10 +1326,13 @@ export class Engine {
     const directorTurn = batch.some(r => r.kind === 'synthetic' && safeMeta(r.meta)?.source === 'director')
     const dmRecapText = isGroupChat(chatId) ? (directorTurn ? this.dmRecap(chatId) : null) : null
     if (dmRecapText) life.push(dmRecapText)
+    // 挂断后转来的电话记录（只在私聊）：不管这一轮由什么引起都带上；首次内容提示成功后才改 done，崩溃、报错就留着下一轮再带
+    const held = isGroupChat(chatId) ? [] : this.takeHeld(chatId)
+    const heldText = formatHeldContext(held, { timeZone: this.cfg.gw.timezone })
     // 对方发来的图片：附在消息后面（模型看不了图时，runPrompt 里换成一句说明）
     const images: Block[] = batch.flatMap(r => { const m = rowMedia(r); return m?.kind === 'photo' && m.path ? [{ image: m.path }] : [] })
-    // 群近况的图文块放在 hints/life 之后、新消息之前：图必须紧跟自己那一行，不能全堆在最后
-    let blocks: Block[] = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), ...(groupRecap?.blocks ?? []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone }), ...images, ...sharedImages]
+    // 群近况的图文块放在 hints/life 之后、新消息之前：图必须紧跟自己那一行，不能全堆在最后；电话记录块在 hints/life 之后、群近况之前
+    let blocks: Block[] = [...head, ...hint, ...(commitHints.length || life.length ? [[...commitHints, ...life].join('\n')] : []), ...(heldText ? [heldText] : []), ...(groupRecap?.blocks ?? []), formatMessages(batch, prevTs, { timeZone: this.cfg.gw.timezone }), ...images, ...sharedImages]
     const contentBlocks = blocks // 换段重试时用同样的内容（不带新段的补充说明）
     let kind: TurnKind = 'message'
     let attempt = 0
@@ -1345,6 +1371,7 @@ export class Engine {
         if (!metasCommitted && blocks === contentBlocks) {
           metasCommitted = true
           this.commitPendingMetas(chatId, pendingMetas)
+          if (held.length) this.ledger.settleInbound(held.map(r => r.id), 'done', 'call context shown')
         }
         this.ledger.finishTurn(turn.id, 'ok', { stopReason: outcome.stopReason, usedTokens: outcome.used })
         if (done) { this.ledger.settleInbound(ids, 'done'); return 0 }
