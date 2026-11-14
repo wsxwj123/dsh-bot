@@ -5,7 +5,11 @@ import { mkdirSync, readFileSync } from 'fs'
 import { dirname, join } from 'path'
 
 export type InboundKind = 'user' | 'synthetic' | 'command'
-export type InboundState = 'pending' | 'in_turn' | 'done' | 'dropped' | 'dead'
+/**
+ * held：只当上下文收下、不排队不开轮的合成消息（电话记录，/v1/inject_context）。下一次这个私聊有一轮时由 runBatch 取出拼进提示，
+ * 交出后改 done，过期或被挤掉改 dropped。读 inbound 的查询都按 pending/in_turn 或 kind='user' 筛，天然不选中它（voicecall-dsh 方案 ①.8）。
+ */
+export type InboundState = 'pending' | 'in_turn' | 'held' | 'done' | 'dropped' | 'dead'
 export type TurnKind = 'message' | 'retry' | 'nudge' | 'summary'
 export type TurnState = 'preparing' | 'sent' | 'ok' | 'error' | 'cancelled' | 'crashed' | 'aborted'
 export type SegmentState = 'active' | 'closed' | 'abandoned'
@@ -297,6 +301,10 @@ export class Ledger {
   }
   pendingFor(chatId: string): InboundRow[] {
     return this.db.query<InboundRow, [string]>(`SELECT * FROM inbound WHERE chat_id = ? AND state = 'pending' ORDER BY id`).all(chatId)
+  }
+  /** 这个聊天里还挂着、没交给模型的电话记录（state='held'），按收到顺序 */
+  heldFor(chatId: string): InboundRow[] {
+    return this.db.query<InboundRow, [string]>(`SELECT * FROM inbound WHERE chat_id = ? AND state = 'held' ORDER BY id`).all(chatId)
   }
   chatsWithPending(): string[] {
     return this.db.query<{ chat_id: string }, []>(`SELECT DISTINCT chat_id FROM inbound WHERE state = 'pending'`).all().map(r => r.chat_id)

@@ -6,6 +6,7 @@ import { loadAccess } from '../config'
 import type { Ledger } from '../ledger'
 import { safeError, type Logger } from '../log'
 import { cleanModelId, isProviderName } from '../providers/store'
+import { isGroupChat } from '../telegram/inbound'
 import { allowedFile, describeResults, type Sender } from '../telegram/sender'
 import { randomToken, safeEqual } from '../util'
 
@@ -117,6 +118,7 @@ export class ApiServer {
     try {
       switch (url.pathname) {
         case '/v1/inject': return this.inject(body)
+        case '/v1/inject_context': return this.inject(body, { hold: true })
         case '/v1/send': return await this.send(body)
         case '/v1/model': {
           if (!this.d.model) return json({ error: 'not found' }, 404)
@@ -217,19 +219,34 @@ export class ApiServer {
     return a.allowFrom.includes(chatId) || Object.prototype.hasOwnProperty.call(a.groups, chatId)
   }
 
-  /** 写一条合成消息进账本（主动消息、承诺到期等），由模型在下一轮处理。key 用来防重复投递。 */
-  private inject(b: Record<string, unknown>): Response {
+  /**
+   * 写一条合成消息进账本（主动消息、承诺到期等），由模型在下一轮处理。key 用来防重复投递。
+   * hold（/v1/inject_context，电话记录，voicecall-dsh 方案 ①.5）：只当上下文收下，记成 state='held'，
+   * 不调 onInbound（不排队、不开轮、不取消被晾追问）、不处理 bot_lines；下一次这个私聊有一轮时由 runBatch 拼进提示。
+   * ukey 与 /v1/inject 同一命名（ext:<source>:<key>），同 key 去重跨两个端点也成立。
+   */
+  private inject(b: Record<string, unknown>, o: { hold: boolean } = { hold: false }): Response {
     const chatId = String(b.chat_id ?? '')
     const text = typeof b.text === 'string' ? b.text : ''
     const source = typeof b.source === 'string' && /^[a-z0-9_.-]{1,40}$/i.test(b.source) ? b.source : 'api'
     if (!chatId || !text.trim()) return json({ error: 'chat_id and text are required' }, 400)
+    // 电话记录只进私聊：群号（以 - 开头）不收，群里多一条挂着的记录没人取
+    if (o.hold && isGroupChat(chatId)) return json({ error: 'hold is for private chats only' }, 400)
     if (!this.chatAllowed(chatId)) return json({ error: 'chat not allowed' }, 403)
-    const key = typeof b.key === 'string' && b.key ? b.key.slice(0, 120) : randomToken(12)
+    // 适配服务那边 key 允许到 200 字（INTERFACE ③.3），这里不能截得更短：截短后两个不同的 key 会撞成同一条、后一通电话被当重复丢掉
+    const keyMax = o.hold ? 200 : 120
+    const key = typeof b.key === 'string' && b.key ? b.key.slice(0, keyMax) : randomToken(12)
+    const ukey = `ext:${source}:${key}`
+    if (o.hold) {
+      const r = this.d.ledger.insertInbound({ ukey, chatId, kind: 'synthetic', text, ts: Date.now(), meta: { source }, state: 'held' })
+      this.d.log.info('call.held', { chat: chatId, id: r.id, duplicate: !r.inserted })
+      return json({ ok: true, id: r.id, duplicate: !r.inserted, held: true })
+    }
     // bot 自己说过的话（电话里）：找许诺登记成承诺，登记结果附在这条消息后面告诉模型
     const lines = Array.isArray(b.bot_lines) ? b.bot_lines.filter((x): x is string => typeof x === 'string').slice(0, 200) : []
-    const dup = this.d.ledger.inboundByKey(`ext:${source}:${key}`)
+    const dup = this.d.ledger.inboundByKey(ukey)
     const hints = lines.length && !dup && this.d.callPromises ? this.d.callPromises(chatId, lines) : []
-    const r = this.d.ledger.insertInbound({ ukey: `ext:${source}:${key}`, chatId, kind: 'synthetic', text: hints.length ? `${text}\n${hints.join('\n')}` : text, ts: Date.now(), meta: { source } })
+    const r = this.d.ledger.insertInbound({ ukey, chatId, kind: 'synthetic', text: hints.length ? `${text}\n${hints.join('\n')}` : text, ts: Date.now(), meta: { source } })
     if (r.inserted) this.d.onInbound(chatId)
     return json({ ok: true, id: r.id, duplicate: !r.inserted })
   }
