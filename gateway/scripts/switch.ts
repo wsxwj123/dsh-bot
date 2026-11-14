@@ -107,7 +107,8 @@ function makeReadLedger(cfg: BotConfig): () => LedgerPayload {
       if (!chat) return EMPTY_PAYLOAD
       const seg = db.query('SELECT summary, created_at, closed_at FROM segments WHERE chat_id = ? AND summary IS NOT NULL AND summary <> \'\' ORDER BY id DESC LIMIT 1').get(chat) as { summary: string } | null
       const range = db.query('SELECT MIN(created_at) AS a, MAX(COALESCE(closed_at, last_used_at, created_at)) AS b FROM segments WHERE chat_id = ?').get(chat) as { a: number | null; b: number | null } | null
-      const userRows = db.query('SELECT text, ts FROM inbound WHERE chat_id = ? AND state = \'done\' AND text IS NOT NULL ORDER BY id DESC LIMIT 24').all(chat) as { text: string; ts: number }[]
+      // 只取主人真发的（kind='user'）：程序合成的朋友圈通知、承诺提醒、交出后的电话记录（voicecall-dsh 方案 ①.8）都不是「对方原话」
+      const userRows = db.query('SELECT text, ts FROM inbound WHERE chat_id = ? AND state = \'done\' AND kind = \'user\' AND text IS NOT NULL ORDER BY id DESC LIMIT 24').all(chat) as { text: string; ts: number }[]
       // outbound 没有 ts 列：用发出时刻（sent_at，兜底 created_at）
       const botRows = db.query('SELECT text, COALESCE(sent_at, created_at) AS ts FROM outbound WHERE chat_id = ? AND kind = \'text\' AND state = \'sent\' AND text IS NOT NULL ORDER BY id DESC LIMIT 24').all(chat) as { text: string; ts: number }[]
       const memRows = db.query('SELECT text, at FROM memories WHERE chat_id IS NULL OR chat_id = ? ORDER BY id ASC').all(chat) as { text: string; at: number }[]
