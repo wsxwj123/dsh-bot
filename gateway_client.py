@@ -243,6 +243,31 @@ def inject_result(channel_dir: str, chat_id, text: str, source: str, key: str,
     return _call(channel_dir, "POST", "/v1/inject", body, timeout=timeout)
 
 
+def inject_context_result(channel_dir: str, chat_id, text: str, source: str, key: str,
+                          timeout: float = 10) -> tuple[int, object]:
+    """电话记录（voicecall-dsh 方案 ①.5）：``POST /v1/inject_context``，网关只当上下文收下（state='held'），
+    不开轮、不发消息。请求体形状同 ``inject_result``。
+
+    与 ``inject_result`` 不同，回包不是 JSON 时不抛：返回 ``(状态码, None)``，由适配服务按「认不出的结果」处理；
+    是 JSON 就原样返回解出来的值（可能不是对象）。连不上、超时照样抛给调用方（``net_kind`` 归类）。
+    """
+    st = _state_dir(channel_dir)
+    token = open(os.path.join(st, "api.key"), encoding="utf-8").read().strip()
+    port = int(open(os.path.join(st, "api.port"), encoding="utf-8").read().strip())
+    data = json.dumps({"chat_id": str(chat_id), "source": source, "text": text, "key": key}).encode("utf-8")
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/inject_context", data=data, method="POST",
+                                 headers={"content-type": "application/json", "authorization": f"Bearer {token}"})
+    try:
+        with _OPENER.open(req, timeout=timeout) as r:
+            status, raw = r.status, r.read()
+    except urllib.error.HTTPError as e:
+        status, raw = e.code, e.read()
+    try:
+        return status, json.loads(raw.decode("utf-8"))
+    except ValueError:                      # 不是 JSON、不是 UTF-8（UnicodeDecodeError 是 ValueError 的子类）
+        return status, None
+
+
 # ─── 旧通知里的 Bash 命令 → 新工具的用法 ───
 
 _PY = r'\S*python[\w.]*'
