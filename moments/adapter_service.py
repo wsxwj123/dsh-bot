@@ -11,6 +11,8 @@ v1.0 的新建、归档与恢复、删除、显示名照 ``INTERFACE-适配约�
 新建页、编辑页那几个函数（``hub_addbot``），停 bot 用 9.2 的「停」。
 v1.0 的补充（列表四个键、迁出标记、新建新字段、归档 shell_meta、删除先抹 .env、令牌转交、停着换供应商）照补充文件第 13 节。
 情绪与节奏（约定 5.24，``/bots/<bot_id>/rhythm``）照 ``.devflow/dsh-rhythm-INTERFACE.md``，逻辑在 ``moments/rhythm_settings.py``。
+电话页的私聊尾巴、长期记忆与通话回写（``dm_tail``、``memory``、notify 的 ``voice_call``）照 ``.devflow/INTERFACE-voicecall-dsh.md``，
+读账本与记忆的逻辑在 ``moments/voicecall_context.py``。
 起服务：仓库根执行 ``python3 -m moments.adapter_service``；测试用 ``create_app()``。
 只支持这一种启动方式：监听地址只许回环、令牌文件不在就拒绝启动，这两道检查都在 ``main()`` 里。
 ``flask run`` 等别的方式拉起 ``create_app()`` 会绕过它们（例如对外监听），不要这样起。
@@ -59,7 +61,7 @@ import gateway_client
 from moments import bot_launchd, bots_client, config_sources, hub_addbot, hub_routes, life_settings, redact
 from moments import rhythm_settings
 from moments import features as feature_switch
-from moments import handoff, skill_templates
+from moments import handoff, skill_templates, voicecall_context
 from moments.provider_model import HubError
 
 PREFIX = "/adapter/v1"
@@ -95,6 +97,8 @@ CAPABILITIES = {
     "bot.features": True,
     "bot.rhythm": True,          # 情绪与节奏（约定 5.24）：消费方已按覆盖生效后才打开（PLAN R15）
     "bot.create.relationship": True,   # 新建带关系初始值（约定 v1.7）：壳看到它为真才显示三个框、才发这个字段
+    "bot.voicecall.read": True,        # 电话页读私聊尾巴与长期记忆（INTERFACE-voicecall-dsh ③.1、③.2）
+    "bot.notify.voice_call": True,     # notify 收 voice_call（③.3）：壳看到它为真才发这个来源
 }
 DEFAULT_LABEL = "各 bot 配置文件里写的那一组"
 
@@ -117,12 +121,16 @@ PROVIDER_BUDGET = 55.0
 #: 读拖到最后才回的话，写请求刚发出就到点，只能回「还没确认」。
 READ_SHARE = 0.4
 
-#: 投递通知（补充文件 6.2、9.6）：source 的四种取值、text 按 UTF-8 的字节上限、key 的字符数上限
-NOTIFY_SOURCES = ("user_moment", "moment_reply", "moment_image", "group_turn")
+#: 投递通知（补充文件 6.2、9.6；voice_call 见 INTERFACE-voicecall-dsh ③.3）：source 的取值、text 按 UTF-8 的字节上限、key 的字符数上限
+NOTIFY_SOURCES = ("user_moment", "moment_reply", "moment_image", "group_turn", "voice_call")
+#: 看朋友圈开关的三种来源（功能开关只拦它们与 group_turn；voice_call 不看任何开关）
+MOMENT_SOURCES = ("user_moment", "moment_reply", "moment_image")
 NOTIFY_MAX_TEXT = 16 * 1024
 NOTIFY_MAX_KEY = 200
 #: 网关把 key 截到前 120 个字符再去重（第 8 节），超过的改交摘要
 GATEWAY_KEY_MAX = 120
+#: 网关的 /v1/inject_context 把 key 截到前 200 个字符（UTF-16 码元）
+GATEWAY_CONTEXT_KEY_MAX = 200
 #: 等网关的硬上限：壳只等 10 秒，留出余量
 NOTIFY_TIMEOUT = 8.0
 #: 生活设定 PUT 的请求体上限（约定 5.6：256 KiB），比别的接口的 MAX_BODY 大
@@ -1216,10 +1224,10 @@ def _utf8_size(text):
         return None
 
 
-def _gateway_key(key):
-    """交给网关的去重键。网关（JS）把 key 截到前 120 个 UTF-16 码元再去重，两个前 120 个字相同的长 key
+def _gateway_key(key, limit=GATEWAY_KEY_MAX):
+    """交给网关的去重键。网关（JS）把 key 截到前 120 个 UTF-16 码元再去重（电话记录的入口截到 200），两个前缀相同的长 key
     会被当成同一条漏投；超过的改交摘要，同一个 key 永远得到同一个摘要（补充文件第 8 节）。"""
-    if len(key.encode("utf-16-le")) // 2 <= GATEWAY_KEY_MAX:
+    if len(key.encode("utf-16-le")) // 2 <= limit:
         return key
     return "sha256:" + hashlib.sha256(key.encode("utf-8")).hexdigest()
 
@@ -1233,7 +1241,7 @@ def _notify(bot_id):
     body = _json_object()
     source, text, key = body.get("source"), body.get("text"), body.get("key")
     if not isinstance(source, str) or source not in NOTIFY_SOURCES:
-        raise _invalid("source 只能是 user_moment、moment_reply、moment_image、group_turn 之一")
+        raise _invalid("source 只能是 user_moment、moment_reply、moment_image、group_turn、voice_call 之一")
     size = _utf8_size(text) if isinstance(text, str) else None
     if size is None or not text.strip() or size > NOTIFY_MAX_TEXT:
         raise _invalid("text 要是一段不全是空白的文字，不超过 16 KiB")
@@ -1250,11 +1258,13 @@ def _notify(bot_id):
         raise _invalid("只有 group_turn 才能带 chat_id 和 human_ts")
     bot = _require_bot(bot_id)
     _require_enabled(bot)
+    if source == "voice_call":
+        return _notify_voice_call(bot, text, key)
     # 约定 v1.1 5.19.6：朋友圈、群聊功能关着的，这两类通知都回 409 feature_off，不投
     switch = feature_switch.read(bot["cfg"], bot["channel"])[0]
     if source == "group_turn" and not switch["groups"]:
         raise Refuse(409, "feature_off", "这只 bot 的群聊功能关着，没有投递")
-    if source != "group_turn" and not switch["moments"]:
+    if source in MOMENT_SOURCES and not switch["moments"]:
         raise Refuse(409, "feature_off", "这只 bot 的朋友圈功能关着，没有投递")
     if source == "group_turn":
         if group not in _read_access(bot)[2]:
@@ -1285,6 +1295,107 @@ def _notify(bot_id):
         raise Refuse(500, "internal", "这只 bot 的进程拒收了这条通知：%s不在它的允许名单里"
                      % ("这个群" if source == "group_turn" else "它配置里主人的聊天号"))
     raise RuntimeError("unexpected gateway reply")
+
+
+def _notify_voice_call(bot, text, key):
+    """通话回写（INTERFACE-voicecall-dsh ③.3，方案 ①.5）：已过形状、名单、停用。不看任何功能开关。
+
+    经这只 bot 的网关 ``POST /v1/inject_context`` 只当上下文收下：网关记成 held，不开轮、不发消息，
+    下一次这个私聊有一轮时才交给模型。``text`` 原样转交（不做工具用法改写）。网关的每种回包都有去处：
+    老网关没有这个入口回 404 → 503「旧版本」，不会在版本错位时误开一轮。日志只记 bot 编号与结果。
+    """
+    chat_id = _chat_id(bot["cfg"])
+    if chat_id is None:
+        raise Refuse(500, "internal", "这只 bot 的配置里没有主人的聊天号，投不了")
+    channel = bot["channel"]
+    if not gateway_client.available(channel):
+        raise Refuse(503, "unavailable", "这只 bot 的进程现在连不上，这条通知没有投出去")
+    deadline = time.monotonic() + NOTIFY_TIMEOUT
+    try:
+        code, got = _gateway(lambda t: gateway_client.inject_context_result(
+            channel, chat_id, text, "voice_call", _gateway_key(key, GATEWAY_CONTEXT_KEY_MAX), timeout=t), deadline)
+    except _NoReply:
+        raise Refuse(503, "unavailable", "这只 bot 的进程没有及时回应，这条通知不一定投到了") from None
+    except Refuse as r:                     # 连不上：没投出去
+        raise Refuse(r.status, r.code, "这只 bot 的进程现在连不上，这条通知没有投出去") from None
+    if code == 200 and isinstance(got, dict) and got.get("ok") is True:
+        status = "duplicate" if got.get("duplicate") is True else "delivered"
+        _log.info("notify voice_call: bot=%s result=%s", bot["id"], status)
+        return {"ok": True, "status": status}
+    _log.info("notify voice_call: bot=%s result=gateway-%s", bot["id"], code)
+    if code == 403:
+        raise Refuse(500, "internal", "这只 bot 的进程拒收了这条通知：它配置里主人的聊天号不在它的允许名单里")
+    if code == 404:
+        raise Refuse(503, "unavailable", "这只 bot 的进程是旧版本，收不了电话记录，重启它之后再投")
+    raise Refuse(500, "internal", "这只 bot 的进程回了认不出的结果，这条通知不一定投到了")
+
+
+# ---------------------------------------------------------------- 电话页的两个只读接口（INTERFACE-voicecall-dsh ③.1、③.2）
+
+TAIL_PARAMS = (("n", 10, 1, 50), ("max_hours", 72, 1, 168), ("max_chars", 200, 20, 1000))
+_TAIL_VALUE_RE = re.compile(r"[0-9]{1,6}")
+
+
+def _tail_query():
+    """dm_tail 的三个查询参数：只认 1 到 6 位 ASCII 数字；出现两次及以上、空值、超范围都不合规；按 n → max_hours → max_chars
+    只报第一个；不认识的参数忽略。"""
+    out = {}
+    for name, default, low, high in TAIL_PARAMS:
+        values = request.args.getlist(name)
+        if not values:
+            out[name] = default
+            continue
+        raw = values[0]
+        if len(values) > 1 or _TAIL_VALUE_RE.fullmatch(raw) is None or not low <= int(raw) <= high:
+            raise _invalid("%s 要是 %d 到 %d 的整数" % (name, low, high))
+        out[name] = int(raw)
+    return out
+
+
+def _require_readable(bot):
+    """只读接口的迁出与停用（③.0 第 6 条）：有迁出标记（读不出、格式不对也算）→ 409 moved，优先于停用。"""
+    if _moved_to(bot["id"]) is not None:
+        raise Refuse(409, "moved", "这只 bot 已迁到另一种底层，这边的记录不是最新的，去另一边读")
+    _require_enabled(bot)
+
+
+def _context_refuse(err):
+    return Refuse(err.status, err.code, err.message)
+
+
+def _dm_tail_get(bot_id):
+    """``GET /bots/<bot_id>/dm_tail``：主人私聊的最后几句（③.1）。不经网关，直接只读打开账本。"""
+    query = _tail_query()
+    bot = _require_bot(bot_id)
+    _require_readable(bot)
+    chat_id = _chat_id(bot["cfg"])
+    if chat_id is None:
+        raise Refuse(500, "internal", "这只 bot 的配置里没有主人的聊天号，读不了私聊记录")
+    try:
+        path = voicecall_context.ledger_path(str(config_sources.dsh_home()), bot_id)
+        messages = voicecall_context.read_dm_tail(path, str(chat_id), query["n"], query["max_hours"],
+                                                  query["max_chars"], int(time.time() * 1000))
+    except voicecall_context.ContextError as e:
+        _log.info("dm_tail: bot=%s result=%s", bot_id, e.status)
+        raise _context_refuse(e) from None
+    _log.info("dm_tail: bot=%s result=200 count=%d%s", bot_id, len(messages), " (empty)" if not messages else "")
+    return _json({"ok": True, "messages": messages}, 200, {"Cache-Control": "no-store"})
+
+
+def _memory_get(bot_id):
+    """``GET /bots/<bot_id>/memory``：长期记忆主文件的前 1800 个码点（③.2）。频道目录与人设接口同一道校验。"""
+    bot = _require_bot(bot_id)
+    _require_readable(bot)
+    memory_dir = _channel_file(bot, "memory")
+    try:
+        if memory_dir is None:
+            raise voicecall_context.ContextError(500, "internal", voicecall_context.MEM_OUTSIDE)
+        got = voicecall_context.read_memory_head(memory_dir)
+    except voicecall_context.ContextError as e:
+        _log.info("memory: bot=%s result=%s", bot_id, e.status)
+        raise _context_refuse(e) from None
+    _log.info("memory: bot=%s result=200 exists=%s truncated=%s", bot_id, got["exists"], got["truncated"])
+    return _json(dict({"ok": True}, **got), 200, {"Cache-Control": "no-store"})
 
 
 def _life_refuse(err):
@@ -3387,6 +3498,8 @@ _BOT_ROUTES = {
     "delete": {"POST": _delete},
     "profile": {"GET": _profile_get, "PUT": _profile_put},
     "token_handoff": {"POST": _token_handoff},
+    "dm_tail": {"GET": _dm_tail_get},
+    "memory": {"GET": _memory_get},
 }
 #: ``/bots/<bot_id>/life/<这一段>`` 上的接口（life-refresh-summary）
 _LIFE_SUB_ROUTES = {"POST": _life_refresh_summary}
