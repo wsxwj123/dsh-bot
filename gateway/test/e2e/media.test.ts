@@ -80,14 +80,14 @@ test('语音进：旧 voice-bridge 不认新网关的目录（403）时，临时
   expect(readdirSync(join(shared, 'dsh-bot-voice'))).toEqual([])
 })
 
-test('语音出：和旧系统一样，每段先发文字、再发这段的语音；账本里记文字', async () => {
+test('语音出：各段文字发完后，各段连成一条只合成一次、发一条语音；账本里记文字', async () => {
   const { tg, gw } = await setup({ access: { voiceId: 'test-voice' } })
   tg.pushText(OWNER, '发语音给我 !voice')
-  await until(() => tg.sentTo(OWNER).filter(s => s.method === 'sendVoice').length === 2, 'two voice messages')
+  await until(() => tg.sentTo(OWNER).filter(s => s.method === 'sendVoice').length === 1, 'one voice message')
   const sent = tg.sentTo(OWNER).filter(s => s.method === 'sendVoice' || s.text?.startsWith('语音第'))
-  expect(sent.map(s => s.method)).toEqual(['sendMessage', 'sendVoice', 'sendMessage', 'sendVoice'])
+  expect(sent.map(s => s.method)).toEqual(['sendMessage', 'sendMessage', 'sendVoice'])
   const synth = bridgeCalls.filter(c => c.path === '/synthesize_voice')
-  expect(synth.map(c => c.body.text)).toEqual(['语音第一段', '语音第二段'])
+  expect(synth.map(c => c.body.text)).toEqual(['语音第一段 语音第二段'])
   expect(synth[0]!.body.voice_id).toBe('test-voice')
   expect(synth[0]!.body.emotion).toBe('HAPPY')
   const l = gw.ledger()
@@ -99,9 +99,9 @@ test('语音出：和旧系统一样，每段先发文字、再发这段的语�
 test('语音出：给了朗读稿（voice_text）就读朗读稿，文字照发 text（中文文字配日语语音）', async () => {
   const { tg } = await setup({ access: { voiceId: 'test-voice' } })
   tg.pushText(OWNER, '用日语说 !voicetext')
-  await until(() => tg.sentTo(OWNER).filter(s => s.method === 'sendVoice').length === 2, 'two voice messages')
+  await until(() => tg.sentTo(OWNER).filter(s => s.method === 'sendVoice').length === 1, 'one voice message')
   expect(tg.sentTo(OWNER).filter(s => s.text?.startsWith('中文第')).map(s => s.text)).toEqual(['中文第一段', '中文第二段'])
-  expect(bridgeCalls.filter(c => c.path === '/synthesize_voice').map(c => c.body.text)).toEqual(['にほんご いち', 'にほんご に'])
+  expect(bridgeCalls.filter(c => c.path === '/synthesize_voice').map(c => c.body.text)).toEqual(['にほんご いち にほんご に'])
 })
 
 test('语音出：access.json 没配音色时改发文字，内容不丢', async () => {

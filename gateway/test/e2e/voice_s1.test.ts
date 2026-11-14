@@ -34,13 +34,13 @@ async function setup(voiceModel: string) {
 test('s1：发语音不带情绪与语气提示（情绪按 NEUTRAL、语气提示为空）', async () => {
   const tg = await setup('s1')
   tg.pushText(OWNER, '发语音给我 !voice')
-  await until(() => bodies.length >= 2, 'two synth calls')
+  await until(() => bodies.length >= 1, 'one synth call')
   for (const body of bodies) expect([body.emotion, body.instruct, body.model]).toEqual(['NEUTRAL', '', 's1'])
 })
 
 test('别的模型照旧把情绪带给语音桥', async () => {
   const tg = await setup('drama-3')
   tg.pushText(OWNER, '发语音给我 !voice')
-  await until(() => bodies.length >= 2, 'two synth calls')
+  await until(() => bodies.length >= 1, 'one synth call')
   expect(bodies[0]!.emotion).toBe('HAPPY')
 })
