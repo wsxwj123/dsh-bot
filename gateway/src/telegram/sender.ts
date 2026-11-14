@@ -41,8 +41,8 @@ export type SendRequest = {
   skipFiles?: Set<string>
   /** 发语音：把一段文字合成语音文件，返回路径；合成失败返回 null */
   voice?: (text: string) => Promise<string | null>
-  /** 语音朗读稿，按段对应文字段（第 i 段文字配第 i 段朗读稿）。和旧系统一样：每段先发文字，再发语音；
-   *  没给朗读稿就读文字本身；某段朗读稿是空的，这一段只发文字 */
+  /** 语音朗读稿，按段对应文字段（第 i 段文字配第 i 段朗读稿），没给就读文字本身。本次送达的各文字段的朗读稿
+   *  用一个空格连成一条、只合成一次，在最后一个文字段之后（其后第一个文件段之前）发出；空稿的段不进语音 */
   voiceTexts?: string[]
   /** 日志里显示的聊天标识：缺省就是 chatId（现有行为不变）。跨聊天发送时传脱敏值，
    *  此时不写正文对话行（跨聊天的正文不进当前聊天的 chat.log） */
@@ -190,9 +190,22 @@ export class Sender {
     /** 这一回复第一张可共享的原图（真实路径，且不超过上限） */
     let sharedPhoto: string | null = null
 
+    // 语音：送达的文字段的朗读稿先攒着，到最后一个文字段之后合成一条发（逐段合成语气不连贯）
+    const voiceParts: string[] = []
+    let lastTextI = -1
+    for (let i = 0; i < items.length; i++) if (items[i]!.kind === 'text') lastTextI = i
+    let voiceDone = !req.voice || lastTextI < 0
+    const flushVoice = async () => {
+      voiceDone = true
+      // 网关正在停止、或已被限流（后面的段都不发了）：语音同样不发
+      if (this.halted || stopAfter) return
+      await this.sendVoice(req, lastTextI + 1, voiceParts.join(' '))
+    }
+
     let textIdx = 0
     try {
       for (let i = 0; i < items.length; i++) {
+        if (!voiceDone && i === lastTextI + 1) await flushVoice()
         const item = items[i]!
         const ti = item.kind === 'text' ? textIdx++ : -1
         if (this.halted) {
@@ -248,7 +261,10 @@ export class Sender {
             if (sentTexts.length === 0) firstSentId = m.message_id
             sentTexts.push(item.kind === 'text' ? item.text : fk === 'photo' ? '[图片]' : fk === 'animation' ? '[表情包]' : fk === 'sticker' ? '[贴纸]' : '[文件]')
             lastSentAt = new Date()
-            if (item.kind === 'text' && req.voice) await this.sendVoice(req, i + 1, req.voiceTexts ? (req.voiceTexts[ti] ?? '') : item.text)
+            if (item.kind === 'text' && req.voice) {
+              const spoken = (req.voiceTexts ? (req.voiceTexts[ti] ?? '') : item.text).trim()
+              if (spoken) voiceParts.push(spoken)
+            }
             if (i === 0 && items.length > 1) crashPoint('mid_reply')
             break
           } catch (e) {
@@ -308,6 +324,8 @@ export class Sender {
         }
         if (shrunk) rmSync(shrunk, { force: true })
       }
+      // 最后一个文字段后面没有文件段：语音在全部段之后发
+      if (!voiceDone) await flushVoice()
     } finally {
       // 中途抛异常也把已经发出去的段记上（对方已经看到了）
       if (sentTexts.length) {
@@ -319,7 +337,7 @@ export class Sender {
     return results
   }
 
-  /** 文字段发出后补发语音（文字已经在了，语音失败只记日志，不影响这一段算送达） */
+  /** 文字段发完后补发那一条合并的语音（文字已经在了，语音失败只记日志，不影响文字段算送达）；part 是最后一个文字段的序号 */
   private async sendVoice(req: SendRequest, part: number, text: string): Promise<void> {
     if (!text.trim() || !req.voice) return
     const logChat = req.logChat ?? req.chatId

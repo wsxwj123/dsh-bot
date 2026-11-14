@@ -1,4 +1,4 @@
-// M4 真机问题：停网关时不再发后面的段；同一轮里同一个文件只发一次；语音段先文字后语音
+// M4 真机问题：停网关时不再发后面的段；同一轮里同一个文件只发一次；语音在全部文字之后合成一条
 import { expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -46,11 +46,14 @@ test('这一轮已经发过（或正在发）的文件不再发', async () => {
   r.done()
 })
 
-test('语音：每段先发文字再发语音；朗读稿某段为空就只发文字；合成失败文字照样算送达', async () => {
+test('语音：全部文字段发完后发一条合并的语音；朗读稿某段为空就不进语音；合成失败文字照样算送达', async () => {
   const r = rig()
-  const voice = async (t: string) => (t === '坏' ? null : join(r.dir, `${t}.ogg`))
-  const res = await r.sender.send({ chatId: '1', turnId: null, callSeq: 1, text: '甲\n\n乙\n\n丙', voice, voiceTexts: ['a', '', '坏'] })
+  const voice = async (t: string) => (t.includes('坏') ? null : join(r.dir, `${t}.ogg`))
+  const res = await r.sender.send({ chatId: '1', turnId: null, callSeq: 1, text: '甲\n\n乙\n\n丙', voice, voiceTexts: ['a', '', 'b'] })
   expect(res.map(x => x.state)).toEqual(['sent', 'sent', 'sent'])
-  expect(r.calls).toEqual(['text:甲', 'voice:a.ogg', 'text:乙', 'text:丙'])
+  expect(r.calls).toEqual(['text:甲', 'text:乙', 'text:丙', 'voice:a b.ogg'])
+  const res2 = await r.sender.send({ chatId: '1', turnId: null, callSeq: 2, text: '丁\n\n戊', voice, voiceTexts: ['c', '坏'] })
+  expect(res2.map(x => x.state)).toEqual(['sent', 'sent'])
+  expect(r.calls.slice(4)).toEqual(['text:丁', 'text:戊'])
   r.done()
 })
