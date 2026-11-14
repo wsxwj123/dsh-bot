@@ -45,7 +45,7 @@ def no_secret(resp):
 
 def test_meta_能力清单恰好二十个键_新增四项都为真(adapter):
     caps = adapter.ok(adapter.call("GET", au.META)).get("capabilities")
-    assert caps == au.CAPABILITIES_V11, "能力清单应恰好二十五个键（补充文件 13.8，v1.1 加 bot.groups_discovered、bot.features，再加 bot.rhythm、bot.create.relationship）：%r" % (caps,)
+    assert caps == au.CAPABILITIES_V11, "能力清单应恰好二十七个键（补充文件 13.8，v1.1 加 bot.groups_discovered、bot.features，再加 bot.rhythm、bot.create.relationship、bot.voicecall.read、bot.notify.voice_call）：%r" % (caps,)
 
 
 @pytest.mark.parametrize("port", [None, "free"], ids=["不给端口_自动挑", "指定端口_照写"])

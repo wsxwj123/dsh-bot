@@ -31,6 +31,7 @@ function freePort(): number {
   const s = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
   const p = s.port
   s.stop(true)
+  if (p === undefined) throw new Error('临时端口没拿到')
   return p
 }
 

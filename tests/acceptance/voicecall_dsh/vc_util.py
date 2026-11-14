@@ -44,7 +44,7 @@ GW_KEY = "FAKE-GATEWAY-KEY-voicecall-do-not-leak-44aa55bb"
 BOT = "testlulu"
 OTHER_BOT = "testyao"
 OWNER_CHAT = 1009876543            # 主人私聊编号（假）
-FRIEND_CHAT = 1009876999           # 别的私聊
+FRIEND_CHAT = 5550001777           # 别的私聊（假，取自脱敏扫描白名单）
 GROUP_CHAT = -1001234567890        # 群
 PAST = 1600000000
 

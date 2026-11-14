@@ -261,8 +261,9 @@ def test_meta_v04_能力清单恰好十个键_多了notify与生活设定(adapte
                                     "bot.create": True, "bot.archive": True, "bot.delete": True,
                                     "bot.profile": True, "bot.token_handoff": True,
                                     "bot.groups_discovered": True, "bot.features": True,
-                                    "bot.rhythm": True, "bot.create.relationship": True})
-    assert body.get("capabilities") == want, "能力清单应恰好是二十五个键（补充文件 13.8，v1.1 加 bot.groups_discovered、bot.features，再加 bot.rhythm、bot.create.relationship）：%r" % body.get("capabilities")
+                                    "bot.rhythm": True, "bot.create.relationship": True,
+                                    "bot.voicecall.read": True, "bot.notify.voice_call": True})
+    assert body.get("capabilities") == want, "能力清单应恰好是二十七个键（补充文件 13.8，v1.1 加 bot.groups_discovered、bot.features，再加 bot.rhythm、bot.create.relationship、bot.voicecall.read、bot.notify.voice_call）：%r" % body.get("capabilities")
 
 
 # ============================================================ 敏感信息

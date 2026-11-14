@@ -22,8 +22,12 @@ def test_能力表_多了bot_rhythm且为true_其余项不变(w):
     caps = ru.capabilities_of(body)
     assert caps.get("bot.rhythm") is True, "能力表里应有 bot.rhythm: true，实际 %r" % (caps,)
     # rel-init 之后又多了 bot.create.relationship（rel-init 接口第 4 节），一并剔除
-    rest = {k: v for k, v in caps.items() if k not in ("bot.rhythm", "bot.create.relationship")}
-    assert rest == ru.CAPABILITIES_BEFORE, "除 bot.rhythm、bot.create.relationship 外其余能力项应与改动前逐项相同：%r" % (rest,)
+    # voicecall-dsh 之后又多了 bot.voicecall.read、bot.notify.voice_call（INTERFACE ③.4，都为 true），一并剔除
+    later = ("bot.voicecall.read", "bot.notify.voice_call")
+    for key in later:
+        assert caps.get(key) is True, "能力表里应有 %s: true，实际 %r" % (key, caps)
+    rest = {k: v for k, v in caps.items() if k not in ("bot.rhythm", "bot.create.relationship") + later}
+    assert rest == ru.CAPABILITIES_BEFORE, "除 bot.rhythm、bot.create.relationship、bot.voicecall.read、bot.notify.voice_call 外其余能力项应与改动前逐项相同：%r" % (rest,)
 
 
 # ======================================================================== GET：schema 与 global
