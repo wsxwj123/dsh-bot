@@ -251,3 +251,29 @@ test('提示还没发出网关就崩了：电话记录仍是 held，重启后那
   expect(p.text).toContain(NEEDLE)
   await until(() => heldRows(gw).every(x => x.state === 'done'), '交出后 done')
 }, 60_000)
+
+test('段快到预算、挂着几条长电话记录：换不换段把电话块也算进去，先换段再交给模型（不撞上限）', async () => {
+  const BUDGET = 4000
+  const { tg, b, gw } = setup({ burst_window_ms: 0 })
+  b.brain = { ...b.brain, max_input_tokens: BUDGET }
+  const { writeConfig } = await import('../harness')
+  writeConfig(b)
+  await gw.start()
+  await warm(tg, '第一句')
+  await warm(tg, '第二句')
+  const roll = () => readJsonl<{ event: string; reason?: string; used?: number }>(join(b.botDir, 'logs', 'gateway.log')).filter(e => e.event === 'segment.roll_start')
+  expect(roll()).toEqual([])
+  const l = gw.ledger()
+  const used = l.activeSegment(String(OWNER))!.used_tokens!
+  l.close()
+  // 只按新消息估不会换段（离预算还远），加上三条各 1500 字的电话记录就超了
+  expect(used + 200).toBeLessThan(BUDGET)
+  for (let i = 1; i <= 3; i++) await hold(gw, { text: `第${i}通长电话：` + '嗯'.repeat(1500), key: `voice-call:long${i}` })
+  const before = prompts(b).filter(p => p.text.includes('第二句')).at(-1)!.sessionId
+  await ownerSays(tg, b, '第三句')
+  const p = prompts(b).find(x => x.text.includes('第三句'))!
+  expect(roll().map(e => e.reason)).toEqual(['pre-budget'])
+  expect(p.sessionId).not.toBe(before)                 // 换了新段才交出去
+  expect(p.text).toContain('第3通长电话')
+  await until(() => heldRows(gw).every(x => x.state === 'done'), '交出后 done')
+}, 60_000)

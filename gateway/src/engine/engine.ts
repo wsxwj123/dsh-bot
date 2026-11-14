@@ -1275,8 +1275,10 @@ export class Engine {
     }
     // 新建供应商后马上切过来再发消息：这一轮的供应商还不在运行中的 dsh 里，先补重启（方案 3.2 第 3 条）
     await this.restartForRouteIfNeeded(this.brain.provider).catch(e => this.log.warn('dsh.restart_for_route_failed', { err: safeError(e) }))
-    // 新消息一进来就会超预算：先换段再处理
-    await this.maybeRoll(chatId, batch)
+    // 挂断后转来的电话记录（只在私聊）：不管这一轮由什么引起都带上。在判断换段之前取，好把它一起算进这一轮的大小
+    const held = isGroupChat(chatId) ? [] : this.takeHeld(chatId)
+    // 新消息（连同要带的电话记录）一进来就会超预算：先换段再处理
+    await this.maybeRoll(chatId, [...batch, ...held])
     // 私聊回合先计划群近况（含附图），群图通道再跳过它认领过的行和已读过的图；
     // 两边的水位都只算好、不落盘，由 runBatch 在首次内容 prompt 成功后统一写。
     const recap = !isGroupChat(chatId) && batch.some(r => r.kind === 'user') ? this.planGroupRecap(chatId) : null
@@ -1286,7 +1288,7 @@ export class Engine {
       ...(images.pendingMeta ? [images.pendingMeta] : []),
     ]
     const since = Date.now()
-    const delay = await this.runBatch(chatId, batch, images.blocks, recap, pendingMetas)
+    const delay = await this.runBatch(chatId, batch, images.blocks, recap, pendingMetas, held)
     // 这一轮说了"三点提醒你"却没登记：能换算时间的替它登记，下一轮告诉它；换算不了的下一轮提醒它自己登记
     // 承诺、被晾追问只在私聊里（群里谁说话由导演决定）
     if (!isGroupChat(chatId)) {
@@ -1299,7 +1301,7 @@ export class Engine {
     return delay
   }
 
-  private async runBatch(chatId: string, batch: InboundRow[], sharedImages: Block[] = [], groupRecap: GroupRecapPlan | null = null, pendingMetas: PendingMeta[] = []): Promise<number> {
+  private async runBatch(chatId: string, batch: InboundRow[], sharedImages: Block[] = [], groupRecap: GroupRecapPlan | null = null, pendingMetas: PendingMeta[] = [], held: InboundRow[] = []): Promise<number> {
     const ids = batch.map(b => b.id)
     let seg: SegmentRow
     let seed: string | null
@@ -1326,8 +1328,7 @@ export class Engine {
     const directorTurn = batch.some(r => r.kind === 'synthetic' && safeMeta(r.meta)?.source === 'director')
     const dmRecapText = isGroupChat(chatId) ? (directorTurn ? this.dmRecap(chatId) : null) : null
     if (dmRecapText) life.push(dmRecapText)
-    // 挂断后转来的电话记录（只在私聊）：不管这一轮由什么引起都带上；首次内容提示成功后才改 done，崩溃、报错就留着下一轮再带
-    const held = isGroupChat(chatId) ? [] : this.takeHeld(chatId)
+    // 电话记录（runChat 里已取好）：模型看过之后才改 done，崩溃、提示没发出就留着下一轮再带
     const heldText = formatHeldContext(held, { timeZone: this.cfg.gw.timezone })
     // 对方发来的图片：附在消息后面（模型看不了图时，runPrompt 里换成一句说明）
     const images: Block[] = batch.flatMap(r => { const m = rowMedia(r); return m?.kind === 'photo' && m.path ? [{ image: m.path }] : [] })
