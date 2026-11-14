@@ -164,6 +164,8 @@ _INTERNAL_MARKERS = (
     "<command-args>",
     "<local-command-",
 )
+#: 公开名（voicecall-dsh 方案 ①.3）：别的模块只导入这个，与 ``_INTERNAL_MARKERS`` 是同一个对象，旧调用方不动
+INTERNAL_MARKERS = _INTERNAL_MARKERS
 
 
 def _is_internal_injection(text: str) -> bool:
