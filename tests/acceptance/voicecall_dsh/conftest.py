@@ -21,7 +21,7 @@ def _require_total_gate():
     root = os.path.dirname(tests)
     raise RuntimeError(
         "测试总闸（tests/conftest.py）没有加载，拒绝运行本目录的用例。\n"
-        "请从仓库根启动，例如：cd %s && python3 -m pytest %s" % (root, os.path.relpath(here, root)))
+        "请从仓库根或 tests/ 目录启动，例如：cd %s && python3 -m pytest %s" % (root, os.path.relpath(here, root)))
 
 
 _require_total_gate()
