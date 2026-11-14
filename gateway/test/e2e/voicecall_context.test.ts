@@ -212,3 +212,42 @@ test('不算主人说过话：投 held 前后，被晾追问状态与导演私�
   const l = gw.ledger()
   try { expect(l.db.query(`SELECT COUNT(*) AS n FROM inbound WHERE kind = 'user'`).get()).toEqual({ n: 1 }) } finally { l.close() }
 }, 60_000)
+
+test('那一轮已回复、随后报错收尾：电话块模型已看过，改 done，下一轮不再带', async () => {
+  const { tg, b, gw } = setup()
+  await gw.start()
+  await hold(gw, { text: CALL, key: 'voice-call:failafter' })
+  expect(await ownerSays(tg, b, '回完就出错 !failafter:upstream_broke')).toContain(NEEDLE)
+  await until(() => heldRows(gw).every(x => x.state === 'done'), '报错收尾后也改 done')
+  expect(await ownerSays(tg, b, '下一句')).not.toContain(NEEDLE)
+}, 60_000)
+
+test('第一次内容提示出错、补救提示那次成功：电话块已在会话历史里，改 done，补救与下一轮都不再带', async () => {
+  const { tg, b, gw } = setup()
+  await gw.start()
+  await hold(gw, { text: CALL, key: 'voice-call:retry' })
+  const k = prompts(b).length
+  expect(await ownerSays(tg, b, '先出错一次 !err:1:vr')).toContain(NEEDLE)
+  await until(() => tg.sentTo(OWNER).some(s => s.text === '接着刚才的说'), '补救提示那次回复了')
+  const after = prompts(b).slice(k)
+  expect(after.length).toBe(2)
+  expect(after[1]!.text).not.toContain(NEEDLE)
+  await until(() => heldRows(gw).every(x => x.state === 'done'), '改 done')
+  expect(await ownerSays(tg, b, '再来一句')).not.toContain(NEEDLE)
+}, 60_000)
+
+test('提示还没发出网关就崩了：电话记录仍是 held，重启后那一轮照样带上', async () => {
+  const { tg, b, gw } = setup()
+  await gw.start()
+  await hold(gw, { text: CALL, key: 'voice-call:early-crash' })
+  await gw.stop()
+  await gw.start({ DSH_BOT_CRASH_AT: 'after_inbound' })
+  tg.pushText(OWNER, '崩在发出之前')
+  expect(await gw.waitExit()).not.toBe(0)
+  expect(prompts(b).some(p => p.text.includes('崩在发出之前'))).toBe(false)
+  expect(heldRows(gw).map(x => x.state)).toEqual(['held'])
+  await gw.start()
+  const p = await until(() => prompts(b).find(x => x.text.includes('崩在发出之前')), '重启后那一轮')
+  expect(p.text).toContain(NEEDLE)
+  await until(() => heldRows(gw).every(x => x.state === 'done'), '交出后 done')
+}, 60_000)

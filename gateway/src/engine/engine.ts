@@ -1340,12 +1340,22 @@ export class Engine {
     let nudgedNoAction = false
     let recovered = false
     let metasCommitted = false
+    let heldSettled = false
     const g = this.cfg.gw
 
     for (;;) {
       const turn = this.ledger.startTurn({ chatId, segmentId: seg.id, kind, inboundIds: ids, attempt, rootId })
       rootId ??= turn.id
       let outcome = await this.runPrompt(turn.id, rootId, seg, blocks)
+      // 电话记录：带着它的那次内容提示已经发进 dsh、会话还活着，就算模型看过了（dsh 先把用户消息记进历史，之后无论成败都留着），
+      // 不管这一轮最后是成功、出错、被取消，还是靠补救提示收尾，都改 done，之后的轮不再重复带。
+      // 不算看过、留着下一轮再带的：dsh 崩了或根本没在跑（会话作废，新会话的前情不含它）；上下文超长、历史思考被拒
+      // 且马上要换段重发（下面换段后的那次重发带着同一个块，再按这条规则结算）。
+      const rerolling = outcome.type === 'error' && (outcome.kind === 'context-overflow' || outcome.kind === 'thinking-history') && !recovered
+      if (!heldSettled && held.length && blocks === contentBlocks && outcome.type !== 'crashed' && !rerolling) {
+        heldSettled = true
+        this.ledger.settleInbound(held.map(r => r.id), 'done', 'call context shown')
+      }
       const { delivered, unsent } = this.ledger.chainOutcome(rootId)
       const silent = this.ledger.silentInChain(rootId)
       const done = delivered > 0 || silent
@@ -1371,7 +1381,6 @@ export class Engine {
         if (!metasCommitted && blocks === contentBlocks) {
           metasCommitted = true
           this.commitPendingMetas(chatId, pendingMetas)
-          if (held.length) this.ledger.settleInbound(held.map(r => r.id), 'done', 'call context shown')
         }
         this.ledger.finishTurn(turn.id, 'ok', { stopReason: outcome.stopReason, usedTokens: outcome.used })
         if (done) { this.ledger.settleInbound(ids, 'done'); return 0 }
