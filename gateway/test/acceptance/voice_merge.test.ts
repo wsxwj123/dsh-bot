@@ -82,10 +82,10 @@ test('行为3 朗读稿中间一段为空：合成文本是"甲 丙"（没有连
   expect(r.seq).toEqual(['文:文一', '文:文二', '文:文三', '音'])
 }, T)
 
-test('行为4 朗读稿各段全是空白：不调语音桥、不发语音，3 条文字照常送达', async () => {
+test('行为4 朗读稿整个是空白：等同没给朗读稿，合成文本是三段文字空格相连，3 条文字后恰好 1 条语音，只合成 1 次', async () => {
   const r = await run({ replies: [{ text: '文一\n\n文二\n\n文三', as_voice: true, voice_text: '  \n\n \t \n\n   ' }] })
-  expect(r.synth).toEqual([])
-  expect(r.seq).toEqual(['文:文一', '文:文二', '文:文三'])
+  expect(r.synth).toEqual(['文一 文二 文三'])
+  expect(r.seq).toEqual(['文:文一', '文:文二', '文:文三', '音'])
 }, T)
 
 test('行为5 两段文字+一张末尾图片（无图片标记）：顺序是 文字、文字、语音、图片', async () => {
